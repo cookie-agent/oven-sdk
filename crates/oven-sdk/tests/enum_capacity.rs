@@ -1,25 +1,12 @@
 //! Regression tests for the fixed normalized enum surfaces.
 //!
-//! `ContentPart` currently has eight variants, `StreamPart` has twenty, and
-//! `FinishReason` has ten normalized variants plus `Other`.
+//! `StreamPart` has twenty variants and `FinishReason` has ten normalized
+//! variants plus `Other`.
 //! Their tagged serde representation is intentionally safe in `Vec` history and
 //! stream captures: these tests round-trip the last declared variant in each
 //! largest enum, guarding the discriminant boundary as variants evolve.
 
-use oven_sdk::{ContentPart, FinishReason, StreamPart};
-
-#[test]
-fn content_part_custom_variant_round_trips_in_a_vector() {
-    // ContentPart's current highest declared discriminant is Custom (8 variants).
-    let encoded =
-        r#"[{"type":"custom","value":{"kind":"test.custom","data":null,"metadata":null}}]"#;
-    let values: Vec<ContentPart> =
-        serde_json::from_str(encoded).expect("content parts deserialize");
-    let encoded = serde_json::to_string(&values).expect("content parts serialize");
-    let decoded: Vec<ContentPart> =
-        serde_json::from_str(&encoded).expect("content parts deserialize");
-    assert_eq!(decoded, values);
-}
+use oven_sdk::{FinishReason, StreamPart};
 
 #[test]
 fn stream_part_custom_variant_round_trips_in_a_vector() {

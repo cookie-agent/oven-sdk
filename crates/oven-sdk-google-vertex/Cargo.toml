@@ -1,0 +1,32 @@
+[package]
+name = "oven-sdk-google-vertex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Google Vertex AI Gemini generateContent adapter for oven-sdk"
+repository = "https://github.com/cookie-agent/oven-sdk"
+readme = "README.md"
+keywords = ["google", "vertex", "gemini", "llm", "sdk"]
+categories = ["api-bindings"]
+
+[lib]
+name = "oven_sdk_google_vertex"
+
+[dependencies]
+base64.workspace = true
+bytes.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+httpdate.workspace = true
+oven-sdk = { path = "../oven-sdk", version = "=0.4.0" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+oven-sdk-conformance = { path = "../oven-sdk-conformance", version = "=0.4.0" }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util"] }
+wiremock = "0.6"

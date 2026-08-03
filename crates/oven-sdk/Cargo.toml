@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Runtime-neutral language model SDK"
+repository = "https://github.com/cookie-agent/oven-sdk"
+readme = "README.md"
 
 [lib]
 name = "oven_sdk"
@@ -12,7 +15,11 @@ name = "oven_sdk"
 bitflags.workspace = true
 bytes.workspace = true
 futures-core.workspace = true
+http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+serde_test = "1"

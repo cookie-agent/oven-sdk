@@ -1,668 +1,615 @@
-# oven-sdk Redesign Proposal
-**Status:** design for review before implementation  
-**Repository:** `github.com/cookie-agent/oven-sdk`  
-**Primary crate:** `oven-sdk` (`oven_sdk` in Rust paths)  
-**Initial release target:** `0.1.0`
-## Executive recommendation
-Build `oven-sdk` as a Cargo workspace with a runtime-neutral core, separately published adapters, and a public conformance-test crate.
-Initial packages:
-- `oven-sdk`: core model contract, normalized types, stream lifecycle, errors, cancellation, replay envelope, registry, middleware, builders, and helpers.
-- `oven-sdk-anthropic`: Anthropic Messages.
-- `oven-sdk-openai`: OpenAI Responses, Chat Completions, and configurable OpenAI-compatible Chat profiles.
-- `oven-sdk-conformance`: public dev/test support for adapter authors.
-The SDK owns normalization, translation, adapter transport, typed stream parts, replay codecs, capabilities, structured errors, cancellation, factories, registry, and middleware.
-The calling harness owns persistence, fallback chains, same-entry retries, sticky run state, meaningful-output policy, permissions, approvals, tool execution, and the agent loop.
-This preserves the best current property—durable same-protocol replay in `ARCHITECTURE.md` section 6.2—while removing the duplicated orchestration in `crates/providers/src/lib.rs:389-575` and `crates/engine/src/lib.rs:3001-3209`.
-## Design principles
-1. Rust-first; use enums, newtypes, builders, trait objects, `Future`, and `futures_core::Stream`.
-2. A `LanguageModel` object represents one configured model and wire profile.
-3. Streaming is authoritative; `generate` can collect streaming output.
-4. Exactly one typed `Finish` proves semantic completion.
-5. Adapters report facts and hints; harnesses decide retry/fallback/run failure.
-6. Official adapters perform one provider call and never hide retries.
-7. Native replay is correctness state, not debug metadata.
-8. Foreign replay is explicitly discarded and normalized reconstruction is reported.
-9. Core is runtime-neutral; first-party HTTP adapters may be Tokio-backed.
-10. Telemetry is metadata-only by default.
+# oven-sdk Architecture
 
-## Approved core-contract amendment
+**Status:** core, conformance, and all workspace provider crates are migrated to
+the breaking 0.4.0 contract and compile together. OpenAI Responses and Azure
+OpenAI Responses V1 implement provider-native compaction; provider surfaces
+without a native compaction endpoint explicitly declare it unsupported and
+reject compaction/native-context requests before provider I/O. The exact
+10-crate release matrix is published on crates.io.
 
-The initial core implementation uses the following approved amendment, which
-supersedes any conflicting historical contract-version, replay-schema, or
-replay-envelope text below.
+**Current breaking core release:** `oven-sdk` 0.4.0.
 
-- Contract-version identifiers, replay schema fields, and versioned replay
-  envelopes are not part of the contract. A native replay artifact contains
-  only a stable `AdapterId` and an opaque JSON payload.
-- A provider-native payload that an adapter cannot decode is handled exactly as
-  a provider swap: the adapter discards it, reconstructs from normalized
-  content, and reports `ReplayDisposition::DiscardedInvalidPayload` with a
-  sanitized reason. Foreign adapter artifacts are likewise discarded and
-  reported.
-- Assistant history is represented by `HistoryTurn::Assistant(CompletedTurn)`;
-  therefore a completed turn's `Finish.native_replay` reaches the next
-  `LanguageModel::stream` call. Ordered tool-result history uses
-  `HistoryTurn::Tool`.
-- History uses role-specific system, user, assistant, and tool message unions.
-  Invalid role/content combinations are rejected by both constructors and
-  serde, rather than trusting a generic role string.
-- `NativeReplayArtifact` is bounded to 2 MiB on every construction and serde
-  deserialization path. Its fields are private, access is read-only, and its
-  custom `Debug` implementation redacts the payload.
-- The default `LanguageModel::complete` drain enforces stream block lifecycle
-  by ID, preserves block start order across interleaving, requires one first
-  `StreamStart`, requires each finalized tool-call ID exactly once, requires
-  finalized calls after ended tool-call blocks, and requires the documented
-  `Error`, `Finish(Error)`, EOF sequence for in-band errors.
-- Descriptors expose typed provider, model, and adapter identities. Capability
-  declarations include cancellation and replay semantics in addition to the
-  feature bitset and token limits.
-- `Request::validate_for` centralizes non-empty unique tool-name validation;
-  every `ToolMessage` must immediately follow an assistant turn with a
-  non-empty tool-call set. Assistant-contained `ToolResult` values must pair
-  with that assistant's calls and resolve those IDs; a following `ToolMessage`
-  is required only for remaining unresolved IDs, and result IDs are unique
-  across both locations. It also validates finite sampling,
-  object-or-boolean JSON Schema validation, and capability validation for
-  structured output.
-# A. Crate layout
-## Decision: workspace, not feature-flagged adapters
-```text
-oven-sdk/
-  Cargo.toml
-  crates/oven-sdk/
-  crates/oven-sdk-anthropic/
-  crates/oven-sdk-openai/
-  crates/oven-sdk-conformance/
-  README.md
-  CHANGELOG.md
-  LICENSE
-```
-Separate adapter crates are preferable because Cargo features are additive. A downstream graph can otherwise unify all adapters and unexpectedly pull every HTTP, TLS, SSE, and runtime dependency. Separate publishing also lets adapter fixes move without forcing a core release.
-Keep generic OpenAI-compatible Chat inside `oven-sdk-openai`; it shares the Chat translator, parser, transport, and capability profile. Splitting it would mostly duplicate code.
-Do not publish an `oven-sdk-http` crate initially. Extract shared transport support only after at least three adapters demonstrate a stable common API. Small private duplication is cheaper than stabilizing a premature abstraction.
-Future protocol crates are `oven-sdk-google`, `oven-sdk-google-vertex`, `oven-sdk-bedrock`, `oven-sdk-azure`, and `oven-sdk-cohere`. `anthropic-aws` is not a separate crate: Anthropic models served through AWS use the Bedrock adapter plus an Anthropic model/profile because the wire transport is Bedrock Converse.
-Core dependencies should remain close to:
-```toml
-bitflags = { version = "2", features = ["serde"] }
-bytes = { version = "1", features = ["serde"] }
-event-listener = "5"
-futures-core = "0.3"
-futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
-http = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-url = { version = "2", features = ["serde"] }
-tracing = { version = "0.1", optional = true }
-```
-Core must not depend on Tokio, reqwest, async-trait, OpenSSL, or a vendor SDK. Adapter crates may use reqwest with default features disabled, Rustls, incremental SSE parsing, and Tokio timers.
-# Provider coverage roadmap
-Owner decision: `oven-sdk` targets full Vercel AI SDK **LLM-provider** coverage, organized by wire protocol rather than by vendor count. The tiers below are release scope and quality gates, not marketing labels.
+`ARCHITECTURE.md` is the normative design record. The implementation and this
+document change together. There are no compatibility aliases, old replay
+decoders, dual capability types, migration shims, or deprecated construction
+paths.
 
-## Tier 0.1 — initial release
-Tier 0.1 is unchanged:
+## 1. Scope and ownership
 
-- `oven-sdk-anthropic`: Anthropic Messages.
-- `oven-sdk-openai`: OpenAI Chat Completions, OpenAI Responses, and configurable OpenAI-compatible Chat.
-- `oven-sdk-conformance`: the shared gate for first-party and community adapters/presets.
+`oven-sdk` is a runtime-neutral normalized language-model contract. It owns:
 
-## Tier 2 — distinct protocol adapters
-Each distinct protocol/auth family gets its own adapter crate and must implement the complete applicable conformance matrix, including request translation, streaming lifecycle, structured errors, cancellation, usage, capability claims, and native replay where the protocol requires it.
+- role-safe request/history and completion content;
+- strict normalized streaming and terminal lifecycle;
+- explicit provider/model declarations;
+- capability, limit, modality, and media validation;
+- structured errors and cancellation primitives;
+- bounded, opaque, scope-aware native replay and provider-native context;
+- public conformance helpers.
 
-| Proposed order | Crate | Coverage |
-|---|---|---|
-| 1 | `oven-sdk-google` | Google Gemini `generateContent` / streaming generateContent for Google AI Studio, including the first full Tier 2 audio- and video-input encoding/validation coverage. |
-| 1 | `oven-sdk-google-vertex` | Vertex-hosted Gemini with Vertex resource endpoints and Google Cloud authentication, published separately despite shared Gemini semantics. |
-| 2 | `oven-sdk-bedrock` | Amazon Bedrock Converse/ConverseStream, including SigV4, AWS EventStream, Bedrock model IDs, and protocol-specific errors/replay. |
-| 3 | `oven-sdk-azure` | Azure OpenAI using OpenAI Chat/Responses wire shapes plus Azure endpoint, deployment/API-version, `api-key`, and supported Entra-auth configuration. |
-| 4 | `oven-sdk-cohere` | Cohere v2 Chat and its native message/tool/stream/error model. |
+Provider crates own transport, authentication, protocol encoding/decoding,
+protocol invariants, and one provider call. The calling harness owns
+persistence, retries, fallback, routing, credentials discovery, environment
+lookup, approvals, tool execution, permissions, and the agent loop.
 
-**Proposed implementation priority, pending owner confirmation:** Google family first (`google`, then `google-vertex`), then Bedrock, Azure, and Cohere. No Tier 2 crate is considered shipped until its full applicable conformance tier passes.
+## 2. Registry-free construction decision
 
-`anthropic-aws` maps to `oven-sdk-bedrock` plus an Anthropic model/profile; it is not another adapter crate. The SDK's unit of implementation is the actual wire protocol and authentication/transport family.
+Every provider model has one direct construction path:
 
-## Tier 3 — OpenAI-compatible preset catalog
-Tier 3 expands `oven-sdk-openai` through shipped `CompatibilityProfile` presets, not one crate per vendor. Initial catalog:
-
-- `groq`, `xai`, `deepseek`, `mistral`, `fireworks`, `deepinfra`, `cerebras`;
-- `baseten`, `togetherai`, `perplexity`, `alibaba` (DashScope compatible mode);
-- `bytedance` (Ark), `openrouter`, and `ollama`.
-
-Each preset specifies its base URL template, authentication header shape, conservative capability defaults, request-field differences, error mappings, and known quirks. Examples include DeepSeek reasoning-field replay/omission rules and Groq tool-call/stream behavior. The preset API should remain data-driven, for example `CompatibilityProfile::preset(CompatibleProvider::DeepSeek)`, with typed overrides for endpoint or account-specific differences.
-
-Preset additions are batchable: one release or pull request may add several presets, but each preset is independently gated by at least the OpenAI-compatible conformance baseline and one environment-gated ignored live test. A batch fails if any included preset fails its required tier.
-
-Tier 3 presets are the intended community-contribution path. `oven-sdk-conformance` must make a preset contribution substantially smaller and safer than implementing a new protocol adapter while preventing unsupported capability claims.
-
-## Coverage quality bar
-No adapter crate or compatibility preset ships merely because a request succeeds once. Its declared conformance tier must pass first. Capability claims, replay behavior, error mapping, and stream finalization are part of coverage; a provider logo or base URL alone is not.
-
-# B. Core trait
-## Model-level and object-safe
-Use explicit boxed futures rather than `async_trait`; allocation, lifetimes, dyn compatibility, and `Send` are then visible.
 ```rust
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-pub type ModelStream = Pin<Box<dyn futures_core::Stream<Item = Result<StreamPart, ModelError>> + Send + 'static>>;
-pub trait LanguageModel: Send + Sync {
-    fn identity(&self) -> &ModelIdentity;
-    fn capabilities(&self) -> &ModelCapabilities;
-    fn url_support(&self, media_type: &str, url: &url::Url) -> UrlSupport;
-    fn generate<'a>(&'a self, request: ModelRequest, context: CallContext)
-        -> BoxFuture<'a, Result<GenerateResult, ModelError>>
-    { Box::pin(async move { self.stream(request, context).await?.collect().await }) }
-    fn stream<'a>(&'a self, request: ModelRequest, context: CallContext)
-        -> BoxFuture<'a, Result<StreamResponse, ModelError>>;
-}
+XxxModel::new(ModelConfig<Auth, Settings>) -> Result<XxxModel, ModelError>
 ```
-`stream` is required. Initial official adapters should implement `generate` by collecting `stream`, retaining one translator/parser/replay path. A native non-streaming override is allowed only when conformance proves equivalent content, finish, usage, warnings, errors, and replay.
-## Identity and semver
+
+The selected concrete Rust type determines a structural API surface such as
+Chat, Responses, Gemini `generateContent`, Bedrock Converse, or Azure Responses.
+The model ID is opaque data used only for the provider request, descriptor
+identity, structurally required resource construction, and replay scope.
+
+The SDK has no:
+
+- global or local model registry;
+- provider/model aliases;
+- built-in model families or capability tables;
+- provider presets;
+- automatic endpoint or credential environment lookup;
+- runtime catalog download or dependency;
+- model-name, prefix, suffix, substring, or case-folding inference;
+- automatic probing during ordinary calls.
+
+Applications own maps of configured `Arc<dyn LanguageModel>` values when they
+need names, routing, or aliases.
+
+## 3. models.dev terminology reference
+
+Naming follows useful parts of the public models.dev schema at commit
+`c3057690bbb8bd41cafdefadcd2a7b958e2a4642` without creating a dependency or
+runtime integration.
+
+| models.dev term | Oven term | Rule |
+|---|---|---|
+| Provider `id` | `ProviderId` | Serving provider identity |
+| Provider model `id` | `ModelId` | Exact ID/deployment/resource sent to the provider |
+| Provider + model | `ModelIdentity` | Runtime identity |
+| Provider/model `api` | `ApiEndpoint` | Resolved and explicit |
+| `limit.context/input/output` | `ModelLimits` | Direct numeric declaration |
+| `modalities.input/output` | `Modalities` | Open string values |
+| `tool_call` | `Capability::TOOL_CALLING` | Does not imply parallel calls or deltas |
+| `reasoning` | `Capability::REASONING` | Wire controls remain explicit settings |
+| `structured_output` | `Capability::STRUCTURED_OUTPUT` | Only when the selected adapter supports it |
+| `temperature` | `Capability::TEMPERATURE` | Missing means unsupported |
+| Provider headers | `HeaderOverrides` | Protected-header checks remain adapter-owned |
+| Provider shape | Concrete model type | Chat and Responses are different types |
+| Provider body | Typed adapter settings/options | Never blindly merged |
+| Environment keys | Application concern | Core never reads process environment |
+
+Intentional differences:
+
+- Oven represents one selected provider offering, not a provider containing many
+  models.
+- Runtime identity is the selected serving provider plus exact serving model ID;
+  canonical cross-provider IDs are application metadata.
+- `ApiEndpoint` is explicit even when another SDK package would know a default.
+- Oven has no npm/package selector, environment-key field, pricing, benchmarks,
+  weights, lifecycle dates, or inheritance.
+- Attachment booleans are too coarse; Oven declares modality, MIME type, and
+  source form separately.
+- Provider body data maps through typed settings or namespaced request options.
+
+## 4. Core configuration contract
+
+### 4.1 Identity, endpoint, secrets, and headers
+
 ```rust
 pub struct ModelIdentity {
-    pub provider_id: ProviderId, pub model_id: ModelId, pub adapter_id: AdapterId,
+    pub provider_id: ProviderId,
+    pub model_id: ModelId,
+}
+
+pub struct ApiEndpoint { /* validated Url */ }
+
+impl ApiEndpoint {
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, ModelError>;
+    pub fn as_url(&self) -> &url::Url;
+}
+
+pub struct SecretString(String);
+
+impl SecretString {
+    pub fn new(value: impl Into<String>) -> Self;
+    pub fn expose_secret(&self) -> &str;
+    pub fn is_empty(&self) -> bool;
+}
+
+pub struct HeaderOverrides { /* http::HeaderMap */ }
+
+pub trait HeaderProvider: Send + Sync {
+    fn headers(&self) -> Result<HeaderOverrides, ModelError>;
+}
+
+pub struct HeaderConfig {
+    pub static_headers: HeaderOverrides,
+    pub dynamic_headers: Option<Arc<dyn HeaderProvider>>,
+}
+
+pub struct ProviderConfig<A> {
+    pub id: ProviderId,
+    pub api: ApiEndpoint,
+    pub auth: A,
+    pub headers: HeaderConfig,
 }
 ```
-Crate semver is the sole public contract-era mechanism. In a statically linked Rust program, core and adapter API compatibility is resolved at build time; the separate runtime contract marker used by Vercel's independently deployed npm packages would duplicate semver without adding a distinct recovery path. Breaking normalized-contract changes therefore use ordinary crate semver.
 
-Replay likewise has no SDK-level format number or envelope-era field. The removed trait marker, payload integer, and envelope-era marker did not encode distinct policies: adapter mismatch, declared format mismatch, and payload decode failure all have the same behavior—discard, reconstruct, and report. Successful adapter-private decoding is therefore the compatibility check, and serde errors provide more useful diagnostics than an integer.
-`AdapterId` is a stable string newtype, not a closed enum. Official values:
-- `oven.anthropic.messages`
-- `oven.openai.chat`
-- `oven.openai.responses`
-A compatible endpoint receives a stable caller-selected ID such as `openrouter.chat` or `company.internal-vllm.chat`. Registry aliases never determine replay compatibility.
-## Capabilities
-Keep an explicit bitset plus limits and semantics:
+Identity deserialization rejects empty/control-character values. Endpoint
+validation requires HTTP(S), a host, no userinfo, no query, no fragment, and no
+unresolved `${...}` template. Query-bearing endpoints are rejected outright;
+typed provider/request settings own any protocol-required query parameters.
+Provider adapters may restrict HTTP further to loopback tests.
+
+`SecretString` is cloneable but not serializable. Its `Debug` and `Display` are
+redacted. `ApiEndpoint` debug output is fully redacted. `ProviderConfig` and
+`ModelConfig` debug output redact the endpoint, authentication, and typed settings
+values; header debug output contains names only and never values. Header wrappers
+are not serializable. Dynamic headers are caller-managed and resolved without
+core environment access.
+
+### 4.2 Limits, modalities, and media
+
 ```rust
+pub struct ModelLimits {
+    pub context: Option<u64>,
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+}
+
+#[serde(transparent)]
+pub struct Modality(String);
+
+pub struct Modalities {
+    pub input: BTreeSet<Modality>,
+    pub output: BTreeSet<Modality>,
+}
+
 bitflags! {
-    pub struct CapabilitySet: u128 {
-        const TOOL_CALLING = 1 << 0; const PARALLEL_TOOLS = 1 << 1;
-        const TOOL_INPUT_DELTAS = 1 << 2; const REASONING = 1 << 3;
-        const REASONING_REPLAY = 1 << 4; const IMAGE_INPUT = 1 << 5;
-        const DOCUMENT_INPUT = 1 << 6; const AUDIO_INPUT = 1 << 7;
-        const VIDEO_INPUT = 1 << 8; const STRUCTURED_OUTPUT = 1 << 9;
-        const PROMPT_CACHING = 1 << 10; const USAGE = 1 << 11;
-        const PROVIDER_TOOLS = 1 << 12; const SOURCES = 1 << 13;
-        const FILE_OUTPUT = 1 << 14; const NATIVE_REPLAY = 1 << 15;
+    pub struct MediaSourceSupport: u8 {
+        const INLINE_BYTES;
+        const INLINE_TEXT;
+        const URL;
+        const PROVIDER_REFERENCE;
     }
 }
-pub struct ModelCapabilities {
-    pub features: CapabilitySet, pub context_tokens: Option<u64>,
-    pub max_output_tokens: Option<u64>, pub cancellation: CancellationCapability,
-    pub replay: ReplayCapability,
+
+pub struct MediaInputSupport {
+    pub media_types: Vec<String>,
+    pub sources: MediaSourceSupport,
 }
-pub enum ReplayCapability { None, Optional, Required }
-pub enum CancellationCapability { LocalOnly, RemoteBestEffort, Unsupported }
+
+pub struct MediaCapabilities {
+    pub input: BTreeMap<Modality, MediaInputSupport>,
+}
 ```
-Capabilities belong to the configured model/profile, not a protocol or vendor globally. This is especially important for `AUDIO_INPUT` and `VIDEO_INPUT`: support varies by model and profile even when the wire format can represent the media. Unknown model IDs use conservative defaults.
-Do not probe each call. Compatible adapters may expose an explicit probe that returns a serializable `CompatibilityProfile`; callers decide when to run and cache it. An unprobed endpoint claims only baseline Chat text, tool echo/result pairing, basic SSE, and ordinary 429/5xx handling.
-## Supported URLs equivalent
+
+`Modality` is open. Standard constructors are `text`, `image`, `audio`, `video`,
+and `pdf`; future strings do not require a core release. A model declaration has
+at least one input and output modality. Media rules use exact MIME values or a
+single trailing wildcard such as `image/*`, and each rule declares at least one
+source form.
+
+The caller declaration can narrow protocol support but cannot expand immutable
+adapter facts such as accepted MIME types, byte/count limits, URL restrictions,
+signing rules, or schema subsets.
+
+### 4.3 Features, replay, and complete declarations
+
 ```rust
-pub enum UrlSupport { Native, DownloadRequired, UploadRequired, Unsupported }
+bitflags! {
+    pub struct Capability: u128 {
+        const TOOL_CALLING;
+        const PARALLEL_TOOLS;
+        const TOOL_INPUT_DELTAS;
+        const REASONING;
+        const STRUCTURED_OUTPUT;
+        const TEMPERATURE;
+        const TOP_P;
+        const MAX_OUTPUT_TOKENS;
+        const PROMPT_CACHING;
+        const USAGE;
+        const PROVIDER_TOOLS;
+        const SOURCES;
+    }
+}
+
+pub struct ReplayDeclaration {
+    pub policy: ReplayPolicy,
+    pub capability: ReplayCapability,
+    pub reasoning: bool,
+}
+
+pub struct ModelCapabilities {
+    pub features: Capability,
+    pub limits: ModelLimits,
+    pub modalities: Modalities,
+    pub media: MediaCapabilities,
+    pub cancellation: CancellationCapability,
+    pub compaction: CompactionCapability,
+    pub replay: ReplayDeclaration,
+}
+
+pub struct ModelDeclaration {
+    pub id: ModelId,
+    pub capabilities: ModelCapabilities,
+}
+
+pub struct ModelConfig<A, S> {
+    pub provider: ProviderConfig<A>,
+    pub model: ModelDeclaration,
+    pub settings: S,
+}
 ```
-The SDK reports whether a provider can consume a URL directly. It does not automatically fetch arbitrary URLs; the host owns SSRF, MIME, credential, and size policy.
-# C. Content and message model
-Use a coding-agent-first union that is richer than today's text/image/PDF model but smaller than Vercel's full cross-product.
+
+There is no `ProviderCapabilities`. Model support belongs to one configured
+provider offering. `ModelCapabilities::conservative()` is explicit text-only,
+unknown-limit, no-feature, no-compaction, no-replay data; configuration types do not use
+implicit model-name defaults.
+
+Dependency validation includes:
+
+- parallel tools and tool-input deltas require tool calling;
+- reasoning replay requires reasoning and native replay support;
+- media rules require their input modality;
+- known nonzero input/output limits cannot exceed a known context limit.
+
+The valid `ReplayPolicy` × `ReplayCapability` combinations are exactly:
+
+- `Never` × `Unsupported`;
+- `IfValid` × `Optional`;
+- `IfValid` × `Required`;
+- `Always` × `Required`.
+
+Every other combination is invalid. `Never` × `Unsupported` performs no replay
+inspection and captures no terminal artifact. `Optional` permits no terminal
+artifact, but any artifact that is present must match the exact adapter and
+`NativeContextScope`. `Required` requires a terminal artifact with the exact adapter and
+scope.
+
+## 5. Descriptor and model trait
+
+```rust
+pub struct LanguageModelDescriptor {
+    pub identity: ModelIdentity,
+    pub adapter_id: AdapterId,
+    pub capabilities: ModelCapabilities,
+    pub provider_metadata: ProviderMetadata,
+}
+
+pub trait LanguageModel: Send + Sync {
+    fn descriptor(&self) -> LanguageModelDescriptor;
+
+    fn capabilities(&self) -> ModelCapabilities {
+        self.descriptor().capabilities
+    }
+
+    fn validate_request(&self, request: &Request) -> Result<(), ModelError>;
+    fn supports_request(&self, request: &Request) -> bool;
+    fn validate_compaction(&self, request: &CompactionRequest) -> Result<(), ModelError>;
+    fn supports_compaction(&self, request: &CompactionRequest) -> bool;
+    fn stream<'a>(
+        &'a self,
+        request: Request,
+        abort: AbortSignal,
+    ) -> BoxFuture<'a, Result<StreamResponse, ModelError>>;
+    fn complete<'a>(
+        &'a self,
+        request: Request,
+        abort: AbortSignal,
+    ) -> BoxFuture<'a, Result<CompleteResult, ModelError>>;
+    fn compact<'a>(
+        &'a self,
+        request: CompactionRequest,
+        abort: AbortSignal,
+    ) -> BoxFuture<'a, Result<CompactionResult, ModelError>>;
+}
+```
+
+Validation and support methods have object-safe core defaults. `compact` has an
+object-safe default that rejects unsupported declarations before provider I/O;
+an adapter claiming native compaction must override it with one provider call.
+
+The removed `supported_urls` method is represented by per-modality source rules.
+Provider metadata is safe, complete descriptor metadata only; it never contains
+secrets, arbitrary headers, request bodies, or replay payloads.
+
+## 6. Request validation
+
+`Request::validate_for(&ModelCapabilities)` is the common pre-network gate. It
+validates:
+
+- non-empty unique tool names and named/required tool-choice dependencies;
+- complete assistant/tool-result pairing and unique IDs;
+- tool requests and tool history against `TOOL_CALLING`;
+- structured output against `STRUCTURED_OUTPUT`;
+- finite/ranged temperature and top-p plus their explicit feature declarations;
+- positive requested output tokens, feature support, and declared output limit;
+- reasoning controls/history against `REASONING`;
+- declared text output for the normalized LLM request contract;
+- every file in user, assistant, and tool-result content;
+- modality, MIME pattern, and source-form support;
+- model capability/replay dependency consistency.
+- native context only when `CompactionCapability::Native` is declared;
+- compaction only when native compaction is declared, followed by the complete
+  ordinary request validation matrix.
+
+Adapters call this validation and then enforce their typed settings and immutable
+protocol restrictions. No validation branch may inspect the model ID to select
+behavior.
+
+## 7. Role-safe content and tool approval
+
+History is role-specific:
+
 ```rust
 pub enum HistoryTurn {
-    System(SystemMessage), User(UserMessage), Assistant(CompletedTurn), Tool(ToolMessage),
-}
-pub struct SystemMessage { pub content: Vec<SystemPart> }
-pub struct UserMessage { pub content: Vec<InputPart> }
-pub struct AssistantMessage { pub content: Vec<AssistantPart> }
-pub struct ToolMessage { pub results: Vec<ToolResult> }
-pub enum AssistantPart {
-    Text(TextPart), Reasoning(ReasoningPart), ToolCall(ToolCall), ToolResult(ToolResult),
-    File(FilePart), Source(SourcePart), Custom(CustomPart),
+    System(SystemMessage),
+    User(UserMessage),
+    Assistant(Box<CompletedTurn>),
+    Tool(ToolMessage),
 }
 ```
-Role-specific unions prevent obviously invalid combinations: system supports text/custom, user supports text/file/custom, and tool messages carry results.
-`ReasoningPart` is visible normalized reasoning/summary. Signed Anthropic thinking, OpenAI encrypted reasoning, redacted blocks, and unknown continuation fields remain authoritative only in native replay.
-Keep one generic MIME-typed file abstraction for images, documents, audio, video, and future media. Do not add `AudioPart` or `VideoPart` variants:
-```rust
-pub struct FilePart {
-    pub media_type: String, pub filename: Option<String>,
-    pub source: FileSource, pub metadata: PartMetadata,
-}
-pub enum FileSource {
-    Bytes(bytes::Bytes), Text(String), Url(url::Url),
-    ProviderReference { provider: ProviderId, id: String },
-}
-impl FilePart {
-    pub fn new(media_type: impl Into<String>, source: FileSource) -> Self { Self { media_type: media_type.into(), filename: None, source, metadata: Default::default() } }
-    pub fn audio(media_type: impl Into<String>, source: FileSource) -> Self { Self::new(media_type, source) }
-    pub fn video(media_type: impl Into<String>, source: FileSource) -> Self { Self::new(media_type, source) }
-    pub fn image(media_type: impl Into<String>, source: FileSource) -> Self { Self::new(media_type, source) }
-    pub fn document(media_type: impl Into<String>, source: FileSource) -> Self { Self::new(media_type, source) }
-}
-```
-These are ergonomic constructors, not semantic union variants; all four produce the same `FilePart`. A generic file is the simpler forward-compatible choice: even with `#[non_exhaustive]` outer enums, adding one variant per modality proliferates downstream branches and predicts future media poorly. MIME type plus `FileSource` lets new modalities flow through existing input unions without growing them; reserve new union variants for genuinely different semantics, not media subtypes.
 
-Each adapter maintains media-type/source support tables per wire profile and model profile. Request encoding validates every `FilePart` against both the model capability flags and that table before network I/O. Unsupported MIME types, source forms, or model/media combinations return `ModelError { category: ErrorCategory::Unsupported, stage: ErrorStage::RequestEncoding, .. }`; adapters never silently drop media and never delegate predictable validation to a provider 400.
+The generic `Role`, `Turn`, and `ContentPart` bridge types are deleted. Serde and
+constructors cannot create invalid role/content combinations.
 
-Current adapter-tier guidance, not core policy: Gemini profiles lead with audio and video support; OpenAI profiles advertise audio only for models/endpoints that actually accept it; Anthropic profiles advertise neither audio nor video. The tables, not protocol-wide assumptions, are authoritative.
+`StreamPart::ApprovalRequested` remains assistant completion output. The strict
+collector preserves it as `AssistantPart::ToolApproval`. The calling harness
+still owns approval policy and tool execution.
 
-`SourcePart` is output citation/provenance: optional ID, URL, title, media type, excerpt, and metadata. It is not a retriever abstraction.
-`CustomPart { kind, data, metadata }` uses a namespaced kind such as `openai.refusal`. It is an inspectable normalized extension, not a replay substitute or unbounded body dump.
-Tool IDs must remain distinct:
+## 8. Stream and error lifecycle
+
+Streaming remains authoritative. A successful semantic stream:
+
+1. starts with exactly one `StreamStart`;
+2. maintains ID-scoped text/reasoning/tool-call block lifecycle;
+3. emits finalized tool calls exactly once after ended streamed blocks;
+4. emits exactly one final `Finish`;
+5. emits nothing after `Finish`.
+
+EOF before `Finish` is `UnexpectedEof`. An in-band provider error is `Error`,
+then `Finish(Error)`, then EOF. Fatal transport/parser/invariant errors are
+stream `Err(ModelError)` without a synthetic finish. `LanguageModel::complete`
+is the strict collector and preserves ordered content, warnings, request
+metadata, response head, usage, and replay artifact.
+
+`ModelError` remains structured factual data. Retry/fallback classification is
+harness policy. `AbortSignal` remains runtime-neutral and proves only local
+cancellation unless a declaration says `RemoteBestEffort`.
+
+## 9. Scope-aware native replay and compaction
+
 ```rust
-pub struct ToolCall {
-    pub id: ToolCallId, pub provider_item_id: Option<String>, pub name: String,
-    pub input: Value, pub raw_input: Option<String>,
-    pub execution: ToolExecution, pub metadata: PartMetadata,
+pub struct ResourceId(String);
+
+pub struct NativeContextScope {
+    pub provider_id: ProviderId,
+    pub model_id: ModelId,
+    pub resource_id: ResourceId,
 }
-```
-Adapters concatenate raw argument fragments by native block/item index, parse once at completion, and emit a finalized `ToolCall`. Malformed final JSON is a model/protocol failure. `raw_input` preserves the exact assembled argument string when needed.
-`ToolResultOutput` supports text, JSON, mixed text/files, and denied execution. Keep `is_error` explicit. The SDK represents denials for model visibility but never makes permission decisions.
-Use `ProviderOptions = BTreeMap<String, Value>` keyed by adapter/provider namespace at request, message, and part level through `PartMetadata`. Official adapter crates should add typed option builders over this escape hatch.
-```rust
-pub struct ModelRequest {
-    pub history: Vec<HistoryTurn>, pub tools: Vec<ToolDefinition>, pub tool_choice: ToolChoice,
-    pub response_format: ResponseFormat, pub inference: InferenceOptions,
-    pub provider_options: ProviderOptions,
-}
-```
-The request has no model ID because the model object owns it.
-# D. StreamPart and lifecycle
-```rust
-#[non_exhaustive]
-pub enum StreamPart {
-    StreamStart { warnings: Vec<Warning> }, ResponseMetadata(ResponseMetadata),
-    TextStart { id: BlockId, metadata: PartMetadata },
-    TextDelta { id: BlockId, delta: String, metadata: PartMetadata },
-    TextEnd { id: BlockId, metadata: PartMetadata },
-    ReasoningStart { id: BlockId, metadata: PartMetadata },
-    ReasoningDelta { id: BlockId, delta: String, metadata: PartMetadata },
-    ReasoningEnd { id: BlockId, metadata: PartMetadata },
-    ToolInputStart { block_id: BlockId, call_id: ToolCallId,
-        provider_item_id: Option<String>, tool_name: String,
-        execution: ToolExecution, metadata: PartMetadata },
-    ToolInputDelta { block_id: BlockId, delta: String },
-    ToolInputEnd { block_id: BlockId },
-    ToolCall { block_id: BlockId, call: ToolCall }, ToolResult { result: ToolResult },
-    File { file: FilePart }, Source { source: SourcePart }, Custom { part: CustomPart },
-    Usage { usage: Usage, kind: UsageUpdateKind }, Error { error: ModelError },
-    Abort { origin: AbortOrigin, reason: Option<String> }, Finish(FinishPart),
-    Raw { value: serde_json::Value },
-}
-```
-Text, reasoning, and tool-input IDs are mandatory. If the provider has no stable ID, the adapter generates a deterministic per-call ID. `provider_item_id` remains distinct from semantic `call_id`.
-`ToolInputStart/Delta/End` expose argument streaming; `ToolCall` is the finalized parsed call. This moves argument assembly out of cookie-agent's engine.
-Each stream accepts a tool-result ID at most once. A result referencing no
-normalized in-stream `ToolCall` is retained because provider-executed hosted
-tools may not expose a caller-visible call; collection records a non-fatal
-warning on the resulting `CompletedTurn` instead of rejecting it.
-`Raw` is opt-in and never automatically copied into replay.
-```rust
-pub struct FinishPart {
-    pub reason: FinishReason, pub usage: Usage, pub response: ResponseMetadata,
-    pub provider_metadata: ProviderMetadata, pub native_replay: Option<NativeReplayArtifact>,
-}
-pub enum FinishReason {
-    Stop, ToolCalls, Length, ContentFilter, Cancelled, Error, Other { raw: Option<String> },
-}
-```
-Lifecycle rules are normative:
-1. A semantically completed stream emits exactly one `Finish` as its final successful item.
-2. EOF before `Finish` is `UnexpectedEof`, never success.
-3. No part follows `Finish`.
-4. An in-band provider error after HTTP 200 emits `Error`, then `Finish(Error)`, then EOF.
-5. A provider-originated abort emits `Abort`, then `Finish(Cancelled)`, then EOF.
-6. Fatal transport, decode, parser, or invariant failures are stream `Err(ModelError)` and end without synthetic `Finish`.
-7. Dropping a stream emits nothing; no consumer remains.
-8. `collect()` rejects missing/duplicate finish, unclosed blocks, malformed calls, and terminal in-band errors.
-This intentionally combines error-as-data and `Result`: in-band errors preserve provider semantics; stream `Err` means trustworthy normalized continuation is impossible; `Finish` proves semantic terminal state.
-```rust
-pub struct StreamResponse { pub stream: ModelStream, pub request: RequestMetadata, pub response: ResponseHead }
-pub struct GenerateResult { pub turn: CompletedTurn, pub warnings: Vec<Warning>, pub request: RequestMetadata, pub response: ResponseMetadata }
-pub struct CompletedTurn {
-    pub message: AssistantMessage, pub finish_reason: FinishReason, pub usage: Usage,
-    pub response: ResponseMetadata, pub native_replay: Option<NativeReplayArtifact>,
-}
-```
-Usage contains optional input total/non-cache/cache-read/cache-write and output total/text/reasoning fields plus optional raw usage. Never add component subsets to inclusive totals. Final `Finish.usage` is authoritative; interim usage declares partial versus cumulative.
-# E. ModelError and classification seam
-Replace orchestration classes with structured facts:
-```rust
-#[derive(Debug, thiserror::Error)]
-#[error("{category:?} error from {provider_id}/{model_id}: {message}")]
-pub struct ModelError {
-    pub category: ErrorCategory, pub message: String,
-    pub provider_id: ProviderId, pub model_id: ModelId, pub adapter_id: AdapterId,
-    pub vendor_code: Option<String>, pub http_status: Option<u16>,
-    pub retry_after: Option<Duration>, pub request_id: Option<String>,
-    pub sanitized_body: Option<SanitizedBody>, pub stage: ErrorStage,
-    pub diagnostics: ErrorDiagnostics, pub retry_hint: RetryHint,
-}
-pub struct ErrorDiagnostics {
-    pub bytes_received: u64, pub stream_parts_emitted: u64, pub elapsed: Option<Duration>,
-}
-```
-`ErrorStage`: request validation/encoding, connect, response headers, stream read/decode/event/finalize, replay encode/decode, and middleware.
-`ErrorCategory`: authentication, authorization, invalid request, model not found, context length, rate limit, quota, overload, timeout, transport, protocol, invalid tool input, content filter, cancelled, unsupported, replay, provider, and unknown.
-`RetryHint`: `Retryable`, `NotRetryable`, `After(Duration)`, or `Unknown`. It is advisory and never decides chain behavior.
-Adapters classify from `(status, vendor code/type, body text, in-stream event, retry-after headers)`, not status alone. Sanitized bodies are capped at 64 KiB and marked when truncated. Display/tracing omit credentials, request bodies, replay payloads, and unsanitized headers.
-`request_id`, `stage`, and `bytes_received` are required diagnostic targets. A long Responses failure must identify read/decode phase and byte count instead of only saying `error decoding response body`.
-Cookie-agent retains:
-```rust
-pub enum AttemptDisposition { RetrySameEntry, AdvanceEntry, FailRun }
-pub trait ModelErrorClassifier { fn classify(&self, error: &ModelError) -> AttemptDisposition; }
-```
-Preserve policy ordering:
-1. Cancellation and context overflow -> fail run.
-2. Known `model_not_found`, `invalid_model`, and model-does-not-exist codes -> advance, even with 5xx.
-3. Model-not-found/auth/invalid-request/quota -> advance.
-4. Rate-limit/overload/timeout/transport/ordinary 5xx -> retry same entry.
-5. Otherwise consult the hint and configured conservative default.
-The engine separately applies its meaningful-output guard; retryable failures after text, reasoning, tool input, or a finalized call do not retry the same entry.
-# F. Cancellation and deadlines
-```rust
-#[derive(Clone, Default)]
-pub struct CancellationToken { /* Arc<State>: AtomicBool + event_listener */ }
-impl CancellationToken {
-    pub fn cancel(&self) { /* wake listeners */ }
-    pub fn is_cancelled(&self) -> bool { unimplemented!() }
-    pub async fn cancelled(&self) { unimplemented!() }
-}
-pub struct CallContext {
-    pub cancellation: CancellationToken, pub deadline: Option<Instant>,
-    pub telemetry: Option<Arc<dyn TelemetrySink>>, pub tags: BTreeMap<String, String>,
-}
-```
-Honest guarantees:
-- Cancellation stops local request initiation/reading as scheduling permits and drops the local response future/body.
-- It does not prove the provider stopped computation or billing.
-- `RemoteBestEffort` means the adapter attempts a provider cancellation operation, not that it succeeded.
-- Dropping `ModelStream` is local abandonment only.
-- The harness independently stops local tool scheduling/execution.
-Separate connect, response-header, stream-idle, and caller deadlines. Recommended defaults: 10 seconds connect, 30 seconds headers, 60 seconds idle, and no total streaming timeout. Valid pings/activity reset idle time. This directly addresses phase-6 failures near the current two-minute overall timeout.
-# G. Native replay extension
-```rust
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
 pub struct NativeReplayArtifact {
-    pub adapter_id: AdapterId, pub payload: serde_json::Value,
+    adapter_id: AdapterId,
+    scope: NativeContextScope,
+    payload: serde_json::Value,
 }
-```
-The harness treats `payload` as opaque. It contains replay-critical provider-native assistant blocks/items and continuation fields only.
-Every request encoding reports each artifact decision through `RequestMetadata`:
-```rust
-pub struct ReplayReport { pub decisions: Vec<ReplayDecision> }
-pub struct ReplayDecision { pub history_index: usize, pub disposition: ReplayDisposition }
+
+pub struct NativeContextWindow {
+    adapter_id: AdapterId,
+    scope: NativeContextScope,
+    payload: serde_json::Value,
+}
+
+pub struct CompactionRequest {
+    pub request: Request,
+}
+
+pub struct CompactionResult {
+    pub native_context: NativeContextWindow,
+    pub usage: Usage,
+    pub request: RequestMetadata,
+    pub response: ResponseHead,
+}
+
 pub enum ReplayDisposition {
-    Replayed, NoArtifact,
+    Replayed,
+    NoArtifact,
     DiscardedForeignAdapter { found: AdapterId, expected: AdapterId },
-    DiscardedInvalidPayload { reason: String }, ReconstructedNormalized,
+    DiscardedForeignScope { found: NativeContextScope, expected: NativeContextScope },
+    DiscardedInvalidPayload { reason: String },
+    ReconstructedNormalized,
 }
 ```
-Provider-swap equivalence is normative: a foreign `AdapterId`, an artifact that cannot be loaded, and a payload that the selected adapter cannot decode all produce the same operational result. The artifact is discarded for that request, the turn is reconstructed from normalized content, and `ReplayReport` records the discard; serde decode errors are preserved in `DiscardedInvalidPayload { reason }`. These cases never fail the turn.
 
-Adapters may embed a private format key inside their opaque JSON payload when they need to distinguish intentional format eras that otherwise look compatible. That key is adapter-private: core never interprets it, and an unrecognized value or failed decode still follows provider-swap semantics.
-Artifact policy:
-- Capture a positive allow-list of replay-required fields.
-- Exclude complete SSE chunks, HTTP bodies, headers, and requests.
-- Do not automatically redact/truncate signed or encrypted payloads.
-- Never include payloads in `Debug`, tracing, or errors.
-- Check serialized size before `Finish`.
-- Default maximum: 2 MiB per assistant turn, configurable.
-- A newly captured artifact exceeding that cap is the only replay-policy condition that fails the turn; fail-closed oversize handling remains required.
-- Existing-artifact load/decode failures never fail the turn, including for `ReplayCapability::Required`; `Required` means successful new turns should capture replay state, not that old opaque bytes must decode forever.
-Raw transport capture is a separate opt-in capped/redacted diagnostic channel and never becomes replay state.
-`CompletedTurn` is also the assistant history shape; ordered `HistoryTurn::Tool` results follow it. The SDK does not persist either type.
-Cookie-agent consumption:
-1. Assemble committed journal events into `HistoryTurn`.
-2. Attach stored artifacts to assistant `CompletedTurn`s.
-3. Pass history to the selected model.
-4. Persist/process normalized parts as desired.
-5. Persist `Finish.native_replay` before committing the assistant turn.
-6. Keep artifacts after fallback for possible later same-adapter replay.
-This preserves section 6.2 without letting the SDK own durability.
-## Migration from current `TurnOpaque`
-| Legacy protocol | New adapter ID |
+Replay artifacts are capped at 2 MiB. Native context windows are capped at 32
+MiB. Both bounds apply on construction and deserialization; fields are private,
+access is read-only, and debug output redacts payloads. `NativeContextWindow`
+accepts only its current `adapter_id`/`scope`/`payload` serde shape. Scope-less
+or legacy shapes are invalid, and `ReplayScope` no longer exists.
+
+`Request::native_context` carries an optional window into ordinary generation.
+`CompactionRequest` wraps the complete normalized request so tools, structured
+content, media, provider options, replay artifacts, and `ToolApproval` parts are
+preserved. `CompactionResult` returns the opaque window plus usage and request/
+response metadata. The normalized core never summarizes or interprets a native
+window. Adapter validation must reject foreign adapter/scope windows as
+`ModelErrorKind::NativeContext`; encoding and decoding use
+`ErrorStage::NativeContextEncode` and `NativeContextDecode`.
+
+Replay order for each assistant history entry is complete:
+
+- valid same adapter/scope: `Replayed`;
+- no artifact: `NoArtifact`, then `ReconstructedNormalized`;
+- foreign adapter: `DiscardedForeignAdapter`, then reconstruction;
+- foreign scope: `DiscardedForeignScope`, then reconstruction;
+- invalid payload: `DiscardedInvalidPayload`, then reconstruction;
+- `ReplayPolicy::Never`: reconstruction without artifact inspection.
+
+Each provider derives a stable safe `ResourceId` from all behavior-affecting
+resource data. Sensitive endpoint/header data must be represented by a safe
+fingerprint rather than copied into metadata.
+
+Current 0.4 scope inputs:
+
+| Adapter | Resource scope inputs |
 |---|---|
-| `AnthropicMessages` | `oven.anthropic.messages` |
-| `OpenAiChatCompletions` | `oven.openai.chat` |
-| `OpenAiResponses` | `oven.openai.responses` |
-| `OpenAiCompatible` | configured ID or `legacy.openai-compatible` |
-The official Anthropic and OpenAI adapters ship tolerant decoders that accept today's `TurnOpaque` payload shapes. An old payload that no longer decodes is not a migration failure: it is reported as `DiscardedInvalidPayload`, reconstructed from normalized content, and otherwise treated exactly like a provider swap.
+| Anthropic Messages | endpoint and Messages surface |
+| MiniMax Messages | endpoint and MiniMax Messages surface |
+| Claude Platform on AWS | endpoint, region, workspace |
+| OpenAI Chat | endpoint and Chat surface |
+| OpenAI Responses | endpoint and Responses surface |
+| Compatible Chat | endpoint, caller adapter ID, replay-affecting settings |
+| Google Gemini API | endpoint and `generateContent` surface |
+| Vertex Gemini | endpoint, project, location, typed resource |
+| Bedrock Converse | endpoint, region, full model/profile/ARN ID |
+| Azure OpenAI | endpoint, route, deployment, surface, revision identity |
+| Cohere v2 Chat | full endpoint, v2 Chat surface, capabilities/settings, resolved auth and caller headers |
+| Open Responses | full endpoint, standardized HTTP/SSE surface, transport profile/routing, capabilities/settings, resolved auth and caller headers |
 
-Do not rewrite old logs. During transition, the event may remain named `TurnOpaque`; the engine maps its legacy protocol tag to `AdapterId` and passes the payload unchanged at the SDK boundary. Same-adapter history uses native tool IDs when decoding succeeds, while foreign or undecodable replay uses canonical engine IDs, preserving `crates/engine/src/lib.rs:4180-4543`.
-Any implementation change to this durable model requires a same-commit `ARCHITECTURE.md` update.
-# H. Registry, factories, middleware, and custom providers
+## 10. Provider 0.4 migration and compaction status
+
+The 0.4.0 provider migration is complete across the workspace: provider source
+uses `NativeContextScope`, supplies the required compaction declaration, handles
+`Request::native_context`, and conforms to the object-safe validation/support/
+compaction trait surface without compatibility aliases or migration defaults.
+OpenAI Responses and Azure OpenAI Responses V1 override `compact` with one
+provider-native call and exact scope validation. Chat surfaces and providers
+without a standalone native compaction endpoint declare
+`CompactionCapability::Unsupported` and reject native compaction before I/O.
+
+| Provider | Sole direct constructor | Removed inference behavior |
+|---|---|---|
+| Anthropic | `AnthropicModel::new(ModelConfig<AnthropicAuth, AnthropicSettings>)` | Claude name/rule tables |
+| MiniMax | `MiniMaxModel::new(ModelConfig<MiniMaxAuth, MiniMaxSettings>)` | M2/M3 profile lookup |
+| Claude AWS | `AnthropicAwsModel::new(ModelConfig<AnthropicAwsAuth, AnthropicAwsSettings>)` | name rules and endpoint inference |
+| OpenAI Chat | `OpenAiChatModel::new(ModelConfig<OpenAiAuth, OpenAiChatSettings>)` | family/system-role/token-field inference |
+| OpenAI Responses | `OpenAiResponsesModel::new(...)` | default-surface and reasoning-name inference |
+| Compatible Chat | `OpenAiCompatibleChatModel::new(...)` | compatibility profiles and provider presets |
+| Google | `GoogleModel::new(...)` | Gemini generation lookup |
+| Vertex | `GoogleVertexModel::new(...)` | generation and hostname/model-resource inference |
+| Bedrock | `BedrockModel::new(...)` | built-in IDs and substring reasoning routing |
+| Azure Chat | `AzureOpenAiChatModel::new(...)` | runtime surface wrapper and deployment lookup |
+| Azure Responses | `AzureOpenAiResponsesModel::new(...)` | runtime surface wrapper and deployment lookup |
+
+New adapters that did not have a pre-0.3 source migration use these sole
+construction paths:
+
+| Crate | Sole concrete constructor | Protocol boundary |
+|---|---|---|
+| `oven-sdk-cohere` | `CohereModel::new(ModelConfig<CohereAuth, CohereSettings>)` | Cohere native `/v2/chat` only |
+| `oven-sdk-open-responses` | `OpenResponsesModel::new(ModelConfig<OpenResponsesAuth, OpenResponsesSettings>)` | standardized Open Responses HTTP/SSE only |
+
+`oven-sdk-open-responses` has generic and Hugging Face transport declarations.
+Both use an explicit full endpoint and bearer token. The Hugging Face routing
+label binds the caller's already-exact model ID into metadata and replay scope;
+the adapter never appends provider/policy suffixes, consults a model catalog, or
+probes support. Provider-defined option labels remain validated open strings.
+
+Cohere streaming terminates only at `message-end`. Open Responses streaming
+requires matching SSE `event`/payload `type`, contiguous sequence numbers,
+strict response/item/content lifecycle, a terminal response event, and the
+literal `[DONE]`. Both adapters emit the core mandatory `Finish`, classify
+in-band versus fatal failures, and capture only their current private bounded
+replay format.
+
+Structural protocol choices remain typed settings. Examples include Chat versus
+Responses, system role, token field, structured-output shape, reasoning wire
+format, Gemini thinking control, Vertex resource kind, Bedrock reasoning format,
+and Azure route family.
+
+## 11. Conformance 0.4.0
+
+The public conformance crate provides:
+
+- strict lifecycle and complete/stream equivalence checks;
+- explicit capability probes for tools, structured output, sampling, output
+  tokens, and reasoning;
+- media probes generated from exact modality/MIME/source declarations;
+- complete descriptor declaration validation;
+- model-ID independence comparison;
+- adapter-, scope-, and invalid-payload replay assertions;
+- native compaction declaration, cancellation, round-trip, exact-context,
+  current-serde-shape, and unsupported-before-I/O assertions;
+- mock compaction result queues and captured compaction requests;
+- arbitrary SSE byte-chunk fixtures.
+
+Relevant public helpers include:
+
 ```rust
-pub trait ProviderFactory: Send + Sync {
-    fn provider_id(&self) -> &ProviderId;
-    fn model(&self, model_id: &ModelId) -> Result<Arc<dyn LanguageModel>, ModelError>;
-}
+assert_declaration_honesty(model)?;
+assert_capability_honesty(model)?;
+assert_media_honesty(model)?;
+assert_model_id_independence(first, second).await?;
+assert_replay_artifact(&model.descriptor(), expected_scope, &turn)?;
+assert_replay_round_trip(model, expected_scope, round_trip_request).await?;
+assert_foreign_replay_is_reported(model, expected_scope, foreign_adapter_request).await?;
+assert_foreign_replay_scope_is_reported(model, expected_scope, foreign_scope_request).await?;
+assert_invalid_replay_reconstructs(model, expected_scope, invalid_payload_request).await?;
+assert_native_context_window(&model.descriptor(), expected_scope, &window)?;
+assert_native_compaction(model, expected_scope, compaction_request).await?;
+assert_compaction_cancellation(model, compaction_request).await?;
+assert_compaction_round_trip(model, expected_scope, compaction_request, continuation).await?;
+assert_compaction_unsupported_before_io(model, compaction_request).await?;
 ```
-A configured factory owns credentials, base URL, HTTP client, headers, endpoint/profile, and artifact policy. Model creation is local; network probing remains explicit.
-Prefer an immutable registry:
-```rust
-let registry = Registry::builder()
-    .factory(openai_factory)
-    .factory(anthropic_factory)
-    .model("test:scripted", scripted_model)
-    .alias("fast", "openai:gpt-5-mini")
-    .alias("reasoning", "anthropic:claude-sonnet-4-6")
-    .layer(tracing_layer)
-    .build()?;
-```
-Aliases resolve to one model locator. They never encode chains, weights, retries, or run state. Reject duplicates and alias cycles during build.
-Use decorator middleware:
-```rust
-pub trait LanguageModelMiddleware: Send + Sync {
-    fn wrap(&self, inner: Arc<dyn LanguageModel>) -> Arc<dyn LanguageModel>;
-}
-```
-A wrapper implements `LanguageModel` and may transform requests, wrap generate/stream, map parts, add telemetry, or enforce defaults. It must preserve finish rules, cancellation, transport errors, and adapter identity. Do not ship fallback/retry middleware in 0.1.
-Custom providers implement `LanguageModel` directly or supply a factory. OpenAI-compatible configuration should be conservative:
-```rust
-let factory = OpenAiCompatible::builder()
-    .provider_id("openrouter")
-    .adapter_id("openrouter.chat")
-    .base_url("https://openrouter.ai/api/v1")?
-    .api_key(secret)
-    .profile(CompatibilityProfile::baseline_chat()
-        .with_parallel_tools(true)
-        .with_stream_usage(true)
-        .with_reasoning_field(ReasoningField::ReasoningContent))
-    .build()?;
-```
-Only explicit profiles or saved probes enable advanced capabilities. Allow injected clients and custom auth/header functions, while always redacting credential headers.
-# I. Fallback/orchestration extraction
-Remove from the SDK:
-- `FallbackExecutor`, `FallbackRunState`, and `ModelFallback`.
-- `ProviderErrorClass`.
-- retry counts/backoff timers.
-- meaningful-output decisions.
-- chain traversal and sticky state.
-Cookie-agent retains:
-- policy-snapshot model chains and per-run sticky index;
-- per-model capability-aware request assembly;
-- engine error classifier and code precedence;
-- same-entry retries/backoff and meaningful-output guard;
-- `AttemptAbandoned`/`ModelFallback` durability;
-- partial-output abandonment and usage attribution;
-- sessions, tools, permissions, approvals, and cancellation.
-Exact seam:
+
+## 12. Forbidden-inference review
+
+The completed provider migration used the following forbidden-inference search,
+which remains a required review check for future provider changes:
+
 ```text
-resolve chain entry -> Arc<dyn LanguageModel>
-read capabilities -> assemble ModelRequest
-call stream(request, CallContext)
-persist/process StreamPart values
-track meaningful output
-persist Finish.native_replay before commit
-classify ModelError in engine
-retry/advance/fail in engine
+model.starts_with(
+model.contains(
+match model_id.as_str()
+official_family
+catalog_model
+generation(model
+for_model(
+preset(
+Registry
+.alias(
+std::env::var
 ```
-An adapter performs one translated provider call. It never advances a model chain.
-# J. Ergonomics and telemetry
-```rust
-let request = ModelRequest::builder()
-    .system("You are a concise coding assistant.")
-    .user_text("Explain this borrow checker error.")
-    .tool(tool_definition)
-    .max_output_tokens(2_000)
-    .reasoning(ReasoningEffort::Medium)
-    .build()?;
-let result = model.generate(request.clone(), CallContext::default()).await?;
-let response = model.stream(request, context).await?;
-```
-Provide:
-- `CompletedTurn::text()`.
-- `StreamResponse::collect()` with strict lifecycle validation.
-- `StreamResponse::text_stream()` that still surfaces errors.
-- `collect_text()` that rejects tool calls unless explicitly allowed.
-- `ModelRequest::validate_for(capabilities)`.
-- typed adapter option builders over generic provider options.
-Document that `text_stream()` intentionally drops tools, files, sources, reasoning, and custom parts.
-Core telemetry records only metadata by default: identity, operation, timing, status, request ID, byte/part counts, finish, usage, error category/stage/hint, replay disposition, and artifact size.
-Do not record prompts, output text, tool data, provider options, bodies, arbitrary headers, or artifact payloads by default. Content logging is explicit opt-in; credentials are always redacted. Offer an optional `tracing` layer, not an OpenTelemetry dependency in core.
-# K. Testing and conformance
-Official adapters need tests for:
-- request headers/bodies with wiremock;
-- arbitrary SSE boundaries, including one-byte chunks;
-- LF/CRLF, multiline data, comments, pings, empty and usage-only events;
-- parallel/fragmented and full-call-only tool delivery;
-- malformed finalized arguments;
-- in-band errors after HTTP 200;
-- truncated body and EOF before finish;
-- cancellation before headers and mid-stream;
-- request ID, retry-after, stage, byte count, and body sanitation;
-- per-model/profile image, document, audio, and video capability-table cases;
-- encoding cases for supported modality/MIME/`FileSource` combinations, including Gemini audio and video;
-- negative media cases that return `Unsupported` during request encoding without sending an HTTP request;
-- constructor equivalence proving `audio`, `video`, `image`, and `document` all remain ordinary `FilePart` values;
-- same-adapter replay and foreign fallback;
-- tolerant legacy-payload decode, garbage-payload discard/reconstruction, and artifact size policy;
-- generate/stream equivalence.
-Publish `oven-sdk-conformance`; it may depend on Tokio and wiremock because consumers use it as a dev-dependency.
-```rust
-assert_stream_contract(stream).await?;
-assert_generate_stream_equivalent(model, request).await?;
-assert_replay_round_trip(codec, turn).await?;
-assert_foreign_replay_is_reported(model, turn).await?;
-assert_invalid_replay_reconstructs(model, garbage_turn).await?;
-```
-Replay conformance also requires decode gracefulness: garbage or obsolete opaque payloads must produce `DiscardedInvalidPayload`, reconstruct from normalized content, and continue without a model-call failure. Capability claims are valid only when corresponding conformance cases pass. `IMAGE_INPUT`, `DOCUMENT_INPUT`, `AUDIO_INPUT`, and `VIDEO_INPUT` each have independent positive and negative conformance cases because media support is model/profile-specific. This public kit is a differentiator for third-party Rust adapters.
-Live tests remain ignored and environment-gated. Cover Anthropic, Chat, Responses, compatible baseline, replay, cancellation, and a stream exceeding two minutes or a configured byte threshold. Failure output includes request ID, stage, elapsed time, and bytes, never credentials or full bodies.
-Transport conformance requires incremental UTF-8/SSE parsing, byte counting before decode, no network-chunk/event assumption, idle reset on pings, no default total stream timeout, and no raw chunks in replay.
-# L. Versioning, MSRV, dependencies, and publishing
-Start all crates at 0.1.0. Coordinate minor versions during 0.x; adapter patches may move independently.
-Compatibility/versioning principle:
-- crate semver is the sole public contract-era mechanism for Rust APIs and normalized behavior;
-- replay compatibility is `AdapterId` identity plus successful adapter-private decode; a decode error is the compatibility check and triggers report-and-reconstruct behavior.
-Changing finish, error, or replay invariants is a semver-breaking core change. Optional metadata or new capabilities are minor during 0.x.
 
-Use edition 2024 and MSRV **1.88** initially, matching cookie-agent. CI: Rust 1.88 minimal features, current stable, beta allowed-to-fail initially, and core on Linux/macOS/Windows. Raise MSRV only in a documented minor release during 0.x.
+Matches are allowed only in tests proving names do not affect behavior, or in
+application-owned examples that resolve credentials before configuration.
+Protocol-required use of the exact model ID in request/resource paths is not
+inference.
 
-Dependency policy:
-- no cookie-agent dependency;
-- no Tokio/reqwest/vendor SDK in core;
-- large dependency default features disabled;
-- Rustls default;
-- no global mutable registry/client;
-- no published path dependencies;
-- committed workspace lockfile;
-- `cargo deny`, `cargo audit`, license checks, and `cargo semver-checks` in CI.
-## License decision
+## 13. Versions, MSRV, and publishing
 
-**Plain MIT.** The repository ships a standard MIT `LICENSE` with `Copyright (c) 2026 Yunhao Cao`, and every published crate uses `license = "MIT"` (workspace-inherited). cookie_agent is licensed identically.
+The exact 10-crate release matrix was published on crates.io on 2026-08-02 UTC
+in this order; every listed release is active (not yanked):
 
-### Cargo, crates.io, and downstream implications
+| Order | Crate | Release | Published (UTC) | Status | Core dependency | Conformance dev dependency |
+|---:|---|---:|---|---|---:|---:|
+| 1 | `oven-sdk` | 0.4.0 | 2026-08-02 03:40:10.181057 | Published; not yanked | — | — |
+| 2 | `oven-sdk-conformance` | 0.4.0 | 2026-08-02 03:40:15.943506 | Published; not yanked | =0.4.0 | — |
+| 3 | `oven-sdk-anthropic` | 0.5.0 | 2026-08-02 03:41:07.901606 | Published; not yanked | =0.4.0 | =0.4.0 |
+| 4 | `oven-sdk-openai` | 0.4.0 | 2026-08-02 03:41:13.042064 | Published; not yanked | =0.4.0 | =0.4.0 |
+| 5 | `oven-sdk-google` | 0.4.0 | 2026-08-02 03:41:17.791992 | Published; not yanked | =0.4.0 | =0.4.0 |
+| 6 | `oven-sdk-google-vertex` | 0.4.0 | 2026-08-02 03:41:22.500094 | Published; not yanked | =0.4.0 | =0.4.0 |
+| 7 | `oven-sdk-bedrock` | 0.3.0 | 2026-08-02 03:41:27.131484 | Published; not yanked | =0.4.0 | =0.4.0 |
+| 8 | `oven-sdk-azure` | 0.3.0 | 2026-08-02 03:41:32.474860 | Published; not yanked | =0.4.0 | =0.4.0 |
+| 9 | `oven-sdk-cohere` | 0.2.0 | 2026-08-02 03:41:37.000521 | Published; not yanked | =0.4.0 | =0.4.0 |
+| 10 | `oven-sdk-open-responses` | 0.2.0 | 2026-08-02 03:41:41.629016 | Published; not yanked | =0.4.0 | =0.4.0 |
 
-- Standard SPDX `MIT` metadata; no `license-file`, no custom identifiers, no downstream surprises for SPDX-allow-listing organizations.
-- Verify `cargo package --list` for every crate includes the `LICENSE` file.
+Edition 2024 and MSRV 1.88 remain normative. Core remains free of Tokio,
+reqwest, vendor SDKs, environment lookup, and ambient clients.
 
-Publishing checklist:
-1. Reserve all crate names and apply identical MIT license metadata/content to core, adapters, conformance, examples, and generated docs.
-2. Complete repository/docs.rs/readme/rust-version metadata for each crate.
-3. Document key, telemetry, body, and replay implications; ship direct-call, registry, compatible, cancellation, and persistence-handoff examples.
-4. Run fmt, clippy, tests, doc tests, MSRV, audit/deny, and semver checks.
-5. Inspect packaged contents; exclude secrets/logs/large recordings and confirm `LICENSE` inclusion.
-6. Run `cargo publish --dry-run` from a clean checkout.
-7. Publish core, adapters, then conformance using crates.io trusted publishing/provenance.
-9. Test crates.io artifacts from a separate empty project, including common `cargo-deny`/SBOM behavior, before announcing the release.
-# M. Migration plan
-## Stage 0: approve the contract
-Settle lifecycle, replay identity, and decode/discard policy before implementation commits.
-## Stage 1: core plus compatibility bridge
-Add temporary mappings:
-- `ProviderRequest` -> `ModelRequest`.
-- `PersistedTurn` -> `HistoryTurn`.
-- `NormalizedEvent` -> `StreamPart`.
-- `AssistantTurnOpaque` -> `NativeReplayArtifact { adapter_id, payload }`.
-- `ProviderError` -> `ModelError`, while engine policy remains unchanged.
-Do not alter durable journal behavior yet.
-## Stage 2: extract adapters
-Move Anthropic, Chat, Responses, and compatible code with existing fixtures and tolerant decoders for today's `TurnOpaque` payloads. Add typed finish and transport diagnostics before deleting old code.
+Publication completed in dependency order: core 0.4.0, conformance 0.4.0 after
+the exact core dependency became visible, then provider crates after both exact
+dependencies became visible. Published manifests keep exact version
+requirements.
 
-Cookie-agent first uses pinned git revisions, never a moving branch:
-```toml
-oven-sdk = { git = "https://github.com/cookie-agent/oven-sdk", rev = "<sha>" }
-oven-sdk-anthropic = { git = "...", rev = "<same-sha>" }
-oven-sdk-openai = { git = "...", rev = "<same-sha>" }
-```
-## Stage 3: switch the engine seam
-Resolve model objects from registry/factories. Require `Finish` for success, persist replay before commit, track meaningful output from rich parts, classify errors in engine, and treat missing finish as transport failure subject to the guard.
-## Stage 4: migrate durable replay compatibly
-Persist `AdapterId` plus opaque payload for new events while mapping legacy protocol tags at read time; add no SDK-level format fields. Keep artifacts after fallback, and degrade undecodable legacy payloads through provider-swap semantics. Update `ARCHITECTURE.md` in the same commit.
-## Stage 5: delete duplicate orchestration
-Remove `FallbackExecutor` and provider fallback types. Retain/expand engine tests for code precedence, pre-output retry, sticky fallback, attempt abandonment, foreign replay retention, cancellation, and persistence failures.
-## Stage 6: compatibility release and crates.io
-Optionally keep `cookie_agent_providers` as a deprecated shim for one release. After pinned-git integration is stable, publish 0.1.0, switch to crates.io ranges, and later remove the shim in a planned breaking cookie-agent release.
+## 14. Non-goals
 
-Expected source breaks:
-- `Provider` becomes `LanguageModel`.
-- Model ID moves from request to model object.
-- Messages/persisted turns become typed history.
-- `Stop` becomes mandatory `Finish`.
-- SDK finalizes tool arguments.
-- Opaque state becomes `AdapterId`-tagged replay with tolerant adapter-private decoding.
-- SDK error classes disappear.
-- Registry/factories replace provider maps.
-- Implementations return boxed futures.
-- OpenAI endpoints produce distinct model identities.
-Section 6.2 must remain true throughout: compatible native replay wins, normalized reconstruction handles foreign/synthetic turns, artifacts remain durable, and tool IDs preserve same-adapter pairing.
-# N. Explicit non-goals
-`oven-sdk` 0.1 will not include:
-- an automatic tool-loop or agent API;
-- fallback, weighted routing, retries, budgets, or sticky run state;
-- session/event-log persistence;
-- permission, approval, sandbox, or tool execution policy;
-- TypeScript or Python bindings;
-- a server-side gateway, proxy, or router;
-- model catalog, pricing service, or credential store;
-- non-LLM Vercel-provider packages and their modality contracts during the LLM roadmap: `elevenlabs`, `cartesia`, `lmnt`, `assemblyai`, `deepgram`, `gladia`, `revai`, `fal`, `black-forest-labs`, `luma`, `replicate` (image), and `hume`;
-- embedding, image, speech/audio, transcription, video, realtime, and reranking APIs during 0.x; embeddings, image, and speech contracts may be considered as separate post-1.0 extensions;
-- automatic URL downloads or provider file uploads;
-- implicit capability probing during ordinary calls.
-Provider-executed tool parts may be represented, but the SDK neither approves nor executes them.
-# Risks and open questions
-1. **Compatible replay identity:** require caller-supplied stable IDs; do not derive them from aliases or raw base URLs. Decide whether common profiles use reserved `oven.*` IDs before publication.
-2. **Artifact size:** 2 MiB fail-closed can reject unusually large turns. Keep configurable, measure real sizes, and never silently truncate.
-3. **Middleware invariants:** decorators can drop finish or alter replay. Mitigate with strict collectors and conformance tests, not a complex type system.
-4. **Generate equivalence:** stream collection is the default; native generate must earn duplicate implementation.
-5. **Runtime boundary:** runtime-neutral core plus Tokio-backed first-party HTTP adapters is acceptable but must be explicit.
-6. **Error plus finish:** in-band errors are `Error + Finish(Error)`; transport/parser failures are stream `Err` without finish. Harnesses treat both as failed attempts.
-7. **Untyped provider options:** keep JSON for extensibility, with typed builders in official adapters.
-8. **Unknown hosted items:** normalize categories needed for behavior; preserve every continuation item in replay.
-9. **Replay decoder tolerance:** official adapters must retain practical support for current `TurnOpaque` shapes, but no opaque payload is guaranteed to decode forever; report-and-reconstruct is the stable compatibility behavior.
-10. **Sanitation:** adapters need positive-field extraction and tests; regex redaction alone is insufficient.
-# Review acceptance criteria
-Implementation begins only after agreement that:
-
-1. The workspace and dependency boundaries are acceptable.
-2. `LanguageModel` is model-level, dyn-compatible, and runtime-neutral in core.
-3. Exactly one final `Finish` is required for success.
-4. In-band error, transport error, abort, drop, and EOF are unambiguous.
-5. Error facts are separate from cookie-agent policy.
-6. Replay is `AdapterId`-identified, decode-tolerant, bounded, and persistence-agnostic.
-7. Foreign replay is reported and normalized reconstruction is preserved.
-8. Registry aliases/middleware do not hide orchestration.
-9. `FallbackExecutor` has a concrete deletion path.
-10. Old logs preserve section 6.2 semantics.
-11. The public conformance crate ships initially.
-12. The provider coverage roadmap is accepted, the proposed Tier 2 order is owner-confirmed, and no adapter or preset can ship without its required conformance tier and live-test gate.
-13. Agent loops, bindings, gateways, and non-LLM modality contracts remain out of the 0.x scope.
-# Final recommendation
-Proceed with this workspace design.
-The decisive choices are mandatory `Finish`, structured mid-stream transport diagnostics, `AdapterId`-tagged decode-tolerant native replay, model-level objects, and complete extraction of fallback policy into the harness. They retain cookie-agent's strongest correctness properties while making `oven-sdk` a credible standalone Rust provider SDK rather than a renamed internal crate.
+The SDK does not provide routing, fallback, retries, weighted selection,
+sessions, persistence, an agent loop, tool execution, permissions, credential
+discovery, pricing, automatic URL downloads, automatic file upload, or non-LLM
+generation APIs. Middleware must not reintroduce hidden orchestration or model
+selection.

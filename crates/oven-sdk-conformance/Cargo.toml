@@ -1,5 +1,8 @@
 [package]
 name = "oven-sdk-conformance"
+description = "Runtime-neutral conformance tests for oven-sdk adapters"
+repository = "https://github.com/cookie-agent/oven-sdk"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,3 +10,8 @@ rust-version.workspace = true
 
 [lib]
 name = "oven_sdk_conformance"
+
+[dependencies]
+futures-core.workspace = true
+oven-sdk = { path = "../oven-sdk", version = "=0.4.0" }
+serde_json.workspace = true

@@ -18,6 +18,17 @@ bug fixes that restore documented behavior) do **not** require a doc update.
 
 When in doubt whether a change is architectural: it is. Update the doc.
 
+## No backwards compatibility
+
+Never write or keep code for backwards compatibility with earlier states of
+this project's own code, data, formats, or protocols. When something changes,
+change it outright: no legacy decoders, no deprecated serde forms, no
+migration shims, no dual code paths, no `#[deprecated]` grace periods. This
+applies to every change, regardless of direction — had a decision gone the
+other way, the same rule would hold. The only compat surface that matters is
+what external providers' wire protocols require (per their official docs);
+internal history is irrelevant.
+
 ## Zero warnings
 
 All warnings are addressed, not ignored: `cargo build`, `cargo clippy`, and
@@ -33,9 +44,10 @@ Provider crates (`oven-sdk-anthropic`, `oven-sdk-openai`, and any future
 adapter) are implemented against the provider's **official API
 documentation**, with the **Vercel AI SDK** (`github.com/vercel/ai`,
 provider packages under `packages/`) as the reference for battle-tested
-normalization decisions. The cookie_agent MVP providers crate is **not** a
-protocol reference — its only authoritative content is the legacy
-`TurnOpaque` journal shapes that tolerant decoders must accept.
+normalization decisions. The cookie_agent MVP providers crate is not a protocol
+or replay-codec reference. It may inform regression tests and known gaps, but
+oven-sdk provider crates accept only their current private replay formats and do
+not decode legacy `TurnOpaque` payloads.
 
 **Rule:** whenever a provider crate is **created or modified**, its README
 must contain a section (e.g. `## Differences from the Vercel AI SDK`)

@@ -1,18 +1,41 @@
 [workspace]
-members = ["crates/oven-sdk", "crates/oven-sdk-conformance"]
+members = [
+    "crates/oven-sdk",
+    "crates/oven-sdk-conformance",
+    "crates/oven-sdk-anthropic",
+    "crates/oven-sdk-openai",
+    "crates/oven-sdk-google",
+    "crates/oven-sdk-google-vertex",
+    "crates/oven-sdk-bedrock",
+    "crates/oven-sdk-azure",
+    "crates/oven-sdk-cohere",
+    "crates/oven-sdk-open-responses",
+]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 rust-version = "1.88"
-version = "0.1.0"
+version = "0.4.0"
 
 [workspace.dependencies]
-bitflags = { version = "2", features = ["serde"] }
+bitflags = "2"
 bytes = { version = "1", features = ["serde"] }
 futures-core = "0.3"
+futures-util = "0.3"
+http = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 url = { version = "2", features = ["serde"] }
+base64 = "0.22"
+httpdate = "1"
+hmac = "0.12"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+sha2 = "0.10"
+time = { version = "0.3.41", features = ["formatting", "macros"] }
+tokio = { version = "1", features = ["macros", "time", "sync"] }
+gcp_auth = { version = "0.12.7", default-features = false, features = ["ring"] }
+crc32fast = "1"
