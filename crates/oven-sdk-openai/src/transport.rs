@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use oven_sdk::{
     AbortSignal, ErrorStage, ModelError, ResponseHead, ResponseMetadata, SanitizedBody,
 };
@@ -35,39 +34,21 @@ pub(crate) async fn read_error_body(
     abort: &AbortSignal,
     idle: Duration,
 ) -> Result<(Vec<u8>, u64), ModelError> {
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    let mut count = 0_u64;
-    loop {
-        let next = tokio::select! {
-            value = tokio::time::timeout(idle, stream.next()) => value.map_err(|_| {
-                ModelError::timeout("OpenAI error response body idle timeout")
-                    .with_stage(ErrorStage::ResponseBody)
-                    .with_bytes_received(count)
-            })?,
-            _ = abort.aborted() => {
-                return Err(ModelError::abort("OpenAI error response body read was aborted")
-                    .with_stage(ErrorStage::ResponseBody)
-                    .with_bytes_received(count));
-            }
-        };
-        match next {
-            Some(Ok(chunk)) => {
-                count = count.saturating_add(chunk.len() as u64);
-                let limit = SanitizedBody::MAX_BYTES + 1;
-                let remaining = limit.saturating_sub(body.len());
-                body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-            }
-            Some(Err(_)) => {
-                return Err(
-                    ModelError::transport("OpenAI error response body read failed")
-                        .with_stage(ErrorStage::ResponseBody)
-                        .with_bytes_received(count),
-                );
-            }
-            None => return Ok((body, count)),
-        }
-    }
+    oven_sdk::provider_support::read_bounded_body(
+        response.bytes_stream(),
+        abort,
+        oven_sdk::provider_support::BodyReadConfig {
+            cap: SanitizedBody::MAX_BYTES + 1,
+            limit: oven_sdk::provider_support::BodyLimit::Truncate,
+            stage: ErrorStage::ResponseBody,
+            timeout_message: "OpenAI error response body idle timeout",
+            abort_message: "OpenAI error response body read was aborted",
+            read_message: "OpenAI error response body read failed",
+            overflow_message: "OpenAI error response body byte count overflowed",
+        },
+        || tokio::time::sleep(idle),
+    )
+    .await
 }
 
 pub(crate) async fn read_bounded_body(
@@ -76,42 +57,23 @@ pub(crate) async fn read_bounded_body(
     idle: Duration,
     maximum: usize,
 ) -> Result<(Vec<u8>, u64), ModelError> {
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    let mut count = 0_u64;
-    loop {
-        let next = tokio::select! {
-            value = tokio::time::timeout(idle, stream.next()) => value.map_err(|_| {
-                ModelError::timeout("OpenAI response body idle timeout")
-                    .with_stage(ErrorStage::NativeContextDecode)
-                    .with_bytes_received(count)
-            })?,
-            _ = abort.aborted() => {
-                return Err(ModelError::abort("OpenAI response body read was aborted")
-                    .with_stage(ErrorStage::NativeContextDecode)
-                    .with_bytes_received(count));
-            }
-        };
-        match next {
-            Some(Ok(chunk)) => {
-                count = count.saturating_add(chunk.len() as u64);
-                if body.len().saturating_add(chunk.len()) > maximum {
-                    return Err(ModelError::invalid_response(
-                        "OpenAI response body exceeds the configured safety bound",
-                    )
-                    .with_stage(ErrorStage::NativeContextDecode)
-                    .with_bytes_received(count));
-                }
-                body.extend_from_slice(&chunk);
-            }
-            Some(Err(_)) => {
-                return Err(ModelError::transport("OpenAI response body read failed")
-                    .with_stage(ErrorStage::NativeContextDecode)
-                    .with_bytes_received(count));
-            }
-            None => return Ok((body, count)),
-        }
-    }
+    oven_sdk::provider_support::read_bounded_body(
+        response.bytes_stream(),
+        abort,
+        oven_sdk::provider_support::BodyReadConfig {
+            cap: maximum,
+            limit: oven_sdk::provider_support::BodyLimit::Reject {
+                message: "OpenAI response body exceeds the configured safety bound",
+            },
+            stage: ErrorStage::NativeContextDecode,
+            timeout_message: "OpenAI response body idle timeout",
+            abort_message: "OpenAI response body read was aborted",
+            read_message: "OpenAI response body read failed",
+            overflow_message: "OpenAI response body byte count overflowed",
+        },
+        || tokio::time::sleep(idle),
+    )
+    .await
 }
 
 pub(crate) fn response_head(

@@ -6,7 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use base64::{
@@ -14,6 +14,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use futures_util::StreamExt;
+use oven_sdk::provider_support::{SseEvent, SseParser, parse_retry_after};
 use oven_sdk::{
     AbortSignal, AdapterId, ApiEndpoint, AssistantPart, BoxFuture, BoxStream,
     CancellationCapability, Capability, CompactionCapability, CompactionRequest, ContentValue,
@@ -369,7 +370,8 @@ impl LanguageModel for OpenResponsesModel {
             let response_headers = response.headers().clone();
             let live = Live {
                 bytes: Box::pin(response.bytes_stream()),
-                parser: SseParser::default(),
+                parser: SseParser::new("Open Responses SSE contains invalid UTF-8")
+                    .clear_name_on_empty_event(),
                 state: State::new(
                     self.descriptor.adapter_id.clone(),
                     self.config.capabilities.replay.policy,
@@ -1107,93 +1109,6 @@ fn source_annotation(source: &SourcePart) -> Result<JsonValue, ModelError> {
     Ok(annotation)
 }
 
-#[derive(Default)]
-struct SseParser {
-    bytes: Vec<u8>,
-    event: String,
-    data: Vec<String>,
-    first: bool,
-}
-#[derive(Clone)]
-struct SseEvent {
-    event: String,
-    data: String,
-}
-impl SseParser {
-    fn feed(&mut self, chunk: &[u8]) -> Result<Vec<SseEvent>, ModelError> {
-        self.bytes.extend_from_slice(chunk);
-        let mut events = Vec::new();
-        let (mut start, mut index) = (0, 0);
-        while index < self.bytes.len() {
-            if self.bytes[index] == b'\n' || self.bytes[index] == b'\r' {
-                if self.bytes[index] == b'\r' && index + 1 == self.bytes.len() {
-                    break;
-                }
-                let end = index;
-                if self.bytes[index] == b'\r' && self.bytes.get(index + 1) == Some(&b'\n') {
-                    index += 1;
-                }
-                let line = self.bytes[start..end].to_vec();
-                self.line(&line, &mut events)?;
-                start = index + 1;
-            }
-            index += 1;
-        }
-        self.bytes.drain(..start);
-        Ok(events)
-    }
-    fn finish(&mut self) -> Result<Vec<SseEvent>, ModelError> {
-        let mut events = Vec::new();
-        if self.bytes.last() == Some(&b'\r') {
-            self.bytes.pop();
-        }
-        if !self.bytes.is_empty() {
-            let line = std::mem::take(&mut self.bytes);
-            self.line(&line, &mut events)?;
-        }
-        self.dispatch(&mut events);
-        Ok(events)
-    }
-    fn line(&mut self, raw: &[u8], events: &mut Vec<SseEvent>) -> Result<(), ModelError> {
-        let raw = if self.first {
-            raw
-        } else {
-            self.first = true;
-            raw.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(raw)
-        };
-        let line = std::str::from_utf8(raw).map_err(|_| {
-            ModelError::invalid_response("Open Responses SSE contains invalid UTF-8")
-                .with_stage(ErrorStage::StreamDecode)
-        })?;
-        if line.is_empty() {
-            self.dispatch(events);
-            return Ok(());
-        }
-        if line.starts_with(':') {
-            return Ok(());
-        }
-        let (field, value) = line.split_once(':').unwrap_or((line, ""));
-        let value = value.strip_prefix(' ').unwrap_or(value);
-        match field {
-            "event" => self.event = value.into(),
-            "data" => self.data.push(value.into()),
-            _ => {}
-        }
-        Ok(())
-    }
-    fn dispatch(&mut self, events: &mut Vec<SseEvent>) {
-        if !self.data.is_empty() {
-            events.push(SseEvent {
-                event: std::mem::take(&mut self.event),
-                data: self.data.join("\n"),
-            });
-            self.data.clear();
-        } else {
-            self.event.clear();
-        }
-    }
-}
-
 struct Live {
     bytes: BoxStream<'static, Result<bytes::Bytes, reqwest::Error>>,
     parser: SseParser,
@@ -1245,7 +1160,7 @@ async fn read_live(live: &mut Live) -> Result<(), ModelError> {
                 .with_bytes_received(live.count)
         })?;
         let kind = value.get("type").and_then(JsonValue::as_str).unwrap_or("");
-        if event.event != kind {
+        if event.name != kind {
             return Err(event_error(
                 "Open Responses event field must match payload type",
                 live.count,
@@ -3441,27 +3356,21 @@ async fn read_error_body(
     abort: &AbortSignal,
     idle: Duration,
 ) -> Result<(Vec<u8>, u64), ModelError> {
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    let mut count = 0_u64;
-    loop {
-        let next = tokio::select! {value=tokio::time::timeout(idle,stream.next())=>value.map_err(|_|ModelError::timeout("Open Responses error body idle timeout").with_stage(ErrorStage::ResponseBody).with_bytes_received(count))?,_=abort.aborted()=>return Err(ModelError::abort("Open Responses error body read was aborted").with_stage(ErrorStage::ResponseBody).with_bytes_received(count))};
-        match next {
-            Some(Ok(chunk)) => {
-                count = count.saturating_add(chunk.len() as u64);
-                let remaining = (SanitizedBody::MAX_BYTES + 1).saturating_sub(body.len());
-                body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-            }
-            Some(Err(_)) => {
-                return Err(
-                    ModelError::transport("Open Responses error body read failed")
-                        .with_stage(ErrorStage::ResponseBody)
-                        .with_bytes_received(count),
-                );
-            }
-            None => return Ok((body, count)),
-        }
-    }
+    oven_sdk::provider_support::read_bounded_body(
+        response.bytes_stream(),
+        abort,
+        oven_sdk::provider_support::BodyReadConfig {
+            cap: SanitizedBody::MAX_BYTES + 1,
+            limit: oven_sdk::provider_support::BodyLimit::Truncate,
+            stage: ErrorStage::ResponseBody,
+            timeout_message: "Open Responses error body idle timeout",
+            abort_message: "Open Responses error body read was aborted",
+            read_message: "Open Responses error body read failed",
+            overflow_message: "Open Responses error body byte count overflowed",
+        },
+        || tokio::time::sleep(idle),
+    )
+    .await
 }
 fn classify_error(
     status: Option<u16>,
@@ -3547,7 +3456,7 @@ fn classify_error(
     if let Some(id) = request_id {
         error = error.with_request_id(id);
     }
-    if let Some(delay) = retry_after(headers) {
+    if let Some(delay) = parse_retry_after(headers, &[]) {
         error = error.with_retry_after(delay);
     }
     if let Some(body) = sanitized_error_body(&value, body) {
@@ -3586,30 +3495,21 @@ fn sanitize_provider_text(value: &str) -> String {
         })
         .collect()
 }
-fn retry_after(headers: &HeaderMap) -> Option<Duration> {
-    let value = headers.get("retry-after")?.to_str().ok()?;
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
-    }
-    httpdate::parse_http_date(value)
-        .ok()?
-        .duration_since(SystemTime::now())
-        .ok()
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn parser_requires_event_and_preserves_utf8() {
-        let mut parser = SseParser::default();
+        let mut parser =
+            SseParser::new("Open Responses SSE contains invalid UTF-8").clear_name_on_empty_event();
         let input="event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"hé\"}}\n\n".as_bytes();
         let mut events = Vec::new();
         for byte in input {
             events.extend(parser.feed(&[*byte]).unwrap());
         }
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event, "response.created");
+        assert_eq!(events[0].name, "response.created");
     }
     #[test]
     fn open_labels_are_not_enums() {

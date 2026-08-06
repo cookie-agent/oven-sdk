@@ -8,6 +8,9 @@
 //! capabilities, and replay artifacts. Transport, logging, persistence, and
 //! retry or fallback policy belong to adapters and calling harnesses.
 
+/// Runtime-neutral implementation helpers shared by provider adapters.
+pub mod provider_support;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,

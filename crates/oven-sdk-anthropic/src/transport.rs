@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use oven_sdk::{AbortSignal, ErrorStage, ModelError, ResponseHead, ResponseMetadata};
 
 /// Per-phase adapter timeouts.
@@ -30,48 +29,21 @@ pub(crate) async fn read_error_body(
     abort: &AbortSignal,
     idle: Duration,
 ) -> Result<(Vec<u8>, u64), ModelError> {
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    let mut bytes_received = 0_u64;
-    loop {
-        let next = tokio::select! {
-            value = tokio::time::timeout(idle, stream.next()) => value.map_err(|_| {
-                ModelError::timeout("error response body idle timeout")
-                    .with_stage(ErrorStage::ResponseBody)
-                    .with_bytes_received(bytes_received)
-            })?,
-            _ = abort.aborted() => return Err(
-                ModelError::abort("request was aborted while reading an error response")
-                    .with_stage(ErrorStage::ResponseBody)
-                    .with_bytes_received(bytes_received)
-            ),
-        };
-        let Some(chunk) = next else {
-            break;
-        };
-        let chunk = chunk.map_err(|_| {
-            ModelError::transport("error response body read failed")
-                .with_stage(ErrorStage::ResponseBody)
-                .with_bytes_received(bytes_received)
-        })?;
-        let chunk_len = u64::try_from(chunk.len()).map_err(|_| {
-            ModelError::transport("error response body byte count overflowed")
-                .with_stage(ErrorStage::ResponseBody)
-                .with_bytes_received(bytes_received)
-        })?;
-        bytes_received = bytes_received.checked_add(chunk_len).ok_or_else(|| {
-            ModelError::transport("error response body byte count overflowed")
-                .with_stage(ErrorStage::ResponseBody)
-                .with_bytes_received(bytes_received)
-        })?;
-        let remaining = oven_sdk::SanitizedBody::MAX_BYTES.saturating_sub(body.len());
-        let taken = chunk.len().min(remaining);
-        body.extend_from_slice(&chunk[..taken]);
-        if body.len() == oven_sdk::SanitizedBody::MAX_BYTES {
-            break;
-        }
-    }
-    Ok((body, bytes_received))
+    oven_sdk::provider_support::read_bounded_body(
+        response.bytes_stream(),
+        abort,
+        oven_sdk::provider_support::BodyReadConfig {
+            cap: oven_sdk::SanitizedBody::MAX_BYTES,
+            limit: oven_sdk::provider_support::BodyLimit::StopAtCap,
+            stage: ErrorStage::ResponseBody,
+            timeout_message: "error response body idle timeout",
+            abort_message: "request was aborted while reading an error response",
+            read_message: "error response body read failed",
+            overflow_message: "error response body byte count overflowed",
+        },
+        || tokio::time::sleep(idle),
+    )
+    .await
 }
 
 pub(crate) fn response_head(response: &reqwest::Response) -> ResponseHead {

@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use oven_sdk::{
     AbortSignal, ErrorStage, ModelError, ResponseHead, ResponseMetadata, SanitizedBody,
 };
@@ -38,39 +37,21 @@ pub(crate) async fn read_error_body(
     abort: &AbortSignal,
     idle: Duration,
 ) -> Result<(Vec<u8>, u64), ModelError> {
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    let mut count = 0_u64;
-    loop {
-        let next = tokio::select! {
-            value = tokio::time::timeout(idle, stream.next()) => value.map_err(|_| {
-                ModelError::timeout("Azure OpenAI error response body idle timeout")
-                    .with_stage(ErrorStage::ResponseBody)
-                    .with_bytes_received(count)
-            })?,
-            _ = abort.aborted() => {
-                return Err(ModelError::abort("Azure OpenAI error response body read was aborted")
-                    .with_stage(ErrorStage::ResponseBody)
-                    .with_bytes_received(count));
-            }
-        };
-        match next {
-            Some(Ok(chunk)) => {
-                count = count.saturating_add(chunk.len() as u64);
-                let limit = SanitizedBody::MAX_BYTES + 1;
-                let remaining = limit.saturating_sub(body.len());
-                body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-            }
-            Some(Err(_)) => {
-                return Err(
-                    ModelError::transport("Azure OpenAI error response body read failed")
-                        .with_stage(ErrorStage::ResponseBody)
-                        .with_bytes_received(count),
-                );
-            }
-            None => return Ok((body, count)),
-        }
-    }
+    oven_sdk::provider_support::read_bounded_body(
+        response.bytes_stream(),
+        abort,
+        oven_sdk::provider_support::BodyReadConfig {
+            cap: SanitizedBody::MAX_BYTES + 1,
+            limit: oven_sdk::provider_support::BodyLimit::Truncate,
+            stage: ErrorStage::ResponseBody,
+            timeout_message: "Azure OpenAI error response body idle timeout",
+            abort_message: "Azure OpenAI error response body read was aborted",
+            read_message: "Azure OpenAI error response body read failed",
+            overflow_message: "Azure OpenAI error response body byte count overflowed",
+        },
+        || tokio::time::sleep(idle),
+    )
+    .await
 }
 
 pub(crate) fn response_head(

@@ -1,8 +1,8 @@
 //! Anthropic error-envelope classification.
 
-use std::time::{Duration, SystemTime};
-
-use oven_sdk::{ErrorStage, JsonValue, ModelError, ModelErrorKind};
+use oven_sdk::{
+    ErrorStage, JsonValue, ModelError, ModelErrorKind, provider_support::parse_retry_after,
+};
 use reqwest::header::HeaderMap;
 
 use crate::wire::Protocol;
@@ -113,7 +113,7 @@ pub(crate) fn classify_error_for(
     if let Some(id) = request_id {
         error = error.with_request_id(id);
     }
-    if let Some(delay) = retry_after(headers) {
+    if let Some(delay) = parse_retry_after(headers, &["retry-after-ms"]) {
         error = error.with_retry_after(delay);
     }
     error
@@ -152,28 +152,11 @@ fn has_model_code(value: &JsonValue) -> bool {
         _ => false,
     }
 }
-fn retry_after(headers: &HeaderMap) -> Option<Duration> {
-    if let Some(value) = headers
-        .get("retry-after-ms")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        return Some(Duration::from_millis(value));
-    }
-    let value = headers.get("retry-after")?.to_str().ok()?;
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
-    }
-    httpdate::parse_http_date(value)
-        .ok()?
-        .duration_since(SystemTime::now())
-        .ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use reqwest::header::HeaderValue;
+    use std::time::Duration;
 
     #[test]
     fn error_classification_prefers_model_not_found_over_500() {

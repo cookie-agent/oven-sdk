@@ -433,7 +433,8 @@ async fn start_stream(
     }
     let mut live = LiveState {
         bytes: Box::pin(response.bytes_stream()),
-        parser: crate::sse::Parser::default(),
+        parser: crate::sse::Parser::new("OpenAI SSE contains invalid UTF-8")
+            .clear_name_on_empty_event(),
         state: State::new(
             runtime.descriptor.adapter_id.clone(),
             runtime.scope.clone(),

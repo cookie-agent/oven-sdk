@@ -150,7 +150,8 @@ impl LanguageModel for AzureOpenAiResponsesModel {
             }
             let mut live = LiveState {
                 bytes: Box::pin(response.bytes_stream()),
-                parser: crate::sse::Parser::default(),
+                parser: crate::sse::Parser::new("Azure OpenAI SSE contains invalid UTF-8")
+                    .clear_name_on_empty_event(),
                 state: State::new(
                     descriptor.adapter_id.clone(),
                     replay_policy,

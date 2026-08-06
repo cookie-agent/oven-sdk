@@ -16,7 +16,6 @@ base64.workspace = true
 bytes.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
-httpdate.workspace = true
 hmac.workspace = true
 hex.workspace = true
 oven-sdk = { path = "../oven-sdk", version = "=0.4.0" }
@@ -29,6 +28,7 @@ tokio.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+httpdate.workspace = true
 oven-sdk-conformance = { path = "../oven-sdk-conformance", version = "=0.4.0" }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util"] }
 wiremock = "0.6"

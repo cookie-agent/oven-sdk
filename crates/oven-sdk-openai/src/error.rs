@@ -1,8 +1,9 @@
 //! OpenAI error-envelope parsing and classification.
 
-use std::time::{Duration, SystemTime};
-
-use oven_sdk::{ErrorStage, JsonValue, ModelError, ModelErrorKind, SanitizedBody};
+use oven_sdk::{
+    ErrorStage, JsonValue, ModelError, ModelErrorKind, SanitizedBody,
+    provider_support::parse_retry_after,
+};
 use reqwest::header::HeaderMap;
 
 /// Classifies an OpenAI-shaped error envelope into the core taxonomy.
@@ -72,7 +73,7 @@ pub(crate) fn classify_error(
     if let Some(request_id) = request_id {
         error = error.with_request_id(request_id);
     }
-    if let Some(delay) = retry_after(headers) {
+    if let Some(delay) = parse_retry_after(headers, &["retry-after-ms"]) {
         error = error.with_retry_after(delay);
     }
     error
@@ -107,28 +108,11 @@ fn has_model_code(value: &JsonValue) -> bool {
     }
 }
 
-fn retry_after(headers: &HeaderMap) -> Option<Duration> {
-    if let Some(milliseconds) = headers
-        .get("retry-after-ms")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-    {
-        return Some(Duration::from_millis(milliseconds));
-    }
-    let value = headers.get("retry-after")?.to_str().ok()?;
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
-    }
-    httpdate::parse_http_date(value)
-        .ok()?
-        .duration_since(SystemTime::now())
-        .ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use reqwest::header::HeaderValue;
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn model_not_found_code_overrides_server_status() {

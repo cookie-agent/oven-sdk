@@ -1,8 +1,8 @@
 //! Google error-envelope classification.
 
-use std::time::{Duration, SystemTime};
-
-use oven_sdk::{ErrorStage, JsonValue, ModelError, ModelErrorKind};
+use oven_sdk::{
+    ErrorStage, JsonValue, ModelError, ModelErrorKind, provider_support::parse_retry_after,
+};
 use reqwest::header::HeaderMap;
 
 /// Parses and classifies a Google JSON error envelope.
@@ -79,7 +79,7 @@ pub fn classify_error(
     if let Some(request_id) = request_id.and_then(|value| safe_identifier(&value)) {
         error = error.with_request_id(request_id);
     }
-    if let Some(delay) = retry_after(headers) {
+    if let Some(delay) = parse_retry_after(headers, &[]) {
         error = error.with_retry_after(delay);
     }
     if !code.is_empty() {
@@ -99,21 +99,11 @@ fn safe_identifier(value: &str) -> Option<String> {
     .then(|| value.to_owned())
 }
 
-fn retry_after(headers: &HeaderMap) -> Option<Duration> {
-    let value = headers.get("retry-after")?.to_str().ok()?;
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
-    }
-    httpdate::parse_http_date(value)
-        .ok()?
-        .duration_since(SystemTime::now())
-        .ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use reqwest::header::HeaderValue;
+    use std::time::Duration;
 
     #[test]
     fn auth_model_context_and_quota_errors_are_typed() {

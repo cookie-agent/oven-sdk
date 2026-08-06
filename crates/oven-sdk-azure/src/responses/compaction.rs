@@ -3,7 +3,6 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use futures_util::StreamExt;
 use oven_sdk::{
     AbortSignal, CompactionRequest, ErrorStage, JsonValue, LanguageModelDescriptor, ModelError,
     NativeContextScope, NativeContextWindow, Usage,
@@ -196,44 +195,23 @@ pub(crate) async fn read_body(
     abort: &AbortSignal,
     idle: Duration,
 ) -> Result<(Vec<u8>, u64), ModelError> {
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    let mut count = 0_u64;
-    loop {
-        let next = tokio::select! {
-            value = tokio::time::timeout(idle, stream.next()) => value.map_err(|_| {
-                ModelError::timeout("Azure compaction response body idle timeout")
-                    .with_stage(ErrorStage::NativeContextDecode)
-                    .with_bytes_received(count)
-            })?,
-            _ = abort.aborted() => {
-                return Err(ModelError::abort("Azure compaction response body read was aborted")
-                    .with_stage(ErrorStage::NativeContextDecode)
-                    .with_bytes_received(count));
-            }
-        };
-        match next {
-            Some(Ok(chunk)) => {
-                count = count.saturating_add(chunk.len() as u64);
-                if body.len().saturating_add(chunk.len()) > MAX_COMPACTION_RESPONSE_BYTES {
-                    return Err(ModelError::invalid_response(
-                        "Azure compaction response exceeds the bounded response limit",
-                    )
-                    .with_stage(ErrorStage::NativeContextDecode)
-                    .with_bytes_received(count));
-                }
-                body.extend_from_slice(&chunk);
-            }
-            Some(Err(_)) => {
-                return Err(
-                    ModelError::transport("Azure compaction response body read failed")
-                        .with_stage(ErrorStage::NativeContextDecode)
-                        .with_bytes_received(count),
-                );
-            }
-            None => return Ok((body, count)),
-        }
-    }
+    oven_sdk::provider_support::read_bounded_body(
+        response.bytes_stream(),
+        abort,
+        oven_sdk::provider_support::BodyReadConfig {
+            cap: MAX_COMPACTION_RESPONSE_BYTES,
+            limit: oven_sdk::provider_support::BodyLimit::Reject {
+                message: "Azure compaction response exceeds the bounded response limit",
+            },
+            stage: ErrorStage::NativeContextDecode,
+            timeout_message: "Azure compaction response body idle timeout",
+            abort_message: "Azure compaction response body read was aborted",
+            read_message: "Azure compaction response body read failed",
+            overflow_message: "Azure compaction response body byte count overflowed",
+        },
+        || tokio::time::sleep(idle),
+    )
+    .await
 }
 
 fn validate_options(options: &AzureOpenAiCompactionOptions) -> Result<(), ModelError> {

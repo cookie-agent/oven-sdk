@@ -21,7 +21,6 @@ futures-core.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 hmac.workspace = true
-httpdate.workspace = true
 oven-sdk = { path = "../oven-sdk", version = "=0.4.0" }
 reqwest.workspace = true
 serde.workspace = true

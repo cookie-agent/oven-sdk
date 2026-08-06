@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use oven_sdk::{AbortSignal, ErrorStage, ModelError, ResponseHead, ResponseMetadata};
 
 /// Per-phase Google transport timeouts.
@@ -46,36 +45,19 @@ pub(crate) async fn read_body(
     idle: Duration,
     cap: usize,
 ) -> Result<(Vec<u8>, u64), ModelError> {
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    let mut count = 0_u64;
-    loop {
-        let next = tokio::select! {
-            value = tokio::time::timeout(idle, stream.next()) => value.map_err(|_| {
-                ModelError::timeout("Google response body idle timeout")
-                    .with_stage(ErrorStage::ResponseBody)
-                    .with_bytes_received(count)
-            })?,
-            _ = abort.aborted() => return Err(ModelError::abort("request was aborted while reading the response body")
-                .with_stage(ErrorStage::ResponseBody)
-                .with_bytes_received(count)),
-        };
-        let Some(chunk) = next else { break };
-        let chunk = chunk.map_err(|_| {
-            ModelError::transport("Google response body read failed")
-                .with_stage(ErrorStage::ResponseBody)
-                .with_bytes_received(count)
-        })?;
-        count = count
-            .checked_add(
-                u64::try_from(chunk.len())
-                    .map_err(|_| ModelError::transport("Google response byte count overflowed"))?,
-            )
-            .ok_or_else(|| ModelError::transport("Google response byte count overflowed"))?;
-        if body.len() < cap {
-            let take = chunk.len().min(cap - body.len());
-            body.extend_from_slice(&chunk[..take]);
-        }
-    }
-    Ok((body, count))
+    oven_sdk::provider_support::read_bounded_body(
+        response.bytes_stream(),
+        abort,
+        oven_sdk::provider_support::BodyReadConfig {
+            cap,
+            limit: oven_sdk::provider_support::BodyLimit::Truncate,
+            stage: ErrorStage::ResponseBody,
+            timeout_message: "Google response body idle timeout",
+            abort_message: "request was aborted while reading the response body",
+            read_message: "Google response body read failed",
+            overflow_message: "Google response byte count overflowed",
+        },
+        || tokio::time::sleep(idle),
+    )
+    .await
 }
