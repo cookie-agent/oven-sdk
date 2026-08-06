@@ -181,6 +181,7 @@ fn decode_events(
     let mut state = state::State::new(
         policy,
         Protocol::Anthropic,
+        Protocol::Anthropic.adapter_id(),
         oven_sdk::NativeContextScope::new(
             oven_sdk::ProviderId::new("anthropic"),
             oven_sdk::ModelId::new("test-model"),

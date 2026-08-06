@@ -4,7 +4,7 @@ version = "0.5.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Anthropic, MiniMax, and Claude Platform on AWS Messages adapters for oven-sdk"
+description = "Anthropic, compatible Messages, MiniMax, and Claude Platform on AWS adapters for oven-sdk"
 repository = "https://github.com/cookie-agent/oven-sdk"
 readme = "README.md"
 

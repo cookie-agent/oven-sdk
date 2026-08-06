@@ -5,7 +5,7 @@
 use std::{collections::BTreeMap, future::Future, sync::Arc};
 
 use oven_sdk::{
-    ApiEndpoint, CancellationCapability, Capability, CompactionCapability, HeaderConfig,
+    AdapterId, ApiEndpoint, CancellationCapability, Capability, CompactionCapability, HeaderConfig,
     HeaderOverrides, HeaderProvider, MediaCapabilities, MediaInputSupport, MediaSourceSupport,
     Modalities, Modality, ModelCapabilities, ModelConfig, ModelDeclaration, ModelError, ModelId,
     ModelLimits, ProviderConfig, ProviderId, ReplayCapability, ReplayDeclaration, ReplayPolicy,
@@ -13,8 +13,9 @@ use oven_sdk::{
 };
 use oven_sdk_anthropic::{
     AnthropicAuth, AnthropicAwsAuth, AnthropicAwsCredentialProvider, AnthropicAwsCredentials,
-    AnthropicAwsModel, AnthropicAwsSettings, AnthropicModel, AnthropicProtocolSettings,
-    AnthropicSettings, AnthropicThinkingSupport, AnthropicTimeouts, MiniMaxAuth, MiniMaxModel,
+    AnthropicAwsModel, AnthropicAwsSettings, AnthropicCompatibleAuth, AnthropicCompatibleModel,
+    AnthropicCompatibleSettings, AnthropicModel, AnthropicProtocolSettings, AnthropicSettings,
+    AnthropicThinkingSupport, AnthropicTimeouts, MiniMaxAuth, MiniMaxModel,
     MiniMaxProtocolSettings, MiniMaxSettings,
 };
 use reqwest::{Client, header::HeaderMap};
@@ -262,6 +263,33 @@ pub fn try_minimax_model(
             timeouts: AnthropicTimeouts::default(),
             protocol,
             native_context_discriminator: discriminator.map(ResourceId::new).transpose()?,
+        },
+    ))
+}
+
+pub fn try_compatible_model(
+    endpoint: &str,
+    provider_id: &str,
+    model_id: &str,
+    adapter_id: &str,
+    auth: AnthropicCompatibleAuth,
+    capabilities: ModelCapabilities,
+    protocol: AnthropicProtocolSettings,
+) -> Result<AnthropicCompatibleModel, ModelError> {
+    AnthropicCompatibleModel::new(ModelConfig::new(
+        ProviderConfig::new(
+            ProviderId::new(provider_id),
+            ApiEndpoint::parse(endpoint)?,
+            auth,
+            HeaderConfig::empty(),
+        )?,
+        ModelDeclaration::new(ModelId::new(model_id), capabilities)?,
+        AnthropicCompatibleSettings {
+            adapter_id: AdapterId::new(adapter_id),
+            client: Client::new(),
+            timeouts: AnthropicTimeouts::default(),
+            protocol,
+            native_context_discriminator: None,
         },
     ))
 }

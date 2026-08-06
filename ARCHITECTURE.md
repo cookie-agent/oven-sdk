@@ -458,6 +458,7 @@ Current 0.4 scope inputs:
 | Adapter | Resource scope inputs |
 |---|---|
 | Anthropic Messages | endpoint and Messages surface |
+| Compatible Anthropic Messages | endpoint, caller adapter ID, and Messages surface |
 | MiniMax Messages | endpoint and MiniMax Messages surface |
 | Claude Platform on AWS | endpoint, region, workspace |
 | OpenAI Chat | endpoint and Chat surface |
@@ -484,6 +485,7 @@ without a standalone native compaction endpoint declare
 | Provider | Sole direct constructor | Removed inference behavior |
 |---|---|---|
 | Anthropic | `AnthropicModel::new(ModelConfig<AnthropicAuth, AnthropicSettings>)` | Claude name/rule tables |
+| Compatible Anthropic Messages | `AnthropicCompatibleModel::new(ModelConfig<AnthropicCompatibleAuth, AnthropicCompatibleSettings>)` | provider presets and provider-ID enforcement |
 | MiniMax | `MiniMaxModel::new(ModelConfig<MiniMaxAuth, MiniMaxSettings>)` | M2/M3 profile lookup |
 | Claude AWS | `AnthropicAwsModel::new(ModelConfig<AnthropicAwsAuth, AnthropicAwsSettings>)` | name rules and endpoint inference |
 | OpenAI Chat | `OpenAiChatModel::new(ModelConfig<OpenAiAuth, OpenAiChatSettings>)` | family/system-role/token-field inference |

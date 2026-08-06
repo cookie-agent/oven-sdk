@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use oven_sdk::{
-    ErrorStage, Finish, FinishReason, JsonValue, ModelError, ModelErrorKind, NativeContextScope,
-    NativeReplayArtifact, ReplayPolicy, StreamPart, ToolCallPart, Usage,
+    AdapterId, ErrorStage, Finish, FinishReason, JsonValue, ModelError, ModelErrorKind,
+    NativeContextScope, NativeReplayArtifact, ReplayPolicy, StreamPart, ToolCallPart, Usage,
 };
 
 use crate::{error::classify_error_for, wire::Protocol};
@@ -30,12 +30,14 @@ pub(crate) struct State {
     response_metadata: std::collections::BTreeMap<String, JsonValue>,
     request_id: Option<String>,
     protocol: Protocol,
+    adapter_id: AdapterId,
     native_context_scope: NativeContextScope,
 }
 impl State {
     pub(crate) fn new(
         policy: ReplayPolicy,
         protocol: Protocol,
+        adapter_id: AdapterId,
         native_context_scope: NativeContextScope,
     ) -> Self {
         Self {
@@ -54,6 +56,7 @@ impl State {
             response_metadata: std::collections::BTreeMap::new(),
             request_id: None,
             protocol,
+            adapter_id,
             native_context_scope,
         }
     }
@@ -433,7 +436,7 @@ impl State {
                     let payload = serde_json::json!({"format":self.protocol.replay_format(),"message":{"role":"assistant","content":self.native},"stop_reason":self.stop,"stop_sequence":self.stop_sequence});
                     finish.native_replay = Some(
                         NativeReplayArtifact::new(
-                            self.protocol.adapter_id(),
+                            self.adapter_id.clone(),
                             self.native_context_scope.clone(),
                             payload,
                         )
@@ -718,6 +721,7 @@ mod tests {
         let mut state = State::new(
             ReplayPolicy::IfValid,
             Protocol::Anthropic,
+            Protocol::Anthropic.adapter_id(),
             native_context_scope(),
         );
         let mut parts = Vec::new();
@@ -750,6 +754,7 @@ mod tests {
         let mut state = State::new(
             ReplayPolicy::IfValid,
             Protocol::Anthropic,
+            Protocol::Anthropic.adapter_id(),
             native_context_scope(),
         );
         state.set_request_id(Some("req_header".into()));
@@ -808,6 +813,7 @@ mod tests {
         let mut state = State::new(
             ReplayPolicy::IfValid,
             Protocol::Anthropic,
+            Protocol::Anthropic.adapter_id(),
             native_context_scope(),
         );
         let mut parts = Vec::new();

@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
-use oven_sdk::{BoxFuture, ModelError, ResourceId, SecretString};
+use oven_sdk::{AdapterId, BoxFuture, ModelError, ResourceId, SecretString};
 use reqwest::Client;
 
 use crate::transport::AnthropicTimeouts;
@@ -14,6 +14,17 @@ pub enum AnthropicAuth {
     None,
     /// Anthropic API key sent as `x-api-key` unless caller headers already authenticate.
     ApiKey(SecretString),
+}
+
+/// Authentication for a caller-selected Anthropic Messages-compatible endpoint.
+#[derive(Clone, Debug)]
+pub enum AnthropicCompatibleAuth {
+    /// Anthropic-style API key sent as `x-api-key` unless caller headers already authenticate.
+    ApiKey(SecretString),
+    /// Bearer token sent as `Authorization: Bearer ...` unless caller headers already authenticate.
+    Bearer(SecretString),
+    /// No adapter-injected authentication. Caller headers may provide authentication.
+    None,
 }
 
 /// Authentication for the MiniMax Anthropic-compatible Messages API.
@@ -124,6 +135,21 @@ pub struct AnthropicSettings {
     /// Per-phase request timeouts.
     pub timeouts: AnthropicTimeouts,
     /// Explicit protocol behavior.
+    pub protocol: AnthropicProtocolSettings,
+    /// Optional caller discriminator combined into the internally derived native-context scope.
+    pub native_context_discriminator: Option<ResourceId>,
+}
+
+/// Adapter settings for one caller-selected Anthropic Messages-compatible model.
+#[derive(Clone, Debug)]
+pub struct AnthropicCompatibleSettings {
+    /// Caller-owned stable adapter identity.
+    pub adapter_id: AdapterId,
+    /// HTTP client used for requests.
+    pub client: Client,
+    /// Per-phase request timeouts.
+    pub timeouts: AnthropicTimeouts,
+    /// Explicit Anthropic Messages protocol behavior.
     pub protocol: AnthropicProtocolSettings,
     /// Optional caller discriminator combined into the internally derived native-context scope.
     pub native_context_discriminator: Option<ResourceId>,

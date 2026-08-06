@@ -3,8 +3,8 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use oven_sdk::{
-    AbortSignal, BoxFuture, CancellationCapability, Capability, CompactionCapability, ErrorStage,
-    HeaderConfig, LanguageModel, LanguageModelDescriptor, MediaSourceSupport, Modality,
+    AbortSignal, AdapterId, BoxFuture, CancellationCapability, Capability, CompactionCapability,
+    ErrorStage, HeaderConfig, LanguageModel, LanguageModelDescriptor, MediaSourceSupport, Modality,
     ModelCapabilities, ModelConfig, ModelError, ModelIdentity, NativeContextScope,
     ProviderMetadata, Request, RequestMetadata, ResourceId, StreamPart,
 };
@@ -15,8 +15,9 @@ use url::Url;
 use crate::{
     config::{
         AnthropicAuth, AnthropicAwsAuth, AnthropicAwsCredentials, AnthropicAwsSettings,
-        AnthropicProtocolSettings, AnthropicSettings, AnthropicThinkingSupport, MiniMaxAuth,
-        MiniMaxProtocolSettings, MiniMaxSettings,
+        AnthropicCompatibleAuth, AnthropicCompatibleSettings, AnthropicProtocolSettings,
+        AnthropicSettings, AnthropicThinkingSupport, MiniMaxAuth, MiniMaxProtocolSettings,
+        MiniMaxSettings,
     },
     error::classify_error_for,
     wire::{Protocol, VERSION},
@@ -25,6 +26,7 @@ use crate::{
 #[derive(Clone)]
 enum Auth {
     Anthropic(AnthropicAuth),
+    Compatible(AnthropicCompatibleAuth),
     MiniMax(MiniMaxAuth),
     AnthropicAws(AnthropicAwsAuth),
 }
@@ -167,6 +169,7 @@ impl InnerModel {
                 state: crate::stream::state::State::new(
                     replay_policy,
                     self.config.protocol,
+                    self.descriptor.adapter_id.clone(),
                     self.config.native_context_scope.clone(),
                 ),
                 queue: VecDeque::from([Ok(StreamPart::StreamStart {
@@ -232,6 +235,31 @@ impl InnerModel {
                         HeaderName::from_static("x-api-key"),
                         header_value(key.expose_secret(), "invalid Anthropic API key header")?,
                     );
+                }
+            }
+            Auth::Compatible(auth) => {
+                if !headers.contains_key("x-api-key") && !headers.contains_key(AUTHORIZATION) {
+                    match auth {
+                        AnthropicCompatibleAuth::ApiKey(key) => {
+                            headers.insert(
+                                HeaderName::from_static("x-api-key"),
+                                header_value(
+                                    key.expose_secret(),
+                                    "invalid Anthropic-compatible API key header",
+                                )?,
+                            );
+                        }
+                        AnthropicCompatibleAuth::Bearer(token) => {
+                            headers.insert(
+                                AUTHORIZATION,
+                                header_value(
+                                    &format!("Bearer {}", token.expose_secret()),
+                                    "invalid Anthropic-compatible bearer header",
+                                )?,
+                            );
+                        }
+                        AnthropicCompatibleAuth::None => {}
+                    }
                 }
             }
             Auth::MiniMax(auth) => {
@@ -348,7 +376,7 @@ fn canonical_endpoint(endpoint: &oven_sdk::ApiEndpoint) -> Result<String, ModelE
 }
 
 fn derive_native_context_resource(
-    protocol: Protocol,
+    adapter_id: &AdapterId,
     endpoint: &oven_sdk::ApiEndpoint,
     aws: Option<(&str, &str)>,
     discriminator: Option<&ResourceId>,
@@ -361,7 +389,7 @@ fn derive_native_context_resource(
 
     let mut hasher = Sha256::new();
     field(&mut hasher, DOMAIN);
-    field(&mut hasher, protocol.adapter_id().as_str());
+    field(&mut hasher, adapter_id.as_str());
     field(&mut hasher, &canonical_endpoint(endpoint)?);
     if let Some((region, workspace_id)) = aws {
         field(&mut hasher, region);
@@ -609,7 +637,7 @@ impl AnthropicModel {
             config.model.capabilities.clone(),
         )?;
         let native_context_resource = derive_native_context_resource(
-            Protocol::Anthropic,
+            &descriptor.adapter_id,
             &config.provider.api,
             None,
             config.settings.native_context_discriminator.as_ref(),
@@ -639,6 +667,68 @@ impl AnthropicModel {
 
 impl_language_model!(AnthropicModel);
 
+/// A caller-configured Anthropic Messages-compatible model.
+#[derive(Clone)]
+pub struct AnthropicCompatibleModel(InnerModel);
+
+impl AnthropicCompatibleModel {
+    /// Constructs one compatible model from a complete explicit registry-free configuration.
+    pub fn new(
+        config: ModelConfig<AnthropicCompatibleAuth, AnthropicCompatibleSettings>,
+    ) -> Result<Self, ModelError> {
+        config.validate()?;
+        validate_endpoint(&config.provider.api)?;
+        config.settings.adapter_id.validate()?;
+        if matches!(
+            config.settings.adapter_id.as_str(),
+            crate::wire::ANTHROPIC_MESSAGES_ADAPTER_ID | crate::wire::MINIMAX_MESSAGES_ADAPTER_ID
+        ) {
+            return Err(ModelError::invalid_request(
+                "official Anthropic and MiniMax adapter IDs are reserved",
+            ));
+        }
+        validate_capability_ceiling(Protocol::Anthropic, &config.model.capabilities)?;
+        validate_anthropic_protocol(
+            &config.settings.protocol,
+            config.model.capabilities.features,
+        )?;
+        let identity = ModelIdentity::new(config.provider.id.clone(), config.model.id.clone())?;
+        let descriptor = LanguageModelDescriptor::new(
+            identity,
+            config.settings.adapter_id,
+            config.model.capabilities.clone(),
+        )?;
+        let native_context_resource = derive_native_context_resource(
+            &descriptor.adapter_id,
+            &config.provider.api,
+            None,
+            config.settings.native_context_discriminator.as_ref(),
+        )?;
+        let native_context_scope = NativeContextScope::new(
+            config.provider.id.clone(),
+            config.model.id.clone(),
+            native_context_resource,
+        )?;
+        Ok(Self(InnerModel {
+            descriptor,
+            config: Arc::new(Config {
+                protocol: Protocol::Anthropic,
+                auth: Auth::Compatible(config.provider.auth),
+                endpoint: config.provider.api,
+                headers: config.provider.headers,
+                client: config.settings.client,
+                timeouts: config.settings.timeouts,
+                protocol_settings: ProtocolSettings::Anthropic(config.settings.protocol),
+                native_context_scope,
+                aws_region: None,
+                workspace_id: None,
+            }),
+        }))
+    }
+}
+
+impl_language_model!(AnthropicCompatibleModel);
+
 /// A caller-configured MiniMax Messages-compatible model.
 #[derive(Clone)]
 pub struct MiniMaxModel(InnerModel);
@@ -665,7 +755,7 @@ impl MiniMaxModel {
             config.model.capabilities.clone(),
         )?;
         let native_context_resource = derive_native_context_resource(
-            Protocol::MiniMax,
+            &descriptor.adapter_id,
             &config.provider.api,
             None,
             config.settings.native_context_discriminator.as_ref(),
@@ -731,7 +821,7 @@ impl AnthropicAwsModel {
             config.model.capabilities.clone(),
         )?;
         let native_context_resource = derive_native_context_resource(
-            Protocol::AnthropicAws,
+            &descriptor.adapter_id,
             &config.provider.api,
             Some((&config.settings.region, &config.settings.workspace_id)),
             config.settings.native_context_discriminator.as_ref(),

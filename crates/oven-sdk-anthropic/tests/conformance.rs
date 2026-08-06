@@ -3,7 +3,10 @@
 
 mod common;
 
-use common::{Anthropic, AnthropicAws, MiniMax};
+use common::{
+    Anthropic, AnthropicAws, MiniMax, anthropic_capabilities, anthropic_protocol,
+    try_compatible_model,
+};
 
 use std::time::Duration;
 
@@ -15,8 +18,8 @@ use oven_sdk::{
     ToolDefinition,
 };
 use oven_sdk_anthropic::{
-    AnthropicCacheControl, AnthropicCacheTtl, AnthropicRequestExt, AnthropicRequestOptions,
-    AnthropicThinking,
+    AnthropicCacheControl, AnthropicCacheTtl, AnthropicCompatibleAuth, AnthropicRequestExt,
+    AnthropicRequestOptions, AnthropicThinking,
 };
 use oven_sdk_conformance::{
     CapabilityProbe, assert_capability_honesty, assert_capability_honesty_with,
@@ -391,7 +394,7 @@ async fn full_anthropic_conformance_suite() {
 }
 
 #[tokio::test]
-async fn minimax_and_anthropic_aws_baseline_conformance() {
+async fn compatible_minimax_and_anthropic_aws_baseline_conformance() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_string(response()))
@@ -407,6 +410,22 @@ async fn minimax_and_anthropic_aws_baseline_conformance() {
         .unwrap();
     assert_capability_honesty(&minimax).unwrap();
     assert_declaration_honesty(&minimax).unwrap();
+
+    let compatible = try_compatible_model(
+        &server.uri(),
+        "future-provider",
+        "future-model",
+        "app.future.messages",
+        AnthropicCompatibleAuth::None,
+        anthropic_capabilities(oven_sdk::ReplayPolicy::IfValid),
+        anthropic_protocol(),
+    )
+    .unwrap();
+    assert_stream_lifecycle(&compatible, Request::new(Vec::new()))
+        .await
+        .unwrap();
+    assert_capability_honesty(&compatible).unwrap();
+    assert_declaration_honesty(&compatible).unwrap();
 
     let aws = AnthropicAws::builder("us-west-2", "wrkspc_test")
         .bearer_key("test")
@@ -434,6 +453,16 @@ async fn all_concrete_models_inherit_unsupported_compaction_without_io() {
         .build()
         .unwrap()
         .model("minimax-model");
+    let compatible = try_compatible_model(
+        &server.uri(),
+        "future-provider",
+        "compatible-model",
+        "app.future.messages",
+        AnthropicCompatibleAuth::None,
+        anthropic_capabilities(oven_sdk::ReplayPolicy::IfValid),
+        anthropic_protocol(),
+    )
+    .unwrap();
     let aws = AnthropicAws::builder("us-west-2", "workspace")
         .bearer_key("key")
         .base_url(server.uri())
@@ -443,6 +472,7 @@ async fn all_concrete_models_inherit_unsupported_compaction_without_io() {
 
     for model in [
         &direct as &dyn LanguageModel,
+        &compatible as &dyn LanguageModel,
         &minimax as &dyn LanguageModel,
         &aws as &dyn LanguageModel,
     ] {

@@ -1,7 +1,7 @@
 # oven-sdk-anthropic
 
-Tokio/reqwest Messages adapters for direct Anthropic, MiniMax's
-Anthropic-compatible API, and Claude Platform on AWS.
+Tokio/reqwest Messages adapters for direct Anthropic, caller-selected
+Anthropic-compatible providers, MiniMax, and Claude Platform on AWS.
 
 Crate version **0.5.0** targets `oven-sdk` **0.4.0** and uses its registry-free
 `ModelConfig` API. The crate has no provider factory, model registry, model
@@ -18,6 +18,7 @@ cargo add oven-sdk@0.4.0 oven-sdk-anthropic@0.5.0 reqwest@0.12
 Each concrete type has exactly one constructor:
 
 - `AnthropicModel::new(ModelConfig<AnthropicAuth, AnthropicSettings>)`
+- `AnthropicCompatibleModel::new(ModelConfig<AnthropicCompatibleAuth, AnthropicCompatibleSettings>)`
 - `MiniMaxModel::new(ModelConfig<MiniMaxAuth, MiniMaxSettings>)`
 - `AnthropicAwsModel::new(ModelConfig<AnthropicAwsAuth, AnthropicAwsSettings>)`
 
@@ -129,6 +130,20 @@ forbidden while disabled, general effort support, assistant prefill, and the
 sampling rule. Request `thinking.display` and `effort` remain open strings and
 are forwarded unchanged after structural validation.
 
+## Generic Anthropic Messages compatibility
+
+`AnthropicCompatibleModel` accepts any validated caller-selected provider ID
+and explicit base endpoint, then appends `/messages` with the same URL semantics
+as `AnthropicModel`. Its caller-owned `adapter_id` must be valid and cannot use
+the reserved `oven.anthropic.messages` or `oven.minimax.messages` identities.
+
+The compatible model uses the direct Anthropic Messages request, SSE, tool,
+error, beta-header, version-header, capability-ceiling, and protocol-settings
+implementation without provider-name or model-name inference. Authentication is
+explicitly one of `ApiKey`, `Bearer`, or `None`; the first two inject
+`x-api-key` or `Authorization: Bearer ...` respectively unless caller headers
+already authenticate. Capabilities remain entirely caller-declared.
+
 ## MiniMax Messages compatibility
 
 MiniMax models require provider ID `minimax` and use adapter ID
@@ -175,6 +190,7 @@ access key IDs remain non-secret strings.
 Replay uses only current scope-aware private formats:
 
 - direct Anthropic: `oven.anthropic.messages.assistant.v3`
+- compatible Anthropic Messages: `oven.anthropic.messages.assistant.v3`, scoped to the caller adapter ID
 - MiniMax: `oven.minimax.messages.assistant.v3`
 - Claude Platform on AWS: `oven.anthropic.aws.messages.assistant.v3`
 
@@ -196,8 +212,8 @@ omit model identity because identity now belongs to the core native-context scop
 
 ## Provider-native compaction
 
-Direct Anthropic Messages, MiniMax Messages compatibility, and Claude Platform
-on AWS expose no provider-native compaction endpoint. All three constructors
+Direct and compatible Anthropic Messages, MiniMax Messages compatibility, and
+Claude Platform on AWS expose no provider-native compaction endpoint. All constructors
 require `CompactionCapability::Unsupported` and reject `Native` declarations
 before creating a model. The concrete models do not override core compaction
 methods: `validate_compaction`, `supports_compaction`, and `compact` therefore
@@ -205,7 +221,7 @@ inherit core's default unsupported behavior and perform no provider I/O.
 
 ## Streaming, errors, and cancellation
 
-All three concrete models share the incremental SSE parser and strict state
+All four concrete models share the incremental SSE parser and strict state
 machine. Successful streams begin with `StreamStart` and end with exactly one
 terminal `Finish`. Content block starts must be contiguous from zero; indices
 cannot be duplicated or reused after finalization. Deltas and stops may
@@ -257,7 +273,9 @@ a terminal `Finish`, structured `ModelError`, explicit media/replay contracts,
     `NativeContextScope`-aware bounded native replay, no hidden retries, no URL downloads, and
 separate credential/header/idle timeouts. MiniMax uses its documented bearer
 header rather than Vercel's `x-api-key` choice. Provider-defined scalar labels
-remain open strings.
+remain open strings. Generic Anthropic compatibility requires a caller-owned
+provider ID, endpoint, adapter ID, authentication mode, capabilities, and
+protocol settings rather than Vercel provider-package presets.
 
 **Normalization differences.** Tool JSON finalizes only at
 `content_block_stop`; malformed or non-object input is fatal. Thinking

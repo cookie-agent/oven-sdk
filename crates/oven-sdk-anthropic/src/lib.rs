@@ -28,11 +28,12 @@ pub mod wire;
 
 pub use config::{
     AnthropicAuth, AnthropicAwsAuth, AnthropicAwsCredentialProvider, AnthropicAwsCredentials,
-    AnthropicAwsSettings, AnthropicProtocolSettings, AnthropicSettings, AnthropicThinkingSupport,
-    MiniMaxAuth, MiniMaxProtocolSettings, MiniMaxSettings,
+    AnthropicAwsSettings, AnthropicCompatibleAuth, AnthropicCompatibleSettings,
+    AnthropicProtocolSettings, AnthropicSettings, AnthropicThinkingSupport, MiniMaxAuth,
+    MiniMaxProtocolSettings, MiniMaxSettings,
 };
 pub use error::classify_error;
-pub use model::{AnthropicAwsModel, AnthropicModel, MiniMaxModel};
+pub use model::{AnthropicAwsModel, AnthropicCompatibleModel, AnthropicModel, MiniMaxModel};
 pub use options::{
     AnthropicAwsRequestExt, AnthropicAwsRequestOptions, AnthropicCacheControl, AnthropicCacheTtl,
     AnthropicRequestExt, AnthropicRequestOptions, AnthropicThinking, AnthropicToolOptions,
