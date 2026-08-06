@@ -209,6 +209,9 @@ Signed/redacted provider reasoning is replayed only from a matching,
 semantically valid current artifact. Normalized reconstruction never invents
 provider-authoritative reasoning state. Replay payloads remain bounded and
 omit model identity because identity now belongs to the core native-context scope.
+Compatible endpoints use the same capture path: streamed signed thinking blocks
+are retained verbatim in the terminal artifact and replayed during tool-use
+continuations when the caller declares native replay support.
 
 ## Provider-native compaction
 

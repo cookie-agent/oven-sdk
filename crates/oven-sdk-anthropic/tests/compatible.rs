@@ -1,6 +1,10 @@
 mod common;
 
-use oven_sdk::{AbortSignal, AdapterId, LanguageModel, ReplayPolicy, Request, SecretString};
+use futures_util::StreamExt;
+use oven_sdk::{
+    AbortSignal, AdapterId, HistoryTurn, LanguageModel, ReplayDisposition, ReplayPolicy, Request,
+    SecretString, StreamPart, ToolContent, ToolMessage, ToolResultPart,
+};
 use oven_sdk_anthropic::{
     ANTHROPIC_MESSAGES_ADAPTER_ID, AnthropicCompatibleAuth, AnthropicRequestExt,
     AnthropicRequestOptions, MINIMAX_MESSAGES_ADAPTER_ID,
@@ -112,6 +116,83 @@ async fn compatible_preserves_provider_and_adapter_ids_and_joins_nested_endpoint
     assert_eq!(
         server.received_requests().await.unwrap()[0].url.path(),
         "/custom/v1/messages"
+    );
+}
+
+#[tokio::test]
+async fn compatible_signed_thinking_tool_turn_replays_without_reconstruction_warning() {
+    let server = MockServer::start().await;
+    let signed_tool_turn = [
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"reason\"}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"78aFxXtB9TS25vt+signed\"}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"lookup\",\"input\":{\"query\":\"oven\"}}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    ]
+    .concat();
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(signed_tool_turn))
+        .mount(&server)
+        .await;
+    let model = try_compatible_model(
+        &server.uri(),
+        "kimi-for-coding",
+        "kimi-for-coding",
+        "app.kimi.messages",
+        AnthropicCompatibleAuth::None,
+        anthropic_capabilities(ReplayPolicy::IfValid),
+        anthropic_protocol(),
+    )
+    .unwrap();
+
+    let completed = model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let artifact = completed.turn.finish.native_replay.as_ref().unwrap();
+    assert_eq!(
+        artifact
+            .payload()
+            .pointer("/message/content/0/signature")
+            .and_then(serde_json::Value::as_str),
+        Some("78aFxXtB9TS25vt+signed")
+    );
+
+    let mut response = model
+        .stream(
+            Request::new(vec![
+                HistoryTurn::assistant(completed.turn),
+                HistoryTurn::tool(ToolMessage::new(vec![ToolResultPart::new(
+                    "call_1",
+                    ToolContent::Text("result".into()),
+                )])),
+            ]),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.request.replay.decisions[0].disposition,
+        ReplayDisposition::Replayed
+    );
+    assert!(matches!(
+        response.stream.next().await.unwrap().unwrap(),
+        StreamPart::StreamStart { warnings } if warnings.is_empty()
+    ));
+
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(
+        body["messages"][0]["content"][0],
+        serde_json::json!({
+            "type": "thinking",
+            "thinking": "reason",
+            "signature": "78aFxXtB9TS25vt+signed"
+        })
     );
 }
 
