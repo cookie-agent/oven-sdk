@@ -13,7 +13,7 @@ Version 0.4.0 targets `oven-sdk` 0.4.0 and adds provider-native compaction
 declaration, cancellation, round-trip, context-shape, model-ID independence,
 and unsupported-before-I/O assertions.
 
-The dependency is pinned exactly to `oven-sdk = "=0.4.0"`. Media fixtures cover
+The dependency is pinned exactly to `oven-sdk = "=0.5.0"`. Media fixtures cover
 every bounded MIME-pattern/value and source-form combination, including negative
 undeclared cases. Replay and native-context assertions require an exact
 configured `NativeContextScope`.

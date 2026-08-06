@@ -18,7 +18,7 @@ base64.workspace = true
 bytes.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
-oven-sdk = { path = "../oven-sdk", version = "=0.4.0" }
+oven-sdk = { path = "../oven-sdk", version = "=0.5.0" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -26,6 +26,6 @@ tokio.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-oven-sdk-conformance = { path = "../oven-sdk-conformance", version = "=0.4.0" }
+oven-sdk-conformance = { path = "../oven-sdk-conformance", version = "=0.5.0" }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util"] }
 wiremock = "0.6"

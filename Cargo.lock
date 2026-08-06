@@ -690,7 +690,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "oven-sdk"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitflags",
  "bytes",
@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "oven-sdk-anthropic"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64",
  "bytes",
@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "oven-sdk-azure"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "bytes",
@@ -750,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "oven-sdk-bedrock"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "bytes",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "oven-sdk-cohere"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "bytes",
@@ -792,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "oven-sdk-conformance"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "futures-core",
  "oven-sdk",
@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "oven-sdk-google"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "bytes",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "oven-sdk-google-vertex"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "bytes",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "oven-sdk-open-responses"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "bytes",
@@ -858,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "oven-sdk-openai"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "bytes",
