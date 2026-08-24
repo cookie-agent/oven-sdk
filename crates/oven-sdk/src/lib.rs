@@ -1371,6 +1371,7 @@ impl Request {
 
     /// Validates structural request invariants and declared model capabilities.
     pub fn validate_for(&self, capabilities: &ModelCapabilities) -> Result<(), ModelError> {
+        capabilities.validate()?;
         if self.native_context.is_some()
             && capabilities.compaction == CompactionCapability::Unsupported
         {

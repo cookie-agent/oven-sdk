@@ -232,6 +232,17 @@ fn capability_declarations_reject_dependency_mismatches() {
 }
 
 #[test]
+fn request_validation_rechecks_mutated_capability_consistency() {
+    let mut declared = capabilities(Capability::TOOL_CALLING | Capability::PARALLEL_TOOLS);
+    declared.features.remove(Capability::TOOL_CALLING);
+
+    assert!(matches!(
+        Request::new(Vec::new()).validate_for(&declared),
+        Err(error) if error.kind() == ModelErrorKind::InvalidRequest
+    ));
+}
+
+#[test]
 fn replay_policy_capability_matrix_is_complete() {
     for policy in [
         ReplayPolicy::Never,
