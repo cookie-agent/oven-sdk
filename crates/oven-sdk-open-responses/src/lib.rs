@@ -3368,7 +3368,8 @@ async fn read_error_body(
             read_message: "Open Responses error body read failed",
             overflow_message: "Open Responses error body byte count overflowed",
         },
-        || tokio::time::sleep(idle),
+        tokio::time::sleep(idle),
+        move |timer| timer.reset(tokio::time::Instant::now() + idle),
     )
     .await
 }

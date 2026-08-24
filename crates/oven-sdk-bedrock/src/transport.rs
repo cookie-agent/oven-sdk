@@ -59,7 +59,8 @@ pub(crate) async fn read_body(
             read_message: "Bedrock response body read failed",
             overflow_message: "Bedrock response byte count overflowed",
         },
-        || tokio::time::sleep(idle),
+        tokio::time::sleep(idle),
+        move |timer| timer.reset(tokio::time::Instant::now() + idle),
     )
     .await
 }

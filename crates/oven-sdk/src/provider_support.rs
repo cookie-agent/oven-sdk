@@ -1,6 +1,6 @@
 //! Runtime-neutral protocol and response-reading helpers for provider adapters.
 
-use std::{future::Future, time::Duration};
+use std::{future::Future, pin::Pin, time::Duration};
 
 use bytes::Bytes;
 use futures_core::Stream;
@@ -211,28 +211,32 @@ pub struct BodyReadConfig {
 }
 
 /// Reads and bounds a byte stream with adapter-supplied idle timers and diagnostics.
-pub async fn read_bounded_body<S, E, T, F>(
+pub async fn read_bounded_body<S, E, T, R>(
     stream: S,
     abort: &AbortSignal,
     config: BodyReadConfig,
-    mut idle_timer: F,
+    idle_timer: T,
+    mut reset_idle: R,
 ) -> Result<(Vec<u8>, u64), ModelError>
 where
     S: Stream<Item = Result<Bytes, E>> + Send,
     T: Future<Output = ()> + Send,
-    F: FnMut() -> T,
+    R: FnMut(Pin<&mut T>),
 {
     let mut body = Vec::new();
     let mut count = 0_u64;
-    pin_mut!(stream);
+    pin_mut!(stream, idle_timer);
+    let aborted = abort.aborted();
+    pin_mut!(aborted);
     loop {
+        reset_idle(idle_timer.as_mut());
         let mut pinned_stream = stream.as_mut();
         let next = pinned_stream.next().fuse();
-        let timeout = idle_timer().fuse();
-        let aborted = abort.aborted().fuse();
-        pin_mut!(next, timeout, aborted);
+        let timeout = idle_timer.as_mut().fuse();
+        let aborted_wait = aborted.as_mut().fuse();
+        pin_mut!(next, timeout, aborted_wait);
         let next = select_biased! {
-            _ = aborted => return Err(ModelError::abort(config.abort_message)
+            _ = aborted_wait => return Err(ModelError::abort(config.abort_message)
                 .with_stage(config.stage)
                 .with_bytes_received(count)),
             _ = timeout => return Err(ModelError::timeout(config.timeout_message)

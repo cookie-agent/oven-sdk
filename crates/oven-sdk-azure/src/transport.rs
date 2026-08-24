@@ -49,7 +49,8 @@ pub(crate) async fn read_error_body(
             read_message: "Azure OpenAI error response body read failed",
             overflow_message: "Azure OpenAI error response body byte count overflowed",
         },
-        || tokio::time::sleep(idle),
+        tokio::time::sleep(idle),
+        move |timer| timer.reset(tokio::time::Instant::now() + idle),
     )
     .await
 }
