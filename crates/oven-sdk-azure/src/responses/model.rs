@@ -339,7 +339,7 @@ async fn configured_headers(
     abort: &AbortSignal,
 ) -> Result<(HeaderMap, JsonValue, NativeContextScope), ModelError> {
     let caller_headers = config.caller_headers()?;
-    let mut headers = HeaderMap::new();
+    let mut headers = caller_headers;
     match &config.auth {
         AzureOpenAiAuth::ApiKey(key) => {
             insert_header(&mut headers, "api-key", key.expose_secret())?;
@@ -360,7 +360,6 @@ async fn configured_headers(
             insert_header(&mut headers, "authorization", &format!("Bearer {token}"))?;
         }
     }
-    headers.extend(caller_headers);
     let (binding, scope) = config.native_context(&headers)?;
     Ok((headers, binding, scope))
 }

@@ -43,6 +43,7 @@ struct Config {
     auth: Auth,
     endpoint: oven_sdk::ApiEndpoint,
     headers: HeaderConfig,
+    base_headers: HeaderMap,
     client: reqwest::Client,
     timeouts: crate::transport::AnthropicTimeouts,
     protocol_settings: ProtocolSettings,
@@ -107,19 +108,12 @@ impl InnerModel {
                     .with_stage(ErrorStage::RequestEncoding)
             })?;
             crate::request::validate_serialized_request_size(body.len(), self.config.protocol)?;
-            let mut headers = self.config.headers.static_headers.as_map().clone();
+            let mut headers = self.config.base_headers.clone();
             if let Some(provider) = &self.config.headers.dynamic_headers {
                 headers.extend(provider.headers()?.as_map().clone());
             }
             if self.config.protocol == Protocol::AnthropicAws {
                 validate_aws_caller_headers(&headers)?;
-            }
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            if self.config.protocol != Protocol::MiniMax {
-                headers.insert(
-                    HeaderName::from_static("anthropic-version"),
-                    HeaderValue::from_static(VERSION),
-                );
             }
             if !encoded.betas.is_empty() && self.config.protocol.is_first_party() {
                 headers.insert(
@@ -624,6 +618,18 @@ macro_rules! impl_language_model {
     };
 }
 
+fn base_headers(configured: &HeaderConfig, protocol: Protocol) -> HeaderMap {
+    let mut headers = configured.static_headers.as_map().clone();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if protocol != Protocol::MiniMax {
+        headers.insert(
+            HeaderName::from_static("anthropic-version"),
+            HeaderValue::from_static(VERSION),
+        );
+    }
+    headers
+}
+
 /// A caller-configured direct Anthropic Messages model.
 #[derive(Clone)]
 pub struct AnthropicModel(InnerModel);
@@ -660,6 +666,7 @@ impl AnthropicModel {
             config.model.id.clone(),
             native_context_resource,
         )?;
+        let base_headers = base_headers(&config.provider.headers, Protocol::Anthropic);
         Ok(Self(InnerModel {
             descriptor,
             config: Arc::new(Config {
@@ -667,6 +674,7 @@ impl AnthropicModel {
                 auth: Auth::Anthropic(config.provider.auth),
                 endpoint: config.provider.api,
                 headers: config.provider.headers,
+                base_headers,
                 client: config.settings.client,
                 timeouts: config.settings.timeouts,
                 protocol_settings: ProtocolSettings::Anthropic(config.settings.protocol),
@@ -722,6 +730,7 @@ impl AnthropicCompatibleModel {
             config.model.id.clone(),
             native_context_resource,
         )?;
+        let base_headers = base_headers(&config.provider.headers, Protocol::Anthropic);
         Ok(Self(InnerModel {
             descriptor,
             config: Arc::new(Config {
@@ -729,6 +738,7 @@ impl AnthropicCompatibleModel {
                 auth: Auth::Compatible(config.provider.auth),
                 endpoint: config.provider.api,
                 headers: config.provider.headers,
+                base_headers,
                 client: config.settings.client,
                 timeouts: config.settings.timeouts,
                 protocol_settings: ProtocolSettings::Anthropic(config.settings.protocol),
@@ -778,6 +788,7 @@ impl MiniMaxModel {
             config.model.id.clone(),
             native_context_resource,
         )?;
+        let base_headers = base_headers(&config.provider.headers, Protocol::MiniMax);
         Ok(Self(InnerModel {
             descriptor,
             config: Arc::new(Config {
@@ -785,6 +796,7 @@ impl MiniMaxModel {
                 auth: Auth::MiniMax(config.provider.auth),
                 endpoint: config.provider.api,
                 headers: config.provider.headers,
+                base_headers,
                 client: config.settings.client,
                 timeouts: config.settings.timeouts,
                 protocol_settings: ProtocolSettings::MiniMax(config.settings.protocol),
@@ -844,6 +856,7 @@ impl AnthropicAwsModel {
             config.model.id.clone(),
             native_context_resource,
         )?;
+        let base_headers = base_headers(&config.provider.headers, Protocol::AnthropicAws);
         Ok(Self(InnerModel {
             descriptor,
             config: Arc::new(Config {
@@ -851,6 +864,7 @@ impl AnthropicAwsModel {
                 auth: Auth::AnthropicAws(config.provider.auth),
                 endpoint: config.provider.api,
                 headers: config.provider.headers,
+                base_headers,
                 client: config.settings.client,
                 timeouts: config.settings.timeouts,
                 protocol_settings: ProtocolSettings::Anthropic(config.settings.protocol),

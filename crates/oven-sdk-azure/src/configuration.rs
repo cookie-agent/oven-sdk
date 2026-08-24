@@ -8,7 +8,10 @@ use oven_sdk::{
     LanguageModelDescriptor, MediaSourceSupport, ModelCapabilities, ModelConfig, ModelError,
     ModelIdentity, NativeContextScope, ProviderConfig, ReplayCapability, ResourceId, SecretString,
 };
-use reqwest::{Client, header::HeaderMap};
+use reqwest::{
+    Client,
+    header::{CONTENT_TYPE, HeaderMap, HeaderValue},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -217,6 +220,7 @@ pub(crate) struct Config {
     pub(crate) auth: AzureOpenAiAuth,
     pub(crate) client: Client,
     pub(crate) headers: HeaderConfig,
+    pub(crate) base_headers: HeaderMap,
     pub(crate) timeouts: AzureOpenAiTimeouts,
     pub(crate) capabilities: ModelCapabilities,
     pub(crate) completions: AzureOpenAiCompletionsConfig,
@@ -231,11 +235,12 @@ const NATIVE_SCOPE_VERSION: &str = "azure.openai.native_context_scope.v1";
 
 impl Config {
     pub(crate) fn caller_headers(&self) -> Result<HeaderMap, ModelError> {
-        let mut headers = self.headers.static_headers.as_map().clone();
+        let mut headers = self.base_headers.clone();
         if let Some(provider) = &self.headers.dynamic_headers {
-            headers.extend(provider.headers()?.as_map().clone());
+            let dynamic = provider.headers()?;
+            reject_protected_headers(dynamic.as_map())?;
+            headers.extend(dynamic.as_map().clone());
         }
-        reject_protected_headers(&headers)?;
         Ok(headers)
     }
 
@@ -391,11 +396,14 @@ fn build(
         .connect_timeout(timeouts.connect)
         .build()
         .map_err(|_| ModelError::transport("could not construct Azure OpenAI HTTP client"))?;
+    let mut base_headers = provider.headers.static_headers.as_map().clone();
+    base_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     Ok((
         Arc::new(Config {
             auth: provider.auth,
             client,
             headers: provider.headers,
+            base_headers,
             timeouts,
             capabilities: descriptor.capabilities.clone(),
             completions,

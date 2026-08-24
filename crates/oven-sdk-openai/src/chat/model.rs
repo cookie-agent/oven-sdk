@@ -14,9 +14,9 @@ use crate::{
     configuration::{
         MaxTokensField, OpenAiAuth, OpenAiChatSettings, OpenAiCompatibleAuth,
         OpenAiCompatibleChatSettings, ReasoningField, StructuredOutputSupport, SystemMessageRole,
-        build_client, canonical_endpoint, compatible_headers, header_scope_component,
-        official_headers, replay_resource_id, validate_chat_declaration,
-        validate_routing_discriminator,
+        build_client, canonical_endpoint, compatible_base_headers, compatible_headers,
+        header_scope_component, official_base_headers, official_headers, replay_resource_id,
+        validate_chat_declaration, validate_routing_discriminator,
     },
     error::classify_error,
     transport::OpenAiTimeouts,
@@ -80,6 +80,7 @@ impl OpenAiChatModel {
             },
         )?;
         let client = build_client(config.settings.client, &config.settings.timeouts)?;
+        let base_headers = official_base_headers(&config.provider.auth, &config.provider.headers)?;
         Ok(Self {
             runtime: Arc::new(Runtime {
                 descriptor,
@@ -87,6 +88,7 @@ impl OpenAiChatModel {
                 api: config.provider.api.as_url().to_string(),
                 auth: Authentication::Official(config.provider.auth),
                 headers: config.provider.headers,
+                base_headers,
                 client,
                 query: Vec::new(),
                 timeouts: config.settings.timeouts,
@@ -161,6 +163,7 @@ impl OpenAiCompatibleChatModel {
             },
         )?;
         let client = build_client(config.settings.client, &config.settings.timeouts)?;
+        let base_headers = compatible_base_headers(&config.provider.headers)?;
         Ok(Self {
             runtime: Arc::new(Runtime {
                 descriptor,
@@ -168,6 +171,7 @@ impl OpenAiCompatibleChatModel {
                 api: config.provider.api.as_url().to_string(),
                 auth: Authentication::Compatible(config.provider.auth),
                 headers: config.provider.headers,
+                base_headers,
                 client,
                 query: config.settings.query,
                 timeouts: config.settings.timeouts,
@@ -215,6 +219,7 @@ struct Runtime {
     api: String,
     auth: Authentication,
     headers: oven_sdk::HeaderConfig,
+    base_headers: HeaderMap,
     client: Client,
     query: Vec<(String, String)>,
     timeouts: OpenAiTimeouts,
@@ -403,8 +408,12 @@ async fn start_stream(
         .map_err(|_| ModelError::invalid_request("invalid Chat endpoint URL"))?;
     url.query_pairs_mut().extend_pairs(runtime.query.iter());
     let headers = match &runtime.auth {
-        Authentication::Official(auth) => official_headers(auth, &runtime.headers)?,
-        Authentication::Compatible(auth) => compatible_headers(auth, &runtime.headers)?,
+        Authentication::Official(auth) => {
+            official_headers(auth, &runtime.base_headers, &runtime.headers)?
+        }
+        Authentication::Compatible(auth) => {
+            compatible_headers(auth, &runtime.base_headers, &runtime.headers)?
+        }
     };
     let send = runtime
         .client

@@ -229,6 +229,7 @@ struct Config {
     settings: GoogleVertexSettings,
     descriptor: LanguageModelDescriptor,
     client: Client,
+    base_headers: HeaderMap,
 }
 
 /// A configured Vertex Gemini publisher model or deployed endpoint.
@@ -335,12 +336,15 @@ impl GoogleVertexModel {
                 .build()
                 .map_err(|_| ModelError::transport("could not construct Vertex HTTP client"))?,
         };
+        let mut base_headers = config.provider.headers.static_headers.as_map().clone();
+        base_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(Self {
             config: Arc::new(Config {
                 provider: config.provider,
                 settings: config.settings,
                 descriptor,
                 client,
+                base_headers,
             }),
         })
     }
@@ -421,13 +425,12 @@ impl GoogleVertexModel {
                     .with_stage(ErrorStage::RequestEncoding)
             })?;
             let token = self.resolve_token(&abort).await?;
-            let mut headers = self.config.provider.headers.static_headers.as_map().clone();
+            let mut headers = self.config.base_headers.clone();
             if let Some(provider) = &self.config.provider.headers.dynamic_headers {
                 let dynamic = provider.headers()?;
                 validate_headers(dynamic.as_map())?;
                 headers.extend(dynamic.as_map().clone());
             }
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
             headers.insert(
                 AUTHORIZATION,
                 HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {

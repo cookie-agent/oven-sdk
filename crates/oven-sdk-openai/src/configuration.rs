@@ -295,7 +295,7 @@ pub(crate) fn build_client(
     }
 }
 
-pub(crate) fn official_headers(
+pub(crate) fn official_base_headers(
     auth: &OpenAiAuth,
     configured: &HeaderConfig,
 ) -> Result<HeaderMap, ModelError> {
@@ -305,26 +305,46 @@ pub(crate) fn official_headers(
         ));
     }
     let mut headers = HeaderMap::new();
-    insert_header(
-        &mut headers,
-        AUTHORIZATION,
-        &format!("Bearer {}", auth.api_key.expose_secret()),
-    )?;
     if let Some(organization) = &auth.organization {
         insert_named_header(&mut headers, "openai-organization", organization)?;
     }
     if let Some(project) = &auth.project {
         insert_named_header(&mut headers, "openai-project", project)?;
     }
-    extend_configured_headers(&mut headers, configured, true)?;
+    validate_headers(configured.static_headers.as_map(), true)?;
+    headers.extend(configured.static_headers.as_map().clone());
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    Ok(headers)
+}
+
+pub(crate) fn compatible_base_headers(configured: &HeaderConfig) -> Result<HeaderMap, ModelError> {
+    validate_headers(configured.static_headers.as_map(), true)?;
+    let mut headers = configured.static_headers.as_map().clone();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    Ok(headers)
+}
+
+pub(crate) fn official_headers(
+    auth: &OpenAiAuth,
+    base_headers: &HeaderMap,
+    configured: &HeaderConfig,
+) -> Result<HeaderMap, ModelError> {
+    let mut headers = base_headers.clone();
+    insert_header(
+        &mut headers,
+        AUTHORIZATION,
+        &format!("Bearer {}", auth.api_key.expose_secret()),
+    )?;
+    extend_dynamic_headers(&mut headers, configured, true)?;
     Ok(headers)
 }
 
 pub(crate) fn compatible_headers(
     auth: &OpenAiCompatibleAuth,
+    base_headers: &HeaderMap,
     configured: &HeaderConfig,
 ) -> Result<HeaderMap, ModelError> {
-    let mut headers = HeaderMap::new();
+    let mut headers = base_headers.clone();
     if let Some(token) = &auth.bearer {
         if token.is_empty() {
             return Err(ModelError::invalid_request(
@@ -342,17 +362,15 @@ pub(crate) fn compatible_headers(
         validate_headers(supplied.as_map(), false)?;
         headers.extend(supplied.as_map().clone());
     }
-    extend_configured_headers(&mut headers, configured, true)?;
+    extend_dynamic_headers(&mut headers, configured, true)?;
     Ok(headers)
 }
 
-fn extend_configured_headers(
+fn extend_dynamic_headers(
     headers: &mut HeaderMap,
     configured: &HeaderConfig,
     protect_auth: bool,
 ) -> Result<(), ModelError> {
-    validate_headers(configured.static_headers.as_map(), protect_auth)?;
-    headers.extend(configured.static_headers.as_map().clone());
     if let Some(provider) = &configured.dynamic_headers {
         let supplied = provider.headers()?;
         validate_headers(supplied.as_map(), protect_auth)?;

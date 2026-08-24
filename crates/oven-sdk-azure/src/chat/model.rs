@@ -138,7 +138,7 @@ fn configured_owned(config: &Config) -> OwnedProfile {
 }
 
 async fn configured_settings(config: &Config, abort: &AbortSignal) -> Result<Settings, ModelError> {
-    let mut headers = HeaderMap::new();
+    let mut headers = config.caller_headers()?;
     match &config.auth {
         AzureOpenAiAuth::ApiKey(key) => {
             insert_header(&mut headers, "api-key", key.expose_secret())?;
@@ -159,8 +159,6 @@ async fn configured_settings(config: &Config, abort: &AbortSignal) -> Result<Set
             insert_header(&mut headers, "authorization", &format!("Bearer {token}"))?;
         }
     }
-    let caller_headers = config.caller_headers()?;
-    headers.extend(caller_headers);
     let (replay_binding, replay_scope) = config.native_context(&headers)?;
     Ok(Settings {
         client: config.client.clone(),

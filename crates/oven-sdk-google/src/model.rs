@@ -86,6 +86,7 @@ struct Config {
     descriptor: LanguageModelDescriptor,
     client: Client,
     native_context_scope: NativeContextScope,
+    base_headers: HeaderMap,
 }
 
 /// A configured Google Gemini `generateContent` model.
@@ -130,6 +131,8 @@ impl GoogleModel {
             AdapterId::new(GOOGLE_GENERATE_CONTENT_ADAPTER_ID),
             config.model.capabilities.clone(),
         )?;
+        let mut base_headers = config.provider.headers.static_headers.as_map().clone();
+        base_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(Self {
             config: Arc::new(Config {
                 provider: config.provider,
@@ -137,6 +140,7 @@ impl GoogleModel {
                 descriptor,
                 client,
                 native_context_scope,
+                base_headers,
             }),
         })
     }
@@ -218,13 +222,12 @@ impl GoogleModel {
                     .with_stage(ErrorStage::RequestEncoding)
             })?;
             crate::request::validate_request_body_size(body.len())?;
-            let mut headers = self.config.provider.headers.static_headers.as_map().clone();
+            let mut headers = self.config.base_headers.clone();
             if let Some(provider) = &self.config.provider.headers.dynamic_headers {
                 let dynamic = provider.headers()?;
                 validate_header_map(dynamic.as_map())?;
                 headers.extend(dynamic.as_map().clone());
             }
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
             headers.insert(
                 HeaderName::from_static("x-goog-api-key"),
                 HeaderValue::from_str(self.config.provider.auth.api_key.expose_secret()).map_err(

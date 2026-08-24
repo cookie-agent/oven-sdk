@@ -12,7 +12,7 @@ use oven_sdk::{
 use crate::{
     configuration::{
         OpenAiAuth, OpenAiResponsesSettings, build_client, canonical_endpoint,
-        header_scope_component, official_headers, replay_resource_id,
+        header_scope_component, official_base_headers, official_headers, replay_resource_id,
         validate_responses_declaration, validate_routing_discriminator,
     },
     error::classify_error,
@@ -72,6 +72,7 @@ impl OpenAiResponsesModel {
             resource_id,
         )?;
         let client = build_client(config.settings.client, &config.settings.timeouts)?;
+        let base_headers = official_base_headers(&config.provider.auth, &config.provider.headers)?;
         Ok(Self {
             runtime: Arc::new(Runtime {
                 descriptor,
@@ -79,6 +80,7 @@ impl OpenAiResponsesModel {
                 api: config.provider.api.as_url().to_string(),
                 auth: config.provider.auth,
                 headers: config.provider.headers,
+                base_headers,
                 client,
                 timeouts: config.settings.timeouts,
             }),
@@ -99,6 +101,7 @@ struct Runtime {
     api: String,
     auth: OpenAiAuth,
     headers: oven_sdk::HeaderConfig,
+    base_headers: HeaderMap,
     client: reqwest::Client,
     timeouts: OpenAiTimeouts,
 }
@@ -169,7 +172,11 @@ impl LanguageModel for OpenAiResponsesModel {
                 &self.runtime.scope,
                 policy,
             )?;
-            let headers = official_headers(&self.runtime.auth, &self.runtime.headers)?;
+            let headers = official_headers(
+                &self.runtime.auth,
+                &self.runtime.base_headers,
+                &self.runtime.headers,
+            )?;
             let send = self
                 .runtime
                 .client
@@ -311,7 +318,11 @@ impl LanguageModel for OpenAiResponsesModel {
                     .with_stage(ErrorStage::NativeContextEncode)
             })?;
             compaction::validate_request_size(body.len())?;
-            let headers = official_headers(&self.runtime.auth, &self.runtime.headers)?;
+            let headers = official_headers(
+                &self.runtime.auth,
+                &self.runtime.base_headers,
+                &self.runtime.headers,
+            )?;
             let send = self
                 .runtime
                 .client

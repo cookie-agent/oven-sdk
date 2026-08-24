@@ -25,7 +25,7 @@ use oven_sdk::{
     ResourceId, ResponseFormat, ResponseHead, SanitizedBody, SecretString, SourcePart, StreamItem,
     StreamPart, StreamResponse, ToolChoice, ToolContent, ToolResultPart, Usage,
 };
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -199,6 +199,7 @@ struct Config {
     client: reqwest::Client,
     endpoint: reqwest::Url,
     headers: HeaderConfig,
+    base_headers: HeaderMap,
     settings: OpenResponsesSettings,
     capabilities: ModelCapabilities,
     identity: ModelIdentity,
@@ -246,12 +247,15 @@ impl Config {
             .connect_timeout(settings.timeouts.connect)
             .build()
             .map_err(|_| ModelError::transport("could not construct Open Responses HTTP client"))?;
+        let mut base_headers = provider.headers.static_headers.as_map().clone();
+        base_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok((
             Arc::new(Self {
                 auth: provider.auth,
                 client,
                 endpoint: provider.api.as_url().clone(),
                 headers: provider.headers,
+                base_headers,
                 settings,
                 capabilities: descriptor.capabilities.clone(),
                 identity,
@@ -262,11 +266,12 @@ impl Config {
     }
 
     fn request_headers(&self) -> Result<HeaderMap, ModelError> {
-        let mut headers = self.headers.static_headers.as_map().clone();
+        let mut headers = self.base_headers.clone();
         if let Some(dynamic) = &self.headers.dynamic_headers {
-            headers.extend(dynamic.headers()?.as_map().clone());
+            let dynamic = dynamic.headers()?;
+            reject_protected_headers(dynamic.as_map())?;
+            headers.extend(dynamic.as_map().clone());
         }
-        reject_protected_headers(&headers)?;
         headers.insert(
             reqwest::header::AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", self.auth.token.expose_secret())).map_err(
