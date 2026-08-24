@@ -4,8 +4,7 @@ use oven_sdk::{ModelError, provider_support::SseParser};
 
 pub(crate) use oven_sdk::provider_support::SseEvent as Event;
 
-/// Incremental UTF-8 SSE parser accepting arbitrary byte boundaries.
-pub struct Parser {
+pub(crate) struct Parser {
     inner: SseParser,
 }
 
@@ -18,16 +17,6 @@ impl Default for Parser {
 }
 
 impl Parser {
-    /// Feeds one arbitrary network chunk.
-    pub fn feed(&mut self, chunk: &[u8]) -> Result<Vec<(String, String)>, ModelError> {
-        self.feed_events(chunk).map(|events| {
-            events
-                .into_iter()
-                .map(|event| (event.name, event.data))
-                .collect()
-        })
-    }
-
     pub(crate) fn feed_events(&mut self, chunk: &[u8]) -> Result<Vec<Event>, ModelError> {
         self.inner.feed(chunk)
     }
@@ -52,14 +41,5 @@ mod tests {
         events.extend(parser.finish_events().unwrap());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "{\"text\":\"hé\"}\nsecond");
-    }
-
-    #[test]
-    fn public_feed_returns_name_data_tuples() {
-        let mut parser = Parser::default();
-        assert_eq!(
-            parser.feed(b"event: message\ndata: x\n\n").unwrap(),
-            vec![("message".into(), "x".into())]
-        );
     }
 }

@@ -22,7 +22,7 @@ pub struct SseEvent {
 pub struct SseParser {
     bytes: Vec<u8>,
     name: String,
-    data: Vec<String>,
+    data: String,
     saw_first_line: bool,
     invalid_utf8_message: &'static str,
     clear_name_on_empty_event: bool,
@@ -41,7 +41,7 @@ impl SseParser {
         Self {
             bytes: Vec::new(),
             name: String::new(),
-            data: Vec::new(),
+            data: String::new(),
             saw_first_line: false,
             invalid_utf8_message,
             clear_name_on_empty_event: false,
@@ -57,27 +57,38 @@ impl SseParser {
 
     /// Feeds one arbitrary byte chunk and returns all completed events.
     pub fn feed(&mut self, chunk: &[u8]) -> Result<Vec<SseEvent>, ModelError> {
-        self.bytes.extend_from_slice(chunk);
         let mut events = Vec::new();
+        self.feed_into(chunk, &mut events)?;
+        Ok(events)
+    }
+
+    /// Feeds one arbitrary byte chunk into a caller-owned event buffer.
+    pub fn feed_into(
+        &mut self,
+        chunk: &[u8],
+        events: &mut Vec<SseEvent>,
+    ) -> Result<(), ModelError> {
+        let mut bytes = std::mem::take(&mut self.bytes);
+        bytes.extend_from_slice(chunk);
         let mut start = 0;
         let mut index = 0;
-        while index < self.bytes.len() {
-            if self.bytes[index] == b'\n' || self.bytes[index] == b'\r' {
-                if self.bytes[index] == b'\r' && index + 1 == self.bytes.len() {
+        while index < bytes.len() {
+            if bytes[index] == b'\n' || bytes[index] == b'\r' {
+                if bytes[index] == b'\r' && index + 1 == bytes.len() {
                     break;
                 }
                 let end = index;
-                if self.bytes[index] == b'\r' && self.bytes.get(index + 1) == Some(&b'\n') {
+                if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
                     index += 1;
                 }
-                let line = self.bytes[start..end].to_vec();
-                self.line(&line, &mut events)?;
+                self.line(&bytes[start..end], events)?;
                 start = index + 1;
             }
             index += 1;
         }
-        self.bytes.drain(..start);
-        Ok(events)
+        bytes.drain(..start);
+        self.bytes = bytes;
+        Ok(())
     }
 
     /// Flushes a final unterminated line and pending event.
@@ -115,8 +126,16 @@ impl SseParser {
         let (field, value) = line.split_once(':').unwrap_or((line, ""));
         let value = value.strip_prefix(' ').unwrap_or(value);
         match field {
-            "event" => self.name = value.to_owned(),
-            "data" => self.data.push(value.to_owned()),
+            "event" => {
+                self.name.clear();
+                self.name.push_str(value);
+            }
+            "data" => {
+                if !self.data.is_empty() {
+                    self.data.push('\n');
+                }
+                self.data.push_str(value);
+            }
             _ => {}
         }
         Ok(())
@@ -131,9 +150,8 @@ impl SseParser {
         }
         events.push(SseEvent {
             name: std::mem::take(&mut self.name),
-            data: self.data.join("\n"),
+            data: std::mem::take(&mut self.data),
         });
-        self.data.clear();
     }
 }
 

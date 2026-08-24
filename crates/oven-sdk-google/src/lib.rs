@@ -7,8 +7,7 @@ mod error;
 mod model;
 mod options;
 mod request;
-/// Incremental SSE framing utilities.
-pub mod sse;
+mod sse;
 mod stream;
 mod transport;
 
