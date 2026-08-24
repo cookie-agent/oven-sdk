@@ -8,7 +8,7 @@ use oven_sdk::{
     ToolContent, ToolResultPart,
 };
 
-use crate::{media, options::responses_options, responses::replay, schema};
+use crate::{media, options::AzureOpenAiResponsesOptions, responses::replay, schema};
 
 pub(crate) struct Encoded {
     pub(crate) body: JsonValue,
@@ -24,11 +24,11 @@ pub(crate) struct EncodedInput {
 
 pub(crate) fn validate_request(
     request: &Request,
+    options: &AzureOpenAiResponsesOptions,
     capabilities: &ModelCapabilities,
     descriptor: &LanguageModelDescriptor,
     native_scope: Option<&NativeContextScope>,
 ) -> Result<(), ModelError> {
-    let options = responses_options(request)?;
     request.validate_for(capabilities)?;
     if !request.tools.is_empty() && !capabilities.features.contains(Capability::TOOL_CALLING) {
         return Err(ModelError::unsupported(
@@ -196,18 +196,18 @@ pub(crate) fn encode_input(
 
 pub(crate) fn encode_request(
     request: &Request,
+    options: &AzureOpenAiResponsesOptions,
     descriptor: &LanguageModelDescriptor,
     policy: ReplayPolicy,
     replay_binding: &JsonValue,
     replay_scope: &NativeContextScope,
 ) -> Result<Encoded, ModelError> {
-    let options = responses_options(request)?;
     let EncodedInput {
         input,
         replay,
         mut warnings,
     } = encode_input(request, descriptor, policy, replay_binding, replay_scope)?;
-    let mut include = options.include;
+    let mut include = options.include.clone();
     if descriptor.capabilities.replay.reasoning
         && !include
             .iter()
@@ -251,22 +251,22 @@ pub(crate) fn encode_request(
         if let Some(effort) = &request.inference.reasoning_effort {
             reasoning.insert("effort".into(), effort.clone().into());
         }
-        if let Some(summary) = options.reasoning_summary {
-            reasoning.insert("summary".into(), summary.into());
+        if let Some(summary) = &options.reasoning_summary {
+            reasoning.insert("summary".into(), summary.clone().into());
         }
-        if let Some(mode) = options.reasoning_mode {
-            reasoning.insert("mode".into(), mode.into());
+        if let Some(mode) = &options.reasoning_mode {
+            reasoning.insert("mode".into(), mode.clone().into());
         }
         body["reasoning"] = JsonValue::Object(reasoning);
     }
-    if let Some(user) = options.user {
-        body["user"] = user.into();
+    if let Some(user) = &options.user {
+        body["user"] = user.clone().into();
     }
-    if let Some(service_tier) = options.service_tier {
-        body["service_tier"] = service_tier.into();
+    if let Some(service_tier) = &options.service_tier {
+        body["service_tier"] = service_tier.clone().into();
     }
-    if let Some(truncation) = options.truncation {
-        body["truncation"] = truncation.into();
+    if let Some(truncation) = &options.truncation {
+        body["truncation"] = truncation.clone().into();
     }
     if let Some(parallel) = options.parallel_tool_calls {
         body["parallel_tool_calls"] = parallel.into();
@@ -300,11 +300,11 @@ pub(crate) fn encode_request(
             body["text"] = serde_json::json!({"format":{"type":"json_schema","name":"response","strict":true,"schema":schema.as_value()}});
         }
     }
-    if let Some(verbosity) = options.verbosity {
+    if let Some(verbosity) = &options.verbosity {
         if body.get("text").is_none() {
             body["text"] = serde_json::json!({});
         }
-        body["text"]["verbosity"] = verbosity.into();
+        body["text"]["verbosity"] = verbosity.clone().into();
     }
     Ok(Encoded {
         body,

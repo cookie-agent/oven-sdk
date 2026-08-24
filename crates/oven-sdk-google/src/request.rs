@@ -27,14 +27,20 @@ pub(crate) struct Encoded {
     pub(crate) warnings: Vec<String>,
 }
 
+pub(crate) struct ParsedOptions {
+    request: GoogleRequestOptions,
+    strict_tools: Vec<bool>,
+}
+
 pub(crate) fn validate_request(
     request: &Request,
+    parsed: &ParsedOptions,
     capabilities: &ModelCapabilities,
     provider_id: &ProviderId,
     settings: &GoogleGenerateContentSettings,
 ) -> Result<(), ModelError> {
+    let options = &parsed.request;
     request.validate_for(capabilities)?;
-    let options = options(request)?;
     if request.inference.max_output_tokens == Some(0) {
         return Err(ModelError::invalid_request(
             "Google max_output_tokens must be at least 1",
@@ -123,13 +129,13 @@ pub(crate) fn validate_request(
             "mixing client functions with provider tools is disabled by Google tool settings",
         ));
     }
-    let has_strict = request.tools.iter().any(strict_tool);
+    let has_strict = parsed.strict_tools.iter().any(|strict| *strict);
     if has_strict && !settings.tools.strict_functions {
         return Err(ModelError::unsupported(
             "validated strict functions are disabled by Google tool settings",
         ));
     }
-    resolved_thinking_config(request, &options, &settings.thinking)?;
+    resolved_thinking_config(request, options, &settings.thinking)?;
     let mut media_counts = MediaCounts::default();
     for turn in &request.history {
         match turn {
@@ -177,12 +183,13 @@ pub(crate) fn validate_request(
 
 pub(crate) fn encode_request(
     request: &Request,
+    parsed: &ParsedOptions,
     descriptor: &LanguageModelDescriptor,
     settings: &GoogleGenerateContentSettings,
     native_context_scope: &NativeContextScope,
 ) -> Result<Encoded, ModelError> {
-    let options = options(request)?;
-    let thinking_config = resolved_thinking_config(request, &options, &settings.thinking)?;
+    let options = &parsed.request;
+    let thinking_config = resolved_thinking_config(request, options, &settings.thinking)?;
     let replay_policy = descriptor.capabilities.replay.policy;
     let mut replay = ReplayOutcome::default();
     let mut warnings = Vec::new();
@@ -359,7 +366,7 @@ pub(crate) fn encode_request(
     }
     if !options.stop_sequences.is_empty() {
         generation_config["stopSequences"] =
-            serde_json::to_value(options.stop_sequences).expect("stop sequences are serializable");
+            serde_json::to_value(&options.stop_sequences).expect("stop sequences are serializable");
     }
     if let Some(value) = options.seed {
         generation_config["seed"] = JsonValue::from(value);
@@ -406,7 +413,7 @@ pub(crate) fn encode_request(
         root["tools"] = JsonValue::Array(tools);
     }
     if !request.tools.is_empty() {
-        let strict = request.tools.iter().any(strict_tool);
+        let strict = parsed.strict_tools.iter().any(|strict| *strict);
         let mixed = !options.provider_tools.is_empty();
         let (mode, names) = match &request.tool_choice {
             ToolChoice::Auto if mixed => ("VALIDATED", None),
@@ -429,14 +436,14 @@ pub(crate) fn encode_request(
             root["toolConfig"]["includeServerSideToolInvocations"] = JsonValue::Bool(true);
         }
     }
-    if let Some(value) = options.service_tier {
-        root["serviceTier"] = JsonValue::String(value);
+    if let Some(value) = &options.service_tier {
+        root["serviceTier"] = JsonValue::String(value.clone());
     }
-    if let Some(value) = options.cached_content {
-        root["cachedContent"] = JsonValue::String(value);
+    if let Some(value) = &options.cached_content {
+        root["cachedContent"] = JsonValue::String(value.clone());
     }
     if !options.safety_settings.is_empty() {
-        root["safetySettings"] = serde_json::to_value(options.safety_settings)
+        root["safetySettings"] = serde_json::to_value(&options.safety_settings)
             .expect("safety settings are serializable");
     }
     Ok(Encoded {
@@ -446,16 +453,30 @@ pub(crate) fn encode_request(
     })
 }
 
-fn options(request: &Request) -> Result<GoogleRequestOptions, ModelError> {
-    request
+pub(crate) fn options(request: &Request) -> Result<ParsedOptions, ModelError> {
+    let request_options = request
         .provider_options
         .get("google")
         .map(|value| {
             serde_json::from_value(value.clone())
                 .map_err(|_| ModelError::invalid_request("invalid Google request options"))
         })
-        .transpose()
-        .map(|value| value.unwrap_or_default())
+        .transpose()?
+        .unwrap_or_default();
+    let strict_tools = request
+        .tools
+        .iter()
+        .map(|tool| {
+            tool.provider_options
+                .get("google")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .is_some_and(|options: GoogleToolOptions| options.strict)
+        })
+        .collect();
+    Ok(ParsedOptions {
+        request: request_options,
+        strict_tools,
+    })
 }
 
 fn resolved_thinking_config(
@@ -526,13 +547,6 @@ fn resolved_thinking_config(
         }
         _ => Ok(Some(thinking)),
     }
-}
-
-fn strict_tool(tool: &oven_sdk::ToolDefinition) -> bool {
-    tool.provider_options
-        .get("google")
-        .and_then(|value| serde_json::from_value::<GoogleToolOptions>(value.clone()).ok())
-        .is_some_and(|options| options.strict)
 }
 
 fn provider_tools(tools: &[GoogleProviderTool]) -> Vec<JsonValue> {

@@ -9,7 +9,7 @@ use oven_sdk::{
 };
 
 use crate::{
-    options::{responses_compaction_options, responses_options},
+    options::{OpenAiResponsesCompactionOptions, OpenAiResponsesOptions},
     responses::{compaction, replay},
 };
 
@@ -21,11 +21,11 @@ pub(crate) struct Encoded {
 
 pub(crate) fn validate_request(
     request: &Request,
+    options: &OpenAiResponsesOptions,
     capabilities: &ModelCapabilities,
     descriptor: &LanguageModelDescriptor,
     scope: &NativeContextScope,
 ) -> Result<(), ModelError> {
-    let options = responses_options(request)?;
     request.validate_for(capabilities)?;
     validate_native_context(request, descriptor, scope)?;
     if (request.inference.reasoning_effort.is_some()
@@ -83,14 +83,14 @@ pub(crate) fn validate_request(
 
 pub(crate) fn encode_request(
     request: &Request,
+    options: &OpenAiResponsesOptions,
     descriptor: &LanguageModelDescriptor,
     scope: &NativeContextScope,
     policy: ReplayPolicy,
 ) -> Result<Encoded, ModelError> {
-    let options = responses_options(request)?;
     let verbosity = options.verbosity.clone();
     let (input, replay_outcome, warnings) = encode_input(request, descriptor, scope, policy)?;
-    let mut include = options.include;
+    let mut include = options.include.clone();
     if !include
         .iter()
         .any(|value| value == "reasoning.encrypted_content")
@@ -121,22 +121,22 @@ pub(crate) fn encode_request(
         if let Some(effort) = &request.inference.reasoning_effort {
             reasoning.insert("effort".into(), effort.clone().into());
         }
-        if let Some(summary) = options.reasoning_summary {
-            reasoning.insert("summary".into(), summary.into());
+        if let Some(summary) = &options.reasoning_summary {
+            reasoning.insert("summary".into(), summary.clone().into());
         }
-        if let Some(mode) = options.reasoning_mode {
-            reasoning.insert("mode".into(), mode.into());
+        if let Some(mode) = &options.reasoning_mode {
+            reasoning.insert("mode".into(), mode.clone().into());
         }
         body["reasoning"] = JsonValue::Object(reasoning);
     }
-    if let Some(user) = options.user {
-        body["user"] = user.into();
+    if let Some(user) = &options.user {
+        body["user"] = user.clone().into();
     }
-    if let Some(service_tier) = options.service_tier {
-        body["service_tier"] = service_tier.into();
+    if let Some(service_tier) = &options.service_tier {
+        body["service_tier"] = service_tier.clone().into();
     }
-    if let Some(truncation) = options.truncation {
-        body["truncation"] = truncation.into();
+    if let Some(truncation) = &options.truncation {
+        body["truncation"] = truncation.clone().into();
     }
     if let Some(parallel) = options.parallel_tool_calls {
         body["parallel_tool_calls"] = parallel.into();
@@ -151,33 +151,33 @@ pub(crate) fn encode_request(
 
 pub(crate) fn encode_compaction_request(
     request: &CompactionRequest,
+    options: &OpenAiResponsesCompactionOptions,
     descriptor: &LanguageModelDescriptor,
     scope: &NativeContextScope,
     policy: ReplayPolicy,
 ) -> Result<Encoded, ModelError> {
-    let options = responses_compaction_options(request)?;
     let (input, replay, warnings) = encode_input(&request.request, descriptor, scope, policy)?;
     let mut body = serde_json::json!({
         "model": descriptor.identity.model_id.as_str(),
         "input": input,
     });
-    if let Some(value) = options.instructions {
-        body["instructions"] = value.into();
+    if let Some(value) = &options.instructions {
+        body["instructions"] = value.clone().into();
     }
-    if let Some(value) = options.prompt_cache_key {
-        body["prompt_cache_key"] = value.into();
+    if let Some(value) = &options.prompt_cache_key {
+        body["prompt_cache_key"] = value.clone().into();
     }
-    if let Some(value) = options.prompt_cache_options {
+    if let Some(value) = &options.prompt_cache_options {
         body["prompt_cache_options"] = serde_json::to_value(value).map_err(|_| {
             ModelError::invalid_request("could not encode OpenAI compaction cache options")
                 .with_stage(ErrorStage::NativeContextEncode)
         })?;
     }
-    if let Some(value) = options.prompt_cache_retention {
-        body["prompt_cache_retention"] = value.into();
+    if let Some(value) = &options.prompt_cache_retention {
+        body["prompt_cache_retention"] = value.clone().into();
     }
-    if let Some(value) = options.service_tier {
-        body["service_tier"] = value.into();
+    if let Some(value) = &options.service_tier {
+        body["service_tier"] = value.clone().into();
     }
     Ok(Encoded {
         body,

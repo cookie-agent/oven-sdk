@@ -51,21 +51,12 @@ fn minimax_protocol(settings: &ProtocolSettings) -> Result<&MiniMaxProtocolSetti
 
 pub(crate) fn validate_request(
     request: &Request,
+    parsed: &ParsedOptions,
     capabilities: &ModelCapabilities,
     protocol: Protocol,
     protocol_settings: &ProtocolSettings,
 ) -> Result<(), ModelError> {
     request.validate_for(capabilities)?;
-    let anthropic_options = if protocol.is_first_party() {
-        options(request)?
-    } else {
-        AnthropicRequestOptions::default()
-    };
-    let minimax_options = if protocol == Protocol::MiniMax {
-        minimax_options(request)?
-    } else {
-        MiniMaxRequestOptions::default()
-    };
     if protocol.is_first_party()
         && matches!(
             request.response_format,
@@ -93,8 +84,8 @@ pub(crate) fn validate_request(
         capabilities,
         protocol,
         protocol_settings,
-        &anthropic_options,
-        &minimax_options,
+        &parsed.anthropic,
+        &parsed.minimax,
     )?;
     if protocol.is_first_party()
         && matches!(request.history.last(), Some(HistoryTurn::Assistant(_)))
@@ -114,26 +105,25 @@ pub(crate) fn validate_request(
             "MiniMax Messages supports only automatic or disabled tool choice",
         ));
     }
-    let cache_plan = if protocol.is_first_party() {
-        cache_plan(request)?
-    } else {
-        empty_cache_plan(request)
-    };
+    let cache_plan = &parsed.cache_plan;
     if !cache_plan.markers.is_empty() && !capabilities.features.contains(Capability::PROMPT_CACHING)
     {
         return Err(ModelError::unsupported(
             "prompt caching is not supported by this Anthropic configuration",
         ));
     }
-    validate_cache_plan(&cache_plan)?;
-    for turn in &request.history {
+    validate_cache_plan(cache_plan)?;
+    for (history_index, turn) in request.history.iter().enumerate() {
         match turn {
             HistoryTurn::User(message) => {
-                for file in message.content.iter().filter_map(|part| match part {
-                    InputPart::File(file) => Some(file),
-                    _ => None,
-                }) {
-                    validate_file(file, protocol)?;
+                for (part_index, part) in message.content.iter().enumerate() {
+                    if let InputPart::File(file) = part {
+                        validate_file(
+                            file,
+                            protocol,
+                            parsed.minimax_media[history_index][part_index].as_ref(),
+                        )?;
+                    }
                 }
             }
             HistoryTurn::Assistant(message)
@@ -334,7 +324,11 @@ fn validate_inference(
     Ok(())
 }
 
-fn validate_file(file: &oven_sdk::FilePart, protocol: Protocol) -> Result<(), ModelError> {
+fn validate_file(
+    file: &oven_sdk::FilePart,
+    protocol: Protocol,
+    minimax_options: Option<&MiniMaxMediaOptions>,
+) -> Result<(), ModelError> {
     if protocol.is_first_party() {
         let image = matches!(
             file.media_type.as_str(),
@@ -439,7 +433,7 @@ fn validate_file(file: &oven_sdk::FilePart, protocol: Protocol) -> Result<(), Mo
             .with_stage(ErrorStage::RequestEncoding));
         }
     }
-    if let Some(options) = minimax_media_options(file)? {
+    if let Some(options) = minimax_options {
         if image && options.fps.is_some() {
             return Err(ModelError::invalid_request(
                 "MiniMax fps is valid only for video input",
@@ -524,8 +518,11 @@ impl TurnCachePlan {
     }
 }
 
-fn cache_plan(request: &Request) -> Result<CachePlan, ModelError> {
-    let request_marker = options(request)?.cache_control;
+fn cache_plan(
+    request: &Request,
+    options: &AnthropicRequestOptions,
+) -> Result<CachePlan, ModelError> {
+    let request_marker = options.cache_control.clone();
 
     let emit_tools = !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None);
     let tools = request
@@ -769,6 +766,79 @@ pub(crate) struct Encoded {
     pub(crate) warnings: Vec<String>,
     pub(crate) betas: Vec<String>,
 }
+pub(crate) struct ParsedOptions {
+    anthropic: AnthropicRequestOptions,
+    minimax: MiniMaxRequestOptions,
+    aws: AnthropicAwsRequestOptions,
+    cache_plan: CachePlan,
+    strict_tools: Vec<bool>,
+    minimax_media: Vec<Vec<Option<MiniMaxMediaOptions>>>,
+}
+
+pub(crate) fn parse_options(
+    request: &Request,
+    protocol: Protocol,
+) -> Result<ParsedOptions, ModelError> {
+    let anthropic = if protocol.is_first_party() {
+        options(request)?
+    } else {
+        AnthropicRequestOptions::default()
+    };
+    let minimax = if protocol == Protocol::MiniMax {
+        minimax_options(request)?
+    } else {
+        MiniMaxRequestOptions::default()
+    };
+    let aws = if protocol == Protocol::AnthropicAws {
+        aws_options(request)?
+    } else {
+        AnthropicAwsRequestOptions::default()
+    };
+    let cache_plan = if protocol.is_first_party() {
+        cache_plan(request, &anthropic)?
+    } else {
+        empty_cache_plan(request)
+    };
+    let strict_tools = request
+        .tools
+        .iter()
+        .map(|tool| {
+            protocol.is_first_party()
+                && tool
+                    .provider_options
+                    .get("anthropic")
+                    .and_then(|value| {
+                        serde_json::from_value::<AnthropicToolOptions>(value.clone()).ok()
+                    })
+                    .is_some_and(|options| options.strict)
+        })
+        .collect();
+    let minimax_media = request
+        .history
+        .iter()
+        .map(|turn| match turn {
+            HistoryTurn::User(message) if protocol == Protocol::MiniMax => message
+                .content
+                .iter()
+                .map(|part| match part {
+                    InputPart::File(file) => minimax_media_options(file),
+                    _ => Ok(None),
+                })
+                .collect(),
+            HistoryTurn::User(message) => Ok(vec![None; message.content.len()]),
+            _ => Ok(Vec::new()),
+        })
+        .collect::<Result<Vec<_>, ModelError>>()?;
+    Ok(ParsedOptions {
+        anthropic,
+        minimax,
+        aws,
+        cache_plan,
+        strict_tools,
+        minimax_media,
+    })
+}
+
 fn options(request: &Request) -> Result<AnthropicRequestOptions, ModelError> {
     request
         .provider_options
@@ -807,32 +877,17 @@ fn aws_options(request: &Request) -> Result<AnthropicAwsRequestOptions, ModelErr
 
 pub(crate) fn encode_request(
     request: &Request,
+    parsed: &ParsedOptions,
     descriptor: &LanguageModelDescriptor,
     native_context_scope: &NativeContextScope,
     policy: ReplayPolicy,
     protocol: Protocol,
 ) -> Result<Encoded, ModelError> {
-    let opts = if protocol.is_first_party() {
-        options(request)?
-    } else {
-        AnthropicRequestOptions::default()
-    };
-    let minimax_opts = if protocol == Protocol::MiniMax {
-        minimax_options(request)?
-    } else {
-        MiniMaxRequestOptions::default()
-    };
-    let aws_opts = if protocol == Protocol::AnthropicAws {
-        aws_options(request)?
-    } else {
-        AnthropicAwsRequestOptions::default()
-    };
-    let cache_plan = if protocol.is_first_party() {
-        cache_plan(request)?
-    } else {
-        empty_cache_plan(request)
-    };
-    validate_cache_plan(&cache_plan)?;
+    let opts = &parsed.anthropic;
+    let minimax_opts = &parsed.minimax;
+    let aws_opts = &parsed.aws;
+    let cache_plan = &parsed.cache_plan;
+    validate_cache_plan(cache_plan)?;
     let mut replay = ReplayOutcome::default();
     let mut messages = Vec::new();
     let mut warnings = cache_plan.warnings.clone();
@@ -864,6 +919,7 @@ pub(crate) fn encode_request(
                             part,
                             cache_plan.history[index].marker_for(part_index),
                             protocol,
+                            parsed.minimax_media[index][part_index].as_ref(),
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1005,9 +1061,7 @@ pub(crate) fn encode_request(
     }
     if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {
         root["tools"] = JsonValue::Array(request.tools.iter().enumerate().map(|(index, tool)| {
-            let strict = protocol.is_first_party() && tool.provider_options.get("anthropic")
-                .and_then(|value| serde_json::from_value::<AnthropicToolOptions>(value.clone()).ok())
-                .is_some_and(|options| options.strict);
+            let strict = parsed.strict_tools[index];
             let mut value = serde_json::json!({"name":tool.name,"description":tool.description,"input_schema":tool.input_schema.as_value()});
             if strict { value["strict"] = JsonValue::Bool(true); }
             attach_cache(value, cache_plan.tools[index].clone())
@@ -1055,24 +1109,24 @@ pub(crate) fn encode_request(
         root["top_p"] = JsonValue::from(top_p);
     }
     if protocol == Protocol::MiniMax {
-        if let Some(thinking) = minimax_opts.thinking {
+        if let Some(thinking) = &minimax_opts.thinking {
             root["thinking"] = serde_json::json!({"type":match thinking {
                 MiniMaxThinking::Adaptive => "adaptive",
                 MiniMaxThinking::Disabled => "disabled",
             }});
         }
-        if let Some(service_tier) = minimax_opts.service_tier {
-            root["service_tier"] = JsonValue::String(service_tier);
+        if let Some(service_tier) = &minimax_opts.service_tier {
+            root["service_tier"] = JsonValue::String(service_tier.clone());
         }
-        if let Some(user_id) = minimax_opts.user_id {
+        if let Some(user_id) = &minimax_opts.user_id {
             root["metadata"] = serde_json::json!({"user_id":user_id});
         }
     }
     let mut output_config = serde_json::json!({});
     if protocol.is_first_party()
-        && let Some(effort) = opts.effort
+        && let Some(effort) = &opts.effort
     {
-        output_config["effort"] = JsonValue::String(effort);
+        output_config["effort"] = JsonValue::String(effort.clone());
     }
     if protocol.is_first_party()
         && let ResponseFormat::Json {
@@ -1089,26 +1143,28 @@ pub(crate) fn encode_request(
         root["output_config"] = output_config;
     }
     if protocol.is_first_party()
-        && let Some(user_id) = opts.user_id
+        && let Some(user_id) = &opts.user_id
     {
         root["metadata"] = serde_json::json!({"user_id":user_id});
     }
     if protocol.is_first_party()
-        && let Some(cache) = cache_plan.request
+        && let Some(cache) = &cache_plan.request
     {
-        root["cache_control"] = cache_control_value(cache);
+        root["cache_control"] = cache_control_value(cache.clone());
     }
     if protocol == Protocol::AnthropicAws
-        && let Some(inference_geo) = aws_opts.inference_geo
+        && let Some(inference_geo) = &aws_opts.inference_geo
     {
-        root["inference_geo"] = JsonValue::String(inference_geo);
+        root["inference_geo"] = JsonValue::String(inference_geo.clone());
     }
     let betas = if protocol.is_first_party() {
         opts.betas
-            .into_iter()
+            .iter()
             .filter(|beta| {
-                beta != "prompt-caching-2024-07-31" && beta != "structured-outputs-2025-11-13"
+                beta.as_str() != "prompt-caching-2024-07-31"
+                    && beta.as_str() != "structured-outputs-2025-11-13"
             })
+            .cloned()
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
@@ -1126,17 +1182,25 @@ fn input_block(
     part: &InputPart,
     cache: Option<AnthropicCacheControl>,
     protocol: Protocol,
+    minimax_options: Option<&MiniMaxMediaOptions>,
 ) -> Result<Option<JsonValue>, ModelError> {
     Ok(match part {
         InputPart::Text(t) => (!t.text.is_empty())
             .then(|| attach_cache(serde_json::json!({"type":"text","text":t.text}), cache)),
-        InputPart::File(f) => Some(attach_cache(file_block(f, protocol)?, cache)),
+        InputPart::File(f) => Some(attach_cache(
+            file_block(f, protocol, minimax_options)?,
+            cache,
+        )),
         InputPart::Custom(_) => None,
     })
 }
-fn file_block(file: &oven_sdk::FilePart, protocol: Protocol) -> Result<JsonValue, ModelError> {
+fn file_block(
+    file: &oven_sdk::FilePart,
+    protocol: Protocol,
+    minimax_options: Option<&MiniMaxMediaOptions>,
+) -> Result<JsonValue, ModelError> {
     if protocol == Protocol::MiniMax {
-        return minimax_file_block(file);
+        return minimax_file_block(file, minimax_options);
     }
     if file.media_type == "text/plain"
         && let FileSource::Text(text) = &file.source
@@ -1168,7 +1232,10 @@ fn file_block(file: &oven_sdk::FilePart, protocol: Protocol) -> Result<JsonValue
     }
 }
 
-fn minimax_file_block(file: &oven_sdk::FilePart) -> Result<JsonValue, ModelError> {
+fn minimax_file_block(
+    file: &oven_sdk::FilePart,
+    options: Option<&MiniMaxMediaOptions>,
+) -> Result<JsonValue, ModelError> {
     let mut source = match &file.source {
         FileSource::Bytes(bytes) => {
             serde_json::json!({"type":"base64","media_type":file.media_type,"data":STANDARD.encode(bytes)})
@@ -1182,9 +1249,9 @@ fn minimax_file_block(file: &oven_sdk::FilePart) -> Result<JsonValue, ModelError
                 .with_stage(ErrorStage::RequestEncoding));
         }
     };
-    if let Some(options) = minimax_media_options(file)? {
-        if let Some(detail) = options.detail {
-            source["detail"] = JsonValue::String(detail);
+    if let Some(options) = options {
+        if let Some(detail) = &options.detail {
+            source["detail"] = JsonValue::String(detail.clone());
         }
         if let Some(fps) = options.fps {
             source["fps"] = JsonValue::from(fps);

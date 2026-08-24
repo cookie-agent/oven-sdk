@@ -130,16 +130,15 @@ pub(crate) fn chat_options(
     decode(request).map(|options| options.chat.unwrap_or_default())
 }
 
-pub(crate) fn responses_options(
+pub(crate) fn response_pipeline_options(
     request: &Request,
-) -> Result<AzureOpenAiResponsesOptions, oven_sdk::ModelError> {
-    decode(request).map(|options| options.responses.unwrap_or_default())
-}
-
-pub(crate) fn compaction_options(
-    request: &CompactionRequest,
-) -> Result<AzureOpenAiCompactionOptions, oven_sdk::ModelError> {
-    decode(&request.request).map(|options| options.compaction.unwrap_or_default())
+) -> Result<(AzureOpenAiResponsesOptions, AzureOpenAiCompactionOptions), oven_sdk::ModelError> {
+    decode(request).map(|options| {
+        (
+            options.responses.unwrap_or_default(),
+            options.compaction.unwrap_or_default(),
+        )
+    })
 }
 
 fn current_options(request: &Request) -> AzureOpenAiOptions {

@@ -235,8 +235,10 @@ impl LanguageModel for OpenAiChatModel {
     }
 
     fn validate_request(&self, request_value: &Request) -> Result<(), ModelError> {
+        let options = request::parse_options(request_value)?;
         request::validate_request(
             request_value,
+            &options,
             &self.runtime.descriptor.capabilities,
             &self.runtime.profile.wire(),
         )
@@ -252,8 +254,14 @@ impl LanguageModel for OpenAiChatModel {
         abort: AbortSignal,
     ) -> BoxFuture<'a, Result<StreamResponse, ModelError>> {
         Box::pin(async move {
-            self.validate_request(&request_value)?;
-            start_stream(Arc::clone(&self.runtime), request_value, abort).await
+            let options = request::parse_options(&request_value)?;
+            request::validate_request(
+                &request_value,
+                &options,
+                &self.runtime.descriptor.capabilities,
+                &self.runtime.profile.wire(),
+            )?;
+            start_stream(Arc::clone(&self.runtime), request_value, options, abort).await
         })
     }
 }
@@ -264,8 +272,10 @@ impl LanguageModel for OpenAiCompatibleChatModel {
     }
 
     fn validate_request(&self, request_value: &Request) -> Result<(), ModelError> {
+        let options = request::parse_options(request_value)?;
         request::validate_request(
             request_value,
+            &options,
             &self.runtime.descriptor.capabilities,
             &self.runtime.profile.wire(),
         )
@@ -281,8 +291,14 @@ impl LanguageModel for OpenAiCompatibleChatModel {
         abort: AbortSignal,
     ) -> BoxFuture<'a, Result<StreamResponse, ModelError>> {
         Box::pin(async move {
-            self.validate_request(&request_value)?;
-            start_stream(Arc::clone(&self.runtime), request_value, abort).await
+            let options = request::parse_options(&request_value)?;
+            request::validate_request(
+                &request_value,
+                &options,
+                &self.runtime.descriptor.capabilities,
+                &self.runtime.profile.wire(),
+            )?;
+            start_stream(Arc::clone(&self.runtime), request_value, options, abort).await
         })
     }
 }
@@ -367,6 +383,7 @@ fn replay_scope(
 async fn start_stream(
     runtime: Arc<Runtime>,
     request_value: Request,
+    options: request::ParsedOptions,
     abort: AbortSignal,
 ) -> Result<StreamResponse, ModelError> {
     if abort.is_aborted() {
@@ -376,6 +393,7 @@ async fn start_stream(
     let policy = runtime.descriptor.capabilities.replay.policy;
     let encoded = request::encode_request(
         &request_value,
+        &options,
         &runtime.descriptor,
         &runtime.scope,
         policy,

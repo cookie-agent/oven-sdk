@@ -287,7 +287,9 @@ impl LanguageModel for CohereModel {
         abort: AbortSignal,
     ) -> BoxFuture<'a, Result<StreamResponse, ModelError>> {
         Box::pin(async move {
-            self.validate_request(&request)?;
+            request.validate_for(&self.config.capabilities)?;
+            let options = request_options(&request)?;
+            validate_request(&request, &options, &self.config.settings)?;
             if abort.is_aborted() {
                 return Err(ModelError::abort("request was aborted before dispatch")
                     .with_stage(ErrorStage::Connect));
@@ -296,6 +298,7 @@ impl LanguageModel for CohereModel {
             let (binding, scope) = self.config.replay_context(&headers)?;
             let encoded = encode_request(
                 &request,
+                &options,
                 &self.descriptor,
                 &self.config.settings,
                 &binding,
@@ -544,12 +547,12 @@ fn validate_request(
 
 fn encode_request(
     request: &Request,
+    options: &CohereRequestOptions,
     descriptor: &LanguageModelDescriptor,
     settings: &CohereSettings,
     binding: &JsonValue,
     scope: &NativeContextScope,
 ) -> Result<Encoded, ModelError> {
-    let options = request_options(request)?;
     let mut messages = Vec::new();
     let mut replay = ReplayOutcome::default();
     let mut warnings = Vec::new();
@@ -730,7 +733,7 @@ fn encode_request(
         body["documents"] = serde_json::to_value(&options.documents)
             .map_err(|_| ModelError::invalid_request("could not encode Cohere documents"))?;
     }
-    if let Some(mode) = options.citation_mode {
+    if let Some(mode) = &options.citation_mode {
         body["citation_options"] = serde_json::json!({"mode":mode});
     }
     if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {

@@ -24,6 +24,11 @@ pub(crate) struct Encoded {
     pub(crate) request_type: Option<String>,
 }
 
+pub(crate) struct ParsedOptions {
+    request: GoogleVertexRequestOptions,
+    strict_tools: Vec<bool>,
+}
+
 struct ToolIdentity {
     name: String,
     provider_id: Option<String>,
@@ -31,11 +36,12 @@ struct ToolIdentity {
 
 pub(crate) fn validate_request(
     request: &Request,
+    parsed: &ParsedOptions,
     capabilities: &ModelCapabilities,
     settings: &GoogleVertexSettings,
 ) -> Result<(), ModelError> {
+    let options = &parsed.request;
     request.validate_for(capabilities)?;
-    let options = options(request)?;
     if let Some(cached_content) = options.cached_content.as_deref() {
         validate_cached_content(
             cached_content,
@@ -92,7 +98,7 @@ pub(crate) fn validate_request(
             "mixing client functions with provider tools is disabled by Vertex settings",
         ));
     }
-    if request.tools.iter().any(strict_tool) && !settings.tools.strict_functions {
+    if parsed.strict_tools.iter().any(|strict| *strict) && !settings.tools.strict_functions {
         return Err(ModelError::unsupported(
             "validated strict functions are disabled by Vertex settings",
         ));
@@ -198,12 +204,13 @@ fn validate_cached_content(
 
 pub(crate) fn encode_request(
     request: &Request,
+    parsed: &ParsedOptions,
     descriptor: &LanguageModelDescriptor,
     replay_policy: ReplayPolicy,
     stream_function_call_arguments: bool,
     native_context_scope: &NativeContextScope,
 ) -> Result<Encoded, ModelError> {
-    let options = options(request)?;
+    let options = &parsed.request;
     let mut replay = ReplayOutcome::default();
     let mut warnings = Vec::new();
     let mut system_parts = Vec::new();
@@ -364,7 +371,7 @@ pub(crate) fn encode_request(
     }
     if !options.stop_sequences.is_empty() {
         generation_config["stopSequences"] =
-            serde_json::to_value(options.stop_sequences).expect("stop sequences are serializable");
+            serde_json::to_value(&options.stop_sequences).expect("stop sequences are serializable");
     }
     if let Some(value) = options.seed {
         generation_config["seed"] = JsonValue::from(value);
@@ -375,7 +382,7 @@ pub(crate) fn encode_request(
     if let Some(value) = options.frequency_penalty {
         generation_config["frequencyPenalty"] = JsonValue::from(value);
     }
-    if let Some(value) = options.thinking_config {
+    if let Some(value) = &options.thinking_config {
         generation_config["thinkingConfig"] =
             serde_json::to_value(value).expect("thinking config is serializable");
     }
@@ -412,7 +419,7 @@ pub(crate) fn encode_request(
         root["tools"] = JsonValue::Array(tools);
     }
     if !request.tools.is_empty() || stream_function_call_arguments {
-        let strict = request.tools.iter().any(strict_tool);
+        let strict = parsed.strict_tools.iter().any(|strict| *strict);
         let (mode, names) = match &request.tool_choice {
             ToolChoice::Auto => (if strict { "VALIDATED" } else { "AUTO" }, None),
             ToolChoice::Required => (if strict { "VALIDATED" } else { "ANY" }, None),
@@ -432,39 +439,46 @@ pub(crate) fn encode_request(
                 serde_json::to_value(names).expect("tool names are serializable");
         }
     }
-    if let Some(value) = options.cached_content {
-        root["cachedContent"] = JsonValue::String(value);
+    if let Some(value) = &options.cached_content {
+        root["cachedContent"] = JsonValue::String(value.clone());
     }
     if !options.safety_settings.is_empty() {
-        root["safetySettings"] = serde_json::to_value(options.safety_settings)
+        root["safetySettings"] = serde_json::to_value(&options.safety_settings)
             .expect("safety settings are serializable");
     }
     Ok(Encoded {
         body: root,
         replay,
         warnings,
-        shared_request_type: options.shared_request_type,
-        request_type: options.request_type,
+        shared_request_type: options.shared_request_type.clone(),
+        request_type: options.request_type.clone(),
     })
 }
 
-fn options(request: &Request) -> Result<GoogleVertexRequestOptions, ModelError> {
-    request
+pub(crate) fn options(request: &Request) -> Result<ParsedOptions, ModelError> {
+    let request_options = request
         .provider_options
         .get("google_vertex")
         .map(|value| {
             serde_json::from_value(value.clone())
                 .map_err(|_| ModelError::invalid_request("invalid Google Vertex request options"))
         })
-        .transpose()
-        .map(|value| value.unwrap_or_default())
-}
-
-fn strict_tool(tool: &oven_sdk::ToolDefinition) -> bool {
-    tool.provider_options
-        .get("google_vertex")
-        .and_then(|value| serde_json::from_value::<GoogleVertexToolOptions>(value.clone()).ok())
-        .is_some_and(|options| options.strict)
+        .transpose()?
+        .unwrap_or_default();
+    let strict_tools = request
+        .tools
+        .iter()
+        .map(|tool| {
+            tool.provider_options
+                .get("google_vertex")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .is_some_and(|options: GoogleVertexToolOptions| options.strict)
+        })
+        .collect();
+    Ok(ParsedOptions {
+        request: request_options,
+        strict_tools,
+    })
 }
 
 fn provider_tools(tools: &[GoogleVertexProviderTool]) -> Vec<JsonValue> {

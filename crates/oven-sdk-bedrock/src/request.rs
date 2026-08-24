@@ -21,16 +21,23 @@ pub(crate) struct Encoded {
     pub(crate) warnings: Vec<String>,
 }
 
+pub(crate) struct EncodeSettings {
+    pub(crate) reasoning_wire_format: BedrockReasoningWireFormat,
+    pub(crate) signed_reasoning: bool,
+    pub(crate) structured_output: BedrockStructuredOutput,
+    pub(crate) streaming: bool,
+}
+
 pub(crate) fn validate_request(
     request: &Request,
+    options: &BedrockRequestOptions,
     capabilities: &ModelCapabilities,
     reasoning_wire_format: BedrockReasoningWireFormat,
     signed_reasoning: bool,
     structured_output: BedrockStructuredOutput,
 ) -> Result<(), ModelError> {
     request.validate_for(capabilities)?;
-    let options = options(request)?;
-    validate_bucket_owner(&options)?;
+    validate_bucket_owner(options)?;
     if request.inference.max_output_tokens == Some(0) {
         return Err(ModelError::invalid_request(
             "Bedrock max_output_tokens must be at least 1",
@@ -110,7 +117,7 @@ pub(crate) fn validate_request(
             "native structured output is unsupported by this Bedrock configuration",
         ));
     }
-    validate_reasoning_options(request, &options, reasoning_wire_format, signed_reasoning)?;
+    validate_reasoning_options(request, options, reasoning_wire_format, signed_reasoning)?;
     validate_media(request)?;
     let mut seen_messages = false;
     for turn in &request.history {
@@ -186,15 +193,12 @@ fn reserved_additional_key(key: &str) -> bool {
 
 pub(crate) fn encode_request(
     request: &Request,
+    options: &BedrockRequestOptions,
     descriptor: &LanguageModelDescriptor,
     native_context_scope: &NativeContextScope,
-    reasoning_wire_format: BedrockReasoningWireFormat,
-    signed_reasoning: bool,
-    structured_output: BedrockStructuredOutput,
-    streaming: bool,
+    settings: EncodeSettings,
 ) -> Result<Encoded, ModelError> {
     let replay_policy = descriptor.capabilities.replay.policy;
-    let options = options(request)?;
     let mut replay = ReplayOutcome::default();
     let mut warnings = Vec::new();
     let mut system = Vec::new();
@@ -220,7 +224,7 @@ pub(crate) fn encode_request(
                             content.push(serde_json::json!({"text":text.text}));
                         }
                         InputPart::File(file) => {
-                            content.push(file_content(file, &options, &mut document_counter)?)
+                            content.push(file_content(file, options, &mut document_counter)?)
                         }
                         _ => {}
                     }
@@ -256,7 +260,7 @@ pub(crate) fn encode_request(
                             artifact.payload(),
                             &turn.message.content,
                             &descriptor.capabilities,
-                            signed_reasoning,
+                            settings.signed_reasoning,
                         ) {
                             Ok(content) => {
                                 replay.decisions.push(ReplayDecision {
@@ -327,7 +331,7 @@ pub(crate) fn encode_request(
                 if !inline_results.is_empty() {
                     let content = inline_results
                         .iter()
-                        .map(|result| tool_result(result, &options, &mut document_counter))
+                        .map(|result| tool_result(result, options, &mut document_counter))
                         .collect::<Result<Vec<_>, _>>()?;
                     push_message(&mut messages, "user", content);
                 }
@@ -336,7 +340,7 @@ pub(crate) fn encode_request(
                 let content = message
                     .results
                     .iter()
-                    .map(|result| tool_result(result, &options, &mut document_counter))
+                    .map(|result| tool_result(result, options, &mut document_counter))
                     .collect::<Result<Vec<_>, _>>()?;
                 push_message(&mut messages, "user", content);
             }
@@ -390,7 +394,7 @@ pub(crate) fn encode_request(
         schema: Some(schema),
     } = &request.response_format
     {
-        if structured_output != BedrockStructuredOutput::JsonSchema {
+        if settings.structured_output != BedrockStructuredOutput::JsonSchema {
             return Err(ModelError::unsupported(
                 "native structured output is unsupported by this Bedrock configuration",
             ));
@@ -407,7 +411,12 @@ pub(crate) fn encode_request(
         .additional_model_request_fields
         .clone()
         .unwrap_or_else(|| serde_json::json!({}));
-    encode_reasoning(&mut additional, request, &options, reasoning_wire_format)?;
+    encode_reasoning(
+        &mut additional,
+        request,
+        options,
+        settings.reasoning_wire_format,
+    )?;
     if additional
         .as_object()
         .is_some_and(|object| !object.is_empty())
@@ -416,21 +425,21 @@ pub(crate) fn encode_request(
     }
     if !options.additional_model_response_field_paths.is_empty() {
         root["additionalModelResponseFieldPaths"] =
-            serde_json::to_value(options.additional_model_response_field_paths)
+            serde_json::to_value(&options.additional_model_response_field_paths)
                 .expect("paths are serializable");
     }
-    if let Some(value) = options.service_tier {
+    if let Some(value) = &options.service_tier {
         root["serviceTier"] = serde_json::json!({"type":value});
     }
-    if let Some(value) = options.performance_latency {
+    if let Some(value) = &options.performance_latency {
         root["performanceConfig"] = serde_json::json!({"latency":value});
     }
     if !options.request_metadata.is_empty() {
-        root["requestMetadata"] = serde_json::to_value(options.request_metadata)
+        root["requestMetadata"] = serde_json::to_value(&options.request_metadata)
             .expect("request metadata is serializable");
     }
-    if let Some(guardrail) = options.guardrail {
-        if !streaming && guardrail.stream_processing_mode.is_some() {
+    if let Some(guardrail) = &options.guardrail {
+        if !settings.streaming && guardrail.stream_processing_mode.is_some() {
             return Err(ModelError::invalid_request(
                 "Bedrock streamProcessingMode is valid only for ConverseStream",
             )
@@ -440,11 +449,13 @@ pub(crate) fn encode_request(
             "guardrailIdentifier":guardrail.guardrail_identifier,
             "guardrailVersion":guardrail.guardrail_version,
         });
-        if let Some(trace) = guardrail.trace {
-            encoded["trace"] = JsonValue::String(trace);
+        if let Some(trace) = &guardrail.trace {
+            encoded["trace"] = JsonValue::String(trace.clone());
         }
-        if streaming && let Some(mode) = guardrail.stream_processing_mode {
-            encoded["streamProcessingMode"] = JsonValue::String(mode);
+        if settings.streaming
+            && let Some(mode) = &guardrail.stream_processing_mode
+        {
+            encoded["streamProcessingMode"] = JsonValue::String(mode.clone());
         }
         root["guardrailConfig"] = encoded;
     }
@@ -662,7 +673,7 @@ fn validate_reasoning_options(
     }
 }
 
-fn options(request: &Request) -> Result<BedrockRequestOptions, ModelError> {
+pub(crate) fn options(request: &Request) -> Result<BedrockRequestOptions, ModelError> {
     request
         .provider_options
         .get("bedrock")

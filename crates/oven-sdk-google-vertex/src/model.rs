@@ -394,7 +394,13 @@ impl GoogleVertexModel {
         streaming: bool,
     ) -> BoxFuture<'a, Result<StreamResponse, ModelError>> {
         Box::pin(async move {
-            self.validate_request(&request)?;
+            let options = crate::request::options(&request)?;
+            crate::request::validate_request(
+                &request,
+                &options,
+                &self.descriptor().capabilities,
+                &self.config.settings,
+            )?;
             if abort.is_aborted() {
                 return Err(ModelError::abort("request was aborted before dispatch")
                     .with_stage(ErrorStage::Connect));
@@ -404,6 +410,7 @@ impl GoogleVertexModel {
                 streaming && self.config.settings.stream_function_call_arguments;
             let encoded = crate::request::encode_request(
                 &request,
+                &options,
                 descriptor,
                 descriptor.capabilities.replay.policy,
                 stream_function_call_arguments,
@@ -678,8 +685,10 @@ impl LanguageModel for GoogleVertexModel {
     }
 
     fn validate_request(&self, request: &Request) -> Result<(), ModelError> {
+        let options = crate::request::options(request)?;
         crate::request::validate_request(
             request,
+            &options,
             &self.descriptor().capabilities,
             &self.config.settings,
         )

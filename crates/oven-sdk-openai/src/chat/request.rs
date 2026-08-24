@@ -11,7 +11,7 @@ use oven_sdk::{
 use crate::{
     chat::replay,
     configuration::{MaxTokensField, ReasoningField, StructuredOutputSupport, SystemMessageRole},
-    options::{chat_options, compatible_options},
+    options::{CompatibleChatOptions, OpenAiChatOptions, chat_options, compatible_options},
 };
 
 pub(crate) struct ChatWireProfile {
@@ -29,8 +29,21 @@ pub(crate) struct Encoded {
     pub(crate) warnings: Vec<String>,
 }
 
+pub(crate) struct ParsedOptions {
+    official: OpenAiChatOptions,
+    compatible: CompatibleChatOptions,
+}
+
+pub(crate) fn parse_options(request: &Request) -> Result<ParsedOptions, ModelError> {
+    Ok(ParsedOptions {
+        official: chat_options(request)?,
+        compatible: compatible_options(request)?,
+    })
+}
+
 pub(crate) fn validate_request(
     request: &Request,
+    _options: &ParsedOptions,
     capabilities: &ModelCapabilities,
     _profile: &ChatWireProfile,
 ) -> Result<(), ModelError> {
@@ -86,13 +99,14 @@ fn validate_media(request: &Request) -> Result<(), ModelError> {
 
 pub(crate) fn encode_request(
     request: &Request,
+    options: &ParsedOptions,
     descriptor: &LanguageModelDescriptor,
     scope: &NativeContextScope,
     policy: ReplayPolicy,
     profile: &ChatWireProfile,
 ) -> Result<Encoded, ModelError> {
-    let official_options = chat_options(request)?;
-    let compatible = compatible_options(request)?;
+    let official_options = &options.official;
+    let compatible = &options.compatible;
     let mut replay_outcome = ReplayOutcome::default();
     let mut messages = Vec::new();
     let mut warnings = Vec::new();
@@ -220,18 +234,19 @@ pub(crate) fn encode_request(
     }
     if let Some(effort) = official_options
         .reasoning_effort
+        .clone()
         .or_else(|| request.inference.reasoning_effort.clone())
     {
         body["reasoning_effort"] = effort.into();
     }
-    if let Some(user) = official_options.user {
-        body["user"] = user.into();
+    if let Some(user) = &official_options.user {
+        body["user"] = user.clone().into();
     }
-    if let Some(service_tier) = official_options.service_tier {
-        body["service_tier"] = service_tier.into();
+    if let Some(service_tier) = &official_options.service_tier {
+        body["service_tier"] = service_tier.clone().into();
     }
-    if let Some(verbosity) = official_options.verbosity {
-        body["verbosity"] = verbosity.into();
+    if let Some(verbosity) = &official_options.verbosity {
+        body["verbosity"] = verbosity.clone().into();
     }
     if let Some(parallel) = official_options.parallel_tool_calls {
         body["parallel_tool_calls"] = parallel.into();
@@ -286,7 +301,7 @@ pub(crate) fn encode_request(
     if profile.compatible
         && let Some(object) = body.as_object_mut()
     {
-        object.extend(compatible.extra_body);
+        object.extend(compatible.extra_body.clone());
     }
     Ok(Encoded {
         body,

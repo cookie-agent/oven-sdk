@@ -168,16 +168,15 @@ pub(crate) fn chat_options(request: &Request) -> Result<OpenAiChatOptions, oven_
     decode_openai(request).map(|options| options.chat.unwrap_or_default())
 }
 
-pub(crate) fn responses_options(
+pub(crate) fn response_pipeline_options(
     request: &Request,
-) -> Result<OpenAiResponsesOptions, oven_sdk::ModelError> {
-    decode_openai(request).map(|options| options.responses.unwrap_or_default())
-}
-
-pub(crate) fn responses_compaction_options(
-    request: &CompactionRequest,
-) -> Result<OpenAiResponsesCompactionOptions, oven_sdk::ModelError> {
-    decode_openai(&request.request).map(|options| options.compaction.unwrap_or_default())
+) -> Result<(OpenAiResponsesOptions, OpenAiResponsesCompactionOptions), oven_sdk::ModelError> {
+    decode_openai(request).map(|options| {
+        (
+            options.responses.unwrap_or_default(),
+            options.compaction.unwrap_or_default(),
+        )
+    })
 }
 
 pub(crate) fn compatible_options(

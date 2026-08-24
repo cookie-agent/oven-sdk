@@ -15,7 +15,7 @@ use crate::{
         AzureSystemMessageRole,
     },
     media,
-    options::chat_options,
+    options::AzureOpenAiChatOptions,
     schema,
 };
 
@@ -36,10 +36,10 @@ pub(crate) struct Encoded {
 
 pub(crate) fn validate_request(
     request: &Request,
+    options: &AzureOpenAiChatOptions,
     capabilities: &ModelCapabilities,
     _profile: &ChatWireProfile,
 ) -> Result<(), ModelError> {
-    let options = chat_options(request)?;
     request.validate_for(capabilities)?;
     if !request.tools.is_empty() && !capabilities.features.contains(Capability::TOOL_CALLING) {
         return Err(ModelError::unsupported(
@@ -53,13 +53,13 @@ pub(crate) fn validate_request(
 
 pub(crate) fn encode_request(
     request: &Request,
+    official_options: &AzureOpenAiChatOptions,
     descriptor: &LanguageModelDescriptor,
     policy: ReplayPolicy,
     profile: &ChatWireProfile,
     replay_binding: &JsonValue,
     replay_scope: &NativeContextScope,
 ) -> Result<Encoded, ModelError> {
-    let official_options = chat_options(request)?;
     let mut replay_outcome = ReplayOutcome::default();
     let mut messages = Vec::new();
     let mut warnings = Vec::new();
@@ -201,18 +201,19 @@ pub(crate) fn encode_request(
     }
     if let Some(effort) = official_options
         .reasoning_effort
+        .clone()
         .or_else(|| request.inference.reasoning_effort.clone())
     {
         body["reasoning_effort"] = effort.into();
     }
-    if let Some(user) = official_options.user {
-        body["user"] = user.into();
+    if let Some(user) = &official_options.user {
+        body["user"] = user.clone().into();
     }
-    if let Some(service_tier) = official_options.service_tier {
-        body["service_tier"] = service_tier.into();
+    if let Some(service_tier) = &official_options.service_tier {
+        body["service_tier"] = service_tier.clone().into();
     }
-    if let Some(verbosity) = official_options.verbosity {
-        body["verbosity"] = verbosity.into();
+    if let Some(verbosity) = &official_options.verbosity {
+        body["verbosity"] = verbosity.clone().into();
     }
     if let Some(parallel) = official_options.parallel_tool_calls {
         body["parallel_tool_calls"] = parallel.into();

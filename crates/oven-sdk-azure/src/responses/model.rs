@@ -49,8 +49,10 @@ impl LanguageModel for AzureOpenAiResponsesModel {
     }
 
     fn validate_request(&self, request_value: &Request) -> Result<(), ModelError> {
+        let (options, _) = crate::options::response_pipeline_options(request_value)?;
         request::validate_request(
             request_value,
+            &options,
             &self.descriptor().capabilities,
             &self.descriptor,
             self.native_context_scope(),
@@ -62,10 +64,19 @@ impl LanguageModel for AzureOpenAiResponsesModel {
     }
 
     fn validate_compaction(&self, request_value: &CompactionRequest) -> Result<(), ModelError> {
+        let (request_options, options) =
+            crate::options::response_pipeline_options(&request_value.request)?;
         let (binding, scope) = self.config.configured_native_context()?.ok_or_else(|| {
             ModelError::unsupported("Azure Responses V1 native compaction is not configured")
         })?;
-        compaction::validate(request_value, &self.descriptor, &binding, &scope)
+        compaction::validate(
+            request_value,
+            &request_options,
+            &options,
+            &self.descriptor,
+            &binding,
+            &scope,
+        )
     }
 
     fn supports_compaction(&self, request: &CompactionRequest) -> bool {
@@ -78,7 +89,14 @@ impl LanguageModel for AzureOpenAiResponsesModel {
         abort: AbortSignal,
     ) -> BoxFuture<'a, Result<StreamResponse, ModelError>> {
         Box::pin(async move {
-            self.validate_request(&request_value)?;
+            let (options, _) = crate::options::response_pipeline_options(&request_value)?;
+            request::validate_request(
+                &request_value,
+                &options,
+                &self.descriptor().capabilities,
+                &self.descriptor,
+                self.native_context_scope(),
+            )?;
             if abort.is_aborted() {
                 return Err(ModelError::abort("request was aborted before dispatch")
                     .with_stage(ErrorStage::Connect));
@@ -89,6 +107,7 @@ impl LanguageModel for AzureOpenAiResponsesModel {
                 configured_headers(&self.config, &abort).await?;
             let encoded = request::encode_request(
                 &request_value,
+                &options,
                 descriptor,
                 replay_policy,
                 &replay_binding,
@@ -208,19 +227,35 @@ impl LanguageModel for AzureOpenAiResponsesModel {
         abort: AbortSignal,
     ) -> BoxFuture<'a, Result<CompactionResult, ModelError>> {
         Box::pin(async move {
-            self.validate_compaction(&request_value)?;
+            let (request_options, options) =
+                crate::options::response_pipeline_options(&request_value.request)?;
+            let (replay_binding, scope) =
+                self.config.configured_native_context()?.ok_or_else(|| {
+                    ModelError::unsupported(
+                        "Azure Responses V1 native compaction is not configured",
+                    )
+                })?;
+            compaction::validate(
+                &request_value,
+                &request_options,
+                &options,
+                &self.descriptor,
+                &replay_binding,
+                &scope,
+            )?;
             if abort.is_aborted() {
                 return Err(
                     ModelError::abort("Azure compaction was aborted before dispatch")
                         .with_stage(ErrorStage::NativeContextEncode),
                 );
             }
-            let (replay_binding, scope) = self
-                .config
-                .configured_native_context()?
-                .expect("native compaction validation requires a configured scope");
-            let encoded =
-                compaction::encode(&request_value, &self.descriptor, &replay_binding, &scope)?;
+            let encoded = compaction::encode(
+                &request_value,
+                &options,
+                &self.descriptor,
+                &replay_binding,
+                &scope,
+            )?;
             let (headers, resolved_binding, request_scope) =
                 configured_headers(&self.config, &abort).await?;
             if request_scope != scope || resolved_binding != replay_binding {

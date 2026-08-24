@@ -187,7 +187,15 @@ impl BedrockModel {
         streaming: bool,
     ) -> BoxFuture<'a, Result<StreamResponse, ModelError>> {
         Box::pin(async move {
-            self.validate_request(&request)?;
+            let options = crate::request::options(&request)?;
+            crate::request::validate_request(
+                &request,
+                &options,
+                &self.config.capabilities,
+                self.config.reasoning_wire_format,
+                self.config.signed_reasoning,
+                self.config.structured_output,
+            )?;
             if abort.is_aborted() {
                 return Err(ModelError::abort("request was aborted before dispatch")
                     .with_stage(ErrorStage::Connect));
@@ -195,12 +203,15 @@ impl BedrockModel {
             let descriptor = self.descriptor();
             let encoded = crate::request::encode_request(
                 &request,
+                &options,
                 descriptor,
                 &self.config.native_context_scope,
-                self.config.reasoning_wire_format,
-                self.config.signed_reasoning,
-                self.config.structured_output,
-                streaming,
+                crate::request::EncodeSettings {
+                    reasoning_wire_format: self.config.reasoning_wire_format,
+                    signed_reasoning: self.config.signed_reasoning,
+                    structured_output: self.config.structured_output,
+                    streaming,
+                },
             )?;
             let body = serde_json::to_vec(&encoded.body).map_err(|_| {
                 ModelError::invalid_request("could not serialize Bedrock Converse request")
@@ -390,8 +401,10 @@ impl LanguageModel for BedrockModel {
     }
 
     fn validate_request(&self, request: &Request) -> Result<(), ModelError> {
+        let options = crate::request::options(request)?;
         crate::request::validate_request(
             request,
+            &options,
             &self.config.capabilities,
             self.config.reasoning_wire_format,
             self.config.signed_reasoning,

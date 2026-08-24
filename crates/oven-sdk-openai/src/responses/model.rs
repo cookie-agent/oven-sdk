@@ -109,8 +109,10 @@ impl LanguageModel for OpenAiResponsesModel {
     }
 
     fn validate_request(&self, request_value: &Request) -> Result<(), ModelError> {
+        let (options, _) = crate::options::response_pipeline_options(request_value)?;
         request::validate_request(
             request_value,
+            &options,
             &self.runtime.descriptor.capabilities,
             &self.runtime.descriptor,
             &self.runtime.scope,
@@ -122,14 +124,16 @@ impl LanguageModel for OpenAiResponsesModel {
     }
 
     fn validate_compaction(&self, compaction: &CompactionRequest) -> Result<(), ModelError> {
+        let (request_options, options) =
+            crate::options::response_pipeline_options(&compaction.request)?;
         compaction.validate_for(&self.runtime.descriptor.capabilities)?;
         request::validate_request(
             &compaction.request,
+            &request_options,
             &self.runtime.descriptor.capabilities,
             &self.runtime.descriptor,
             &self.runtime.scope,
         )?;
-        let options = crate::options::responses_compaction_options(compaction)?;
         compaction::validate_options(&options)?;
         Ok(())
     }
@@ -144,15 +148,27 @@ impl LanguageModel for OpenAiResponsesModel {
         abort: AbortSignal,
     ) -> BoxFuture<'a, Result<StreamResponse, ModelError>> {
         Box::pin(async move {
-            self.validate_request(&request_value)?;
+            let (options, _) = crate::options::response_pipeline_options(&request_value)?;
+            request::validate_request(
+                &request_value,
+                &options,
+                &self.runtime.descriptor.capabilities,
+                &self.runtime.descriptor,
+                &self.runtime.scope,
+            )?;
             if abort.is_aborted() {
                 return Err(ModelError::abort("request was aborted before dispatch")
                     .with_stage(ErrorStage::Connect));
             }
             let descriptor = self.runtime.descriptor.clone();
             let policy = descriptor.capabilities.replay.policy;
-            let encoded =
-                request::encode_request(&request_value, &descriptor, &self.runtime.scope, policy)?;
+            let encoded = request::encode_request(
+                &request_value,
+                &options,
+                &descriptor,
+                &self.runtime.scope,
+                policy,
+            )?;
             let headers = official_headers(&self.runtime.auth, &self.runtime.headers)?;
             let send = self
                 .runtime
@@ -259,7 +275,17 @@ impl LanguageModel for OpenAiResponsesModel {
         abort: AbortSignal,
     ) -> BoxFuture<'a, Result<CompactionResult, ModelError>> {
         Box::pin(async move {
-            self.validate_compaction(&compaction_request)?;
+            let (request_options, options) =
+                crate::options::response_pipeline_options(&compaction_request.request)?;
+            compaction_request.validate_for(&self.runtime.descriptor.capabilities)?;
+            request::validate_request(
+                &compaction_request.request,
+                &request_options,
+                &self.runtime.descriptor.capabilities,
+                &self.runtime.descriptor,
+                &self.runtime.scope,
+            )?;
+            compaction::validate_options(&options)?;
             if abort.is_aborted() {
                 return Err(
                     ModelError::abort("native compaction was aborted before encoding")
@@ -269,6 +295,7 @@ impl LanguageModel for OpenAiResponsesModel {
             let descriptor = self.runtime.descriptor.clone();
             let encoded = request::encode_compaction_request(
                 &compaction_request,
+                &options,
                 &descriptor,
                 &self.runtime.scope,
                 descriptor.capabilities.replay.policy,

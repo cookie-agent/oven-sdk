@@ -316,7 +316,9 @@ impl LanguageModel for OpenResponsesModel {
         abort: AbortSignal,
     ) -> BoxFuture<'a, Result<StreamResponse, ModelError>> {
         Box::pin(async move {
-            self.validate_request(&request)?;
+            request.validate_for(&self.config.capabilities)?;
+            let options = request_options(&request)?;
+            validate_request(&request, &options, &self.config.settings)?;
             if abort.is_aborted() {
                 return Err(ModelError::abort("request was aborted before dispatch")
                     .with_stage(ErrorStage::Connect));
@@ -325,6 +327,7 @@ impl LanguageModel for OpenResponsesModel {
             let (binding, scope) = self.config.replay_context(&headers)?;
             let encoded = encode_request(
                 &request,
+                &options,
                 &self.descriptor,
                 &self.config.settings,
                 &binding,
@@ -632,12 +635,12 @@ fn validate_media_file(file: &FilePart) -> Result<(), ModelError> {
 
 fn encode_request(
     request: &Request,
+    options: &OpenResponsesRequestOptions,
     descriptor: &LanguageModelDescriptor,
     settings: &OpenResponsesSettings,
     binding: &JsonValue,
     scope: &NativeContextScope,
 ) -> Result<Encoded, ModelError> {
-    let options = request_options(request)?;
     let mut input = Vec::new();
     let mut replay = ReplayOutcome::default();
     let warnings = Vec::new();
@@ -751,26 +754,26 @@ fn encode_request(
     } else if let Some(summary) = &settings.reasoning_summary {
         body["reasoning"] = serde_json::json!({"summary":summary});
     }
-    if let Some(value) = options.instructions {
-        body["instructions"] = value.into();
+    if let Some(value) = &options.instructions {
+        body["instructions"] = value.clone().into();
     }
     if !options.metadata.is_empty() {
-        body["metadata"] = serde_json::to_value(options.metadata).expect("metadata serializes");
+        body["metadata"] = serde_json::to_value(&options.metadata).expect("metadata serializes");
     }
-    if let Some(value) = options.service_tier {
-        body["service_tier"] = value.into();
+    if let Some(value) = &options.service_tier {
+        body["service_tier"] = value.clone().into();
     }
-    if let Some(value) = options.truncation {
-        body["truncation"] = value.into();
+    if let Some(value) = &options.truncation {
+        body["truncation"] = value.clone().into();
     }
     if let Some(value) = options.max_tool_calls {
         body["max_tool_calls"] = value.into();
     }
-    if let Some(value) = options.safety_identifier {
-        body["safety_identifier"] = value.into();
+    if let Some(value) = &options.safety_identifier {
+        body["safety_identifier"] = value.clone().into();
     }
-    if let Some(value) = options.prompt_cache_key {
-        body["prompt_cache_key"] = value.into();
+    if let Some(value) = &options.prompt_cache_key {
+        body["prompt_cache_key"] = value.clone().into();
     }
     if !request.tools.is_empty() {
         body["tools"]=JsonValue::Array(request.tools.iter().map(|tool|serde_json::json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.input_schema.as_value(),"strict":settings.strict_tools})).collect());
@@ -784,22 +787,22 @@ fn encode_request(
     };
     match &request.response_format {
         ResponseFormat::Text => {
-            if let Some(verbosity) = options.text_verbosity {
+            if let Some(verbosity) = &options.text_verbosity {
                 body["text"] = serde_json::json!({"verbosity":verbosity});
             }
         }
         ResponseFormat::Json { schema: None } => {
             body["text"] = serde_json::json!({"format":{"type":"json_object"}});
-            if let Some(verbosity) = options.text_verbosity {
-                body["text"]["verbosity"] = verbosity.into();
+            if let Some(verbosity) = &options.text_verbosity {
+                body["text"]["verbosity"] = verbosity.clone().into();
             }
         }
         ResponseFormat::Json {
             schema: Some(schema),
         } => {
             body["text"] = serde_json::json!({"format":{"type":"json_schema","name":"response","strict":settings.strict_json_schema,"schema":schema.as_value()}});
-            if let Some(verbosity) = options.text_verbosity {
-                body["text"]["verbosity"] = verbosity.into();
+            if let Some(verbosity) = &options.text_verbosity {
+                body["text"]["verbosity"] = verbosity.clone().into();
             }
         }
     }

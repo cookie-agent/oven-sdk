@@ -194,13 +194,21 @@ impl GoogleModel {
         streaming: bool,
     ) -> BoxFuture<'a, Result<StreamResponse, ModelError>> {
         Box::pin(async move {
-            self.validate_request(&request)?;
+            let options = crate::request::options(&request)?;
+            crate::request::validate_request(
+                &request,
+                &options,
+                &self.config.descriptor.capabilities,
+                &self.config.provider.id,
+                &self.config.settings,
+            )?;
             if abort.is_aborted() {
                 return Err(ModelError::abort("request was aborted before dispatch")
                     .with_stage(ErrorStage::Connect));
             }
             let encoded = crate::request::encode_request(
                 &request,
+                &options,
                 &self.config.descriptor,
                 &self.config.settings,
                 &self.config.native_context_scope,
@@ -360,8 +368,10 @@ impl LanguageModel for GoogleModel {
     }
 
     fn validate_request(&self, request: &Request) -> Result<(), ModelError> {
+        let options = crate::request::options(request)?;
         crate::request::validate_request(
             request,
+            &options,
             &self.config.descriptor.capabilities,
             &self.config.provider.id,
             &self.config.settings,

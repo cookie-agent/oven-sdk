@@ -10,7 +10,7 @@ use oven_sdk::{
 use sha2::{Digest, Sha256};
 
 use crate::{
-    options::{AzureOpenAiCompactionOptions, compaction_options},
+    options::{AzureOpenAiCompactionOptions, AzureOpenAiResponsesOptions},
     wire::responses::COMPACTION_FORMAT,
 };
 
@@ -29,6 +29,8 @@ pub(crate) struct EncodedCompaction {
 
 pub(crate) fn validate(
     request_value: &CompactionRequest,
+    request_options: &AzureOpenAiResponsesOptions,
+    options: &AzureOpenAiCompactionOptions,
     descriptor: &LanguageModelDescriptor,
     replay_binding: &JsonValue,
     native_scope: &NativeContextScope,
@@ -36,11 +38,12 @@ pub(crate) fn validate(
     request_value.validate_for(&descriptor.capabilities)?;
     request::validate_request(
         &request_value.request,
+        request_options,
         &descriptor.capabilities,
         descriptor,
         Some(native_scope),
     )?;
-    validate_options(&compaction_options(request_value)?)?;
+    validate_options(options)?;
     let encoded = request::encode_input(
         &request_value.request,
         descriptor,
@@ -53,12 +56,12 @@ pub(crate) fn validate(
 
 pub(crate) fn encode(
     request_value: &CompactionRequest,
+    options: &AzureOpenAiCompactionOptions,
     descriptor: &LanguageModelDescriptor,
     replay_binding: &JsonValue,
     native_scope: &NativeContextScope,
 ) -> Result<EncodedCompaction, ModelError> {
-    let options = compaction_options(request_value)?;
-    validate_options(&options)?;
+    validate_options(options)?;
     let EncodedInput {
         input,
         replay,
@@ -75,14 +78,18 @@ pub(crate) fn encode(
         "model": descriptor.identity.model_id.as_str(),
         "input": input,
     });
-    insert_option(&mut body, "instructions", options.instructions);
-    insert_option(&mut body, "prompt_cache_key", options.prompt_cache_key);
+    insert_option(&mut body, "instructions", options.instructions.clone());
+    insert_option(
+        &mut body,
+        "prompt_cache_key",
+        options.prompt_cache_key.clone(),
+    );
     insert_option(
         &mut body,
         "prompt_cache_retention",
-        options.prompt_cache_retention,
+        options.prompt_cache_retention.clone(),
     );
-    insert_option(&mut body, "service_tier", options.service_tier);
+    insert_option(&mut body, "service_tier", options.service_tier.clone());
     let size = serde_json::to_vec(&body)
         .map_err(|_| {
             ModelError::invalid_request("could not encode Azure compaction request")

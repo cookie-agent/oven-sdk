@@ -59,8 +59,10 @@ struct InnerModel {
 
 impl InnerModel {
     fn validate_request(&self, request: &Request) -> Result<(), ModelError> {
+        let options = crate::request::parse_options(request, self.config.protocol)?;
         crate::request::validate_request(
             request,
+            &options,
             &self.descriptor.capabilities,
             self.config.protocol,
             &self.config.protocol_settings,
@@ -73,7 +75,14 @@ impl InnerModel {
         abort: AbortSignal,
     ) -> BoxFuture<'a, Result<oven_sdk::StreamResponse, ModelError>> {
         Box::pin(async move {
-            self.validate_request(&request)?;
+            let options = crate::request::parse_options(&request, self.config.protocol)?;
+            crate::request::validate_request(
+                &request,
+                &options,
+                &self.descriptor.capabilities,
+                self.config.protocol,
+                &self.config.protocol_settings,
+            )?;
             if abort.is_aborted() {
                 return Err(ModelError::abort("request was aborted before dispatch")
                     .with_stage(ErrorStage::Connect));
@@ -87,6 +96,7 @@ impl InnerModel {
             };
             let encoded = crate::request::encode_request(
                 &request,
+                &options,
                 &self.descriptor,
                 &self.config.native_context_scope,
                 replay_policy,

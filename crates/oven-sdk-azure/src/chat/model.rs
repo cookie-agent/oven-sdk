@@ -86,8 +86,10 @@ impl LanguageModel for AzureOpenAiChatModel {
 
     fn validate_request(&self, request_value: &Request) -> Result<(), ModelError> {
         let profile = configured_owned(&self.config);
+        let options = crate::options::chat_options(request_value)?;
         request::validate_request(
             request_value,
+            &options,
             &self.descriptor().capabilities,
             &profile.wire(),
         )
@@ -103,9 +105,23 @@ impl LanguageModel for AzureOpenAiChatModel {
         abort: AbortSignal,
     ) -> BoxFuture<'a, Result<StreamResponse, ModelError>> {
         Box::pin(async move {
-            self.validate_request(&request_value)?;
+            let profile = configured_owned(&self.config);
+            let options = crate::options::chat_options(&request_value)?;
+            request::validate_request(
+                &request_value,
+                &options,
+                &self.descriptor().capabilities,
+                &profile.wire(),
+            )?;
             let settings = configured_settings(&self.config, &abort).await?;
-            start_stream(self.descriptor().clone(), request_value, abort, settings).await
+            start_stream(
+                self.descriptor().clone(),
+                request_value,
+                options,
+                abort,
+                settings,
+            )
+            .await
         })
     }
 }
@@ -173,6 +189,7 @@ fn insert_header(headers: &mut HeaderMap, name: &str, value: &str) -> Result<(),
 async fn start_stream(
     descriptor: LanguageModelDescriptor,
     request_value: Request,
+    options: crate::options::AzureOpenAiChatOptions,
     abort: AbortSignal,
     settings: Settings,
 ) -> Result<StreamResponse, ModelError> {
@@ -182,6 +199,7 @@ async fn start_stream(
     }
     let encoded = request::encode_request(
         &request_value,
+        &options,
         &descriptor,
         settings.replay_policy,
         &settings.profile.wire(),
