@@ -430,10 +430,13 @@ impl State {
                     ));
                 }
                 self.validate_native_complete(bytes)?;
-                let mut finish = Finish::new(self.usage.clone(), map_stop(self.stop.as_deref()));
-                finish.response_metadata = self.response_metadata.clone();
+                let mut finish = Finish::new(
+                    std::mem::take(&mut self.usage),
+                    map_stop(self.stop.as_deref()),
+                );
+                finish.response_metadata = std::mem::take(&mut self.response_metadata);
                 if self.policy != ReplayPolicy::Never {
-                    let payload = serde_json::json!({"format":self.protocol.replay_format(),"message":{"role":"assistant","content":self.native},"stop_reason":self.stop,"stop_sequence":self.stop_sequence});
+                    let payload = serde_json::json!({"format":self.protocol.replay_format(),"message":{"role":"assistant","content":std::mem::take(&mut self.native)},"stop_reason":self.stop.take(),"stop_sequence":self.stop_sequence.take()});
                     finish.native_replay = Some(
                         NativeReplayArtifact::new(
                             self.adapter_id.clone(),

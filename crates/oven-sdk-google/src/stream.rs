@@ -334,13 +334,16 @@ impl State {
         bytes: u64,
     ) -> Result<(), ModelError> {
         let has_calls = !self.call_ids.is_empty();
-        let mut finish = Finish::new(self.usage.clone(), map_finish(reason, has_calls));
+        let mut finish = Finish::new(
+            std::mem::take(&mut self.usage),
+            map_finish(reason, has_calls),
+        );
         finish.response_metadata = self.response_metadata.clone();
-        finish.provider_metadata = self.provider_metadata.clone();
+        finish.provider_metadata = std::mem::take(&mut self.provider_metadata);
         if self.policy != ReplayPolicy::Never {
             let payload = serde_json::json!({
                 "role":"model",
-                "parts":self.native_parts,
+                "parts":std::mem::take(&mut self.native_parts),
             });
             finish.native_replay = Some(
                 NativeReplayArtifact::new(

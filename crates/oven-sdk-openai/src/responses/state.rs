@@ -367,16 +367,18 @@ impl State {
             None if self.client_calls => FinishReason::ToolCalls,
             None => FinishReason::Stop,
         };
-        let mut finish = Finish::new(self.usage.clone(), finish_reason);
-        finish.response_metadata = self.response_metadata.clone();
+        let mut finish = Finish::new(std::mem::take(&mut self.usage), finish_reason);
+        finish.response_metadata = std::mem::take(&mut self.response_metadata);
         if self.policy != ReplayPolicy::Never {
-            let items = self.items.values().cloned().collect::<Vec<_>>();
+            let items = std::mem::take(&mut self.items)
+                .into_values()
+                .collect::<Vec<_>>();
             let payload = serde_json::json!({
                 "format":REPLAY_FORMAT,
                 "items":items,
                 "store":false,
-                "status":self.status,
-                "incomplete_details":self.incomplete_details
+                "status":self.status.take(),
+                "incomplete_details":std::mem::take(&mut self.incomplete_details)
             });
             finish.native_replay = Some(
                 NativeReplayArtifact::new(self.adapter_id.clone(), self.scope.clone(), payload)

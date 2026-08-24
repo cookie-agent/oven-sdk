@@ -15,6 +15,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
+    io,
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -56,6 +57,31 @@ pub type ResponseMetadata = BTreeMap<String, JsonValue>;
 
 /// Provider-defined terminal metadata.
 pub type ProviderMetadata = BTreeMap<String, JsonValue>;
+
+#[derive(Default)]
+struct CountingWriter {
+    bytes: usize,
+}
+
+impl io::Write for CountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(buffer.len())
+            .ok_or_else(|| io::Error::other("serialized JSON size overflow"))?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_json_size(value: &impl Serialize) -> Result<usize, serde_json::Error> {
+    let mut writer = CountingWriter::default();
+    serde_json::to_writer(&mut writer, value)?;
+    Ok(writer.bytes)
+}
 
 /// A stable provider namespace.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -2786,11 +2812,6 @@ impl LanguageModelDescriptor {
     }
 }
 
-/// A JSON fragment that can be embedded in another JSON document.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(transparent)]
-pub struct JsonFragment(pub JsonValue);
-
 /// A parsed JSON Schema document, restricted to object and boolean schemas.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -2829,11 +2850,6 @@ pub enum JsonSchemaError {
     #[error("JSON Schema root must be an object or boolean")]
     InvalidRoot,
 }
-
-/// Default normalized history encoding.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(transparent)]
-pub struct EncodedHistory(pub Vec<JsonFragment>);
 
 /// One item from a model stream.
 pub type StreamItem = Result<StreamPart, ModelError>;
@@ -3060,9 +3076,8 @@ impl NativeContextWindow {
             .validate()
             .and_then(|()| scope.model_id.validate())
             .map_err(|error| NativeContextPayloadError::InvalidIdentity(error.to_string()))?;
-        let size = serde_json::to_vec(&payload)
-            .map_err(NativeContextPayloadError::Serialization)?
-            .len();
+        let size =
+            serialized_json_size(&payload).map_err(NativeContextPayloadError::Serialization)?;
         if size > Self::MAX_PAYLOAD_BYTES {
             return Err(NativeContextPayloadError::TooLarge {
                 size,
@@ -3191,9 +3206,7 @@ impl NativeReplayArtifact {
             .validate()
             .and_then(|()| scope.model_id.validate())
             .map_err(|error| ReplayPayloadError::InvalidIdentity(error.to_string()))?;
-        let size = serde_json::to_vec(&payload)
-            .map_err(ReplayPayloadError::Serialization)?
-            .len();
+        let size = serialized_json_size(&payload).map_err(ReplayPayloadError::Serialization)?;
         if size > Self::MAX_PAYLOAD_BYTES {
             return Err(ReplayPayloadError::TooLarge {
                 size,
@@ -3990,36 +4003,6 @@ pub trait LanguageModel: Send + Sync {
                 "provider-native compaction is declared but not implemented by this adapter",
             ))
         })
-    }
-
-    /// Encodes normalized history as parsed JSON fragments by default.
-    fn encode_history(&self, history: &[HistoryTurn]) -> Result<EncodedHistory, ModelError> {
-        history
-            .iter()
-            .map(|turn| {
-                serde_json::to_value(turn)
-                    .map(JsonFragment)
-                    .map_err(|error| {
-                        ModelError::invalid_response(error.to_string())
-                            .with_stage(ErrorStage::RequestEncoding)
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(EncodedHistory)
-    }
-
-    /// Decodes the default normalized JSON-fragment history encoding.
-    fn decode_history(&self, history: &EncodedHistory) -> Result<Vec<HistoryTurn>, ModelError> {
-        history
-            .0
-            .iter()
-            .map(|fragment| {
-                serde_json::from_value(fragment.0.clone()).map_err(|error| {
-                    ModelError::invalid_response(error.to_string())
-                        .with_stage(ErrorStage::StreamDecode)
-                })
-            })
-            .collect()
     }
 }
 
@@ -4819,38 +4802,6 @@ mod tests {
                 .expect("serialize payload")
                 .len(),
             NativeReplayArtifact::MAX_PAYLOAD_BYTES
-        );
-    }
-
-    #[test]
-    fn completed_assistant_artifact_survives_history_encoding() {
-        let artifact = NativeReplayArtifact::new(
-            AdapterId::new("test.adapter"),
-            native_context_scope("scripted"),
-            JsonValue::Null,
-        )
-        .expect("small artifact");
-        let mut finish = Finish::new(Usage::default(), FinishReason::Stop);
-        finish.native_replay = Some(artifact.clone());
-        let request = Request::new(vec![HistoryTurn::assistant(CompletedTurn::new(
-            AssistantMessage::new(Vec::new()),
-            finish,
-        ))]);
-        let request: Request =
-            serde_json::from_str(&serde_json::to_string(&request).expect("serialize request"))
-                .expect("deserialize request");
-        let model = Scripted::new(Vec::new());
-        let encoded = model
-            .encode_history(&request.history)
-            .expect("encode history");
-        let decoded = model.decode_history(&encoded).expect("decode history");
-        assert_eq!(decoded, request.history);
-        assert_eq!(
-            match &decoded[0] {
-                HistoryTurn::Assistant(turn) => turn.finish.native_replay.as_ref(),
-                _ => None,
-            },
-            Some(&artifact)
         );
     }
 

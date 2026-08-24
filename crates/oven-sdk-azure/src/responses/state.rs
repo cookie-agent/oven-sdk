@@ -494,10 +494,12 @@ impl State {
             None => FinishReason::Stop,
             Some(_) => unreachable!("incomplete reason was validated"),
         };
-        let mut finish = Finish::new(self.usage.clone(), finish_reason);
-        finish.response_metadata = self.response_metadata.clone();
+        let mut finish = Finish::new(std::mem::take(&mut self.usage), finish_reason);
+        finish.response_metadata = std::mem::take(&mut self.response_metadata);
         if self.policy != ReplayPolicy::Never {
-            let items = self.items.values().cloned().collect::<Vec<_>>();
+            let items = std::mem::take(&mut self.items)
+                .into_values()
+                .collect::<Vec<_>>();
             let (items, fingerprint) = replay::capture(&items).ok_or_else(|| {
                 invalid_finalize(
                     "Responses output contains an item unsafe for native replay",
