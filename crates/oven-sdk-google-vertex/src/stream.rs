@@ -5,11 +5,12 @@ use std::{
     time::Duration,
 };
 
-use futures_util::StreamExt;
+#[cfg(test)]
+use oven_sdk::AbortSignal;
 use oven_sdk::{
-    AbortSignal, BoxStream, CustomPart, ErrorStage, FilePart, FileSource, Finish, FinishReason,
-    JsonValue, ModelError, ModelErrorKind, NativeContextScope, NativeReplayArtifact, ReplayPolicy,
-    SourcePart, StreamItem, StreamPart, ToolCallPart, Usage,
+    BoxStream, CustomPart, ErrorStage, FilePart, FileSource, Finish, FinishReason, JsonValue,
+    ModelError, ModelErrorKind, NativeContextScope, NativeReplayArtifact, ReplayPolicy, SourcePart,
+    StreamItem, StreamPart, ToolCallPart, Usage,
 };
 use reqwest::header::HeaderMap;
 use url::Url;
@@ -980,7 +981,7 @@ pub(crate) struct LiveState {
     pub(crate) queue: VecDeque<StreamItem>,
     pub(crate) pending_events: VecDeque<crate::sse::Event>,
     pub(crate) pending_error: Option<ModelError>,
-    pub(crate) abort: AbortSignal,
+    pub(crate) deadline: oven_sdk::provider_support::StreamReadDeadline<tokio::time::Sleep>,
     pub(crate) idle: Duration,
     pub(crate) count: u64,
     pub(crate) eof: bool,
@@ -1007,15 +1008,24 @@ pub(crate) async fn read_live(
     stop_at_semantic: bool,
 ) -> Result<bool, ModelError> {
     if live.pending_events.is_empty() {
-        let next = tokio::select! {
-            value = tokio::time::timeout(live.idle, live.bytes.next()) => value.map_err(|_| {
-                ModelError::timeout("Vertex stream idle timeout")
+        let next = match live
+            .deadline
+            .next(live.bytes.as_mut(), |timer| {
+                timer.reset(tokio::time::Instant::now() + live.idle);
+            })
+            .await
+        {
+            oven_sdk::provider_support::StreamRead::Aborted => {
+                return Err(ModelError::abort("Vertex stream was aborted")
                     .with_stage(ErrorStage::StreamRead)
-                    .with_bytes_received(live.count)
-            })?,
-            _ = live.abort.aborted() => return Err(ModelError::abort("Vertex stream was aborted")
-                .with_stage(ErrorStage::StreamRead)
-                .with_bytes_received(live.count)),
+                    .with_bytes_received(live.count));
+            }
+            oven_sdk::provider_support::StreamRead::TimedOut => {
+                return Err(ModelError::timeout("Vertex stream idle timeout")
+                    .with_stage(ErrorStage::StreamRead)
+                    .with_bytes_received(live.count));
+            }
+            oven_sdk::provider_support::StreamRead::Item(value) => value,
         };
         match next {
             Some(Ok(chunk)) => {
@@ -1674,7 +1684,10 @@ mod tests {
             queue: VecDeque::new(),
             pending_events: VecDeque::new(),
             pending_error: None,
-            abort: AbortSignal::default(),
+            deadline: oven_sdk::provider_support::StreamReadDeadline::new(
+                tokio::time::sleep(Duration::from_secs(1)),
+                &AbortSignal::default(),
+            ),
             idle: Duration::from_secs(1),
             count: 0,
             eof: false,

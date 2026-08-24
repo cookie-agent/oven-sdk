@@ -533,7 +533,10 @@ impl GoogleVertexModel {
                 })]),
                 pending_events: VecDeque::new(),
                 pending_error: None,
-                abort,
+                deadline: oven_sdk::provider_support::StreamReadDeadline::new(
+                    tokio::time::sleep(self.config.settings.timeouts.stream_idle),
+                    &abort,
+                ),
                 idle: self.config.settings.timeouts.stream_idle,
                 count: 0,
                 eof: false,

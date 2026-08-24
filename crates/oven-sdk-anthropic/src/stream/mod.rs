@@ -5,8 +5,7 @@ pub(crate) mod state;
 
 use std::{collections::VecDeque, time::Duration};
 
-use futures_util::StreamExt;
-use oven_sdk::{AbortSignal, BoxStream, ErrorStage, JsonValue, ModelError, StreamItem};
+use oven_sdk::{BoxStream, ErrorStage, JsonValue, ModelError, StreamItem};
 #[cfg(test)]
 use oven_sdk::{ReplayPolicy, StreamPart};
 use reqwest::header::HeaderMap;
@@ -20,7 +19,7 @@ pub(crate) struct LiveState {
     pub(crate) queue: VecDeque<StreamItem>,
     pub(crate) pending_events: VecDeque<crate::sse::Event>,
     pub(crate) pending_error: Option<ModelError>,
-    pub(crate) abort: AbortSignal,
+    pub(crate) deadline: oven_sdk::provider_support::StreamReadDeadline<tokio::time::Sleep>,
     pub(crate) idle: Duration,
     pub(crate) count: u64,
     pub(crate) eof: bool,
@@ -50,9 +49,24 @@ pub(crate) async fn read_live(
     if !live.pending_events.is_empty() {
         return process_live_events(live, stop_at_first_semantic);
     }
-    let next = tokio::select! {
-        value = tokio::time::timeout(live.idle, live.bytes.next()) => value.map_err(|_| ModelError::timeout("stream idle timeout").with_stage(ErrorStage::StreamRead).with_bytes_received(live.count))?,
-        _ = live.abort.aborted() => return Err(ModelError::abort("stream was aborted").with_stage(ErrorStage::StreamRead).with_bytes_received(live.count)),
+    let next = match live
+        .deadline
+        .next(live.bytes.as_mut(), |timer| {
+            timer.reset(tokio::time::Instant::now() + live.idle);
+        })
+        .await
+    {
+        oven_sdk::provider_support::StreamRead::Aborted => {
+            return Err(ModelError::abort("stream was aborted")
+                .with_stage(ErrorStage::StreamRead)
+                .with_bytes_received(live.count));
+        }
+        oven_sdk::provider_support::StreamRead::TimedOut => {
+            return Err(ModelError::timeout("stream idle timeout")
+                .with_stage(ErrorStage::StreamRead)
+                .with_bytes_received(live.count));
+        }
+        oven_sdk::provider_support::StreamRead::Item(value) => value,
     };
     match next {
         Some(Ok(chunk)) => {

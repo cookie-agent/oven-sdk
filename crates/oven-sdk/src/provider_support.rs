@@ -7,7 +7,58 @@ use futures_core::Stream;
 use futures_util::{FutureExt, StreamExt, pin_mut, select_biased};
 use http::HeaderMap;
 
-use crate::{AbortSignal, ErrorStage, ModelError};
+use crate::{AbortSignal, AbortWait, ErrorStage, ModelError};
+
+/// Result of waiting for the next streaming transport item.
+pub enum StreamRead<T> {
+    /// Cancellation won the biased wait.
+    Aborted,
+    /// The idle deadline elapsed.
+    TimedOut,
+    /// The transport produced its next item or EOF.
+    Item(T),
+}
+
+/// Persistent idle timer and abort waiter for an adapter stream.
+pub struct StreamReadDeadline<T> {
+    timer: Pin<Box<T>>,
+    aborted: Pin<Box<AbortWait>>,
+}
+
+impl<T> StreamReadDeadline<T>
+where
+    T: Future<Output = ()> + Send,
+{
+    /// Creates persistent read synchronization state.
+    pub fn new(timer: T, abort: &AbortSignal) -> Self {
+        Self {
+            timer: Box::pin(timer),
+            aborted: Box::pin(abort.aborted()),
+        }
+    }
+
+    /// Waits for one item after resetting the adapter-owned idle timer.
+    pub async fn next<S, R>(
+        &mut self,
+        mut stream: Pin<&mut S>,
+        reset: R,
+    ) -> StreamRead<Option<S::Item>>
+    where
+        S: Stream + ?Sized,
+        R: FnOnce(Pin<&mut T>),
+    {
+        reset(self.timer.as_mut());
+        let next = stream.next().fuse();
+        let timeout = self.timer.as_mut().fuse();
+        let aborted = self.aborted.as_mut().fuse();
+        pin_mut!(next, timeout, aborted);
+        select_biased! {
+            _ = aborted => StreamRead::Aborted,
+            _ = timeout => StreamRead::TimedOut,
+            item = next => StreamRead::Item(item),
+        }
+    }
+}
 
 /// One framed server-sent event.
 #[derive(Clone, Debug, Eq, PartialEq)]

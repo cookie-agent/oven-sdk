@@ -2,7 +2,6 @@
 
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
-use futures_util::StreamExt;
 use oven_sdk::{
     AbortSignal, AdapterId, BoxFuture, BoxStream, ErrorStage, JsonValue, LanguageModel,
     LanguageModelDescriptor, ModelConfig, ModelError, ModelId, ModelIdentity, NativeContextScope,
@@ -446,7 +445,10 @@ async fn start_stream(
         })]),
         pending_events: VecDeque::new(),
         pending_error: None,
-        abort,
+        deadline: oven_sdk::provider_support::StreamReadDeadline::new(
+            tokio::time::sleep(runtime.timeouts.stream_idle),
+            &abort,
+        ),
         idle: runtime.timeouts.stream_idle,
         count: 0,
         eof: false,
@@ -489,7 +491,7 @@ struct LiveState {
     queue: VecDeque<StreamItem>,
     pending_events: VecDeque<crate::sse::Event>,
     pending_error: Option<ModelError>,
-    abort: AbortSignal,
+    deadline: oven_sdk::provider_support::StreamReadDeadline<tokio::time::Sleep>,
     idle: Duration,
     count: u64,
     eof: bool,
@@ -516,10 +518,24 @@ async fn read_live(live: &mut LiveState, stop_after_event: bool) -> Result<bool,
     if !live.pending_events.is_empty() {
         return process_events(live, stop_after_event);
     }
-    let next = tokio::select! {
-        value = tokio::time::timeout(live.idle, live.bytes.next()) => value
-            .map_err(|_| ModelError::timeout("stream idle timeout").with_stage(ErrorStage::StreamRead).with_bytes_received(live.count))?,
-        _ = live.abort.aborted() => return Err(ModelError::abort("stream was aborted").with_stage(ErrorStage::StreamRead).with_bytes_received(live.count)),
+    let next = match live
+        .deadline
+        .next(live.bytes.as_mut(), |timer| {
+            timer.reset(tokio::time::Instant::now() + live.idle);
+        })
+        .await
+    {
+        oven_sdk::provider_support::StreamRead::Aborted => {
+            return Err(ModelError::abort("stream was aborted")
+                .with_stage(ErrorStage::StreamRead)
+                .with_bytes_received(live.count));
+        }
+        oven_sdk::provider_support::StreamRead::TimedOut => {
+            return Err(ModelError::timeout("stream idle timeout")
+                .with_stage(ErrorStage::StreamRead)
+                .with_bytes_received(live.count));
+        }
+        oven_sdk::provider_support::StreamRead::Item(value) => value,
     };
     match next {
         Some(Ok(chunk)) => {

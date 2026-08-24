@@ -320,7 +320,10 @@ impl BedrockModel {
                 pending_messages: VecDeque::new(),
                 terminal_queue: VecDeque::new(),
                 pending_error: None,
-                abort,
+                deadline: oven_sdk::provider_support::StreamReadDeadline::new(
+                    tokio::time::sleep(self.config.timeouts.stream_idle),
+                    &abort,
+                ),
                 idle: self.config.timeouts.stream_idle,
                 count: 0,
                 eof: false,

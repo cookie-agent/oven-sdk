@@ -5,11 +5,12 @@ use std::{
     time::Duration,
 };
 
-use futures_util::StreamExt;
+#[cfg(test)]
+use oven_sdk::AbortSignal;
 use oven_sdk::{
-    AbortSignal, AdapterId, BoxStream, ErrorStage, Finish, FinishReason, JsonValue, ModelError,
-    ModelErrorKind, NativeContextScope, NativeReplayArtifact, ReplayPolicy, SourcePart, StreamItem,
-    StreamPart, ToolCallPart, Usage,
+    AdapterId, BoxStream, ErrorStage, Finish, FinishReason, JsonValue, ModelError, ModelErrorKind,
+    NativeContextScope, NativeReplayArtifact, ReplayPolicy, SourcePart, StreamItem, StreamPart,
+    ToolCallPart, Usage,
 };
 
 use crate::{
@@ -699,7 +700,7 @@ pub(crate) struct LiveState {
     pub(crate) pending_messages: VecDeque<Message>,
     pub(crate) terminal_queue: VecDeque<StreamItem>,
     pub(crate) pending_error: Option<ModelError>,
-    pub(crate) abort: AbortSignal,
+    pub(crate) deadline: oven_sdk::provider_support::StreamReadDeadline<tokio::time::Sleep>,
     pub(crate) idle: Duration,
     pub(crate) count: u64,
     pub(crate) eof: bool,
@@ -726,15 +727,24 @@ pub(crate) async fn read_live(
     stop_at_semantic: bool,
 ) -> Result<bool, ModelError> {
     if live.pending_messages.is_empty() {
-        let next = tokio::select! {
-            value = tokio::time::timeout(live.idle, live.bytes.next()) => value.map_err(|_| {
-                ModelError::timeout("Bedrock stream idle timeout")
+        let next = match live
+            .deadline
+            .next(live.bytes.as_mut(), |timer| {
+                timer.reset(tokio::time::Instant::now() + live.idle);
+            })
+            .await
+        {
+            oven_sdk::provider_support::StreamRead::Aborted => {
+                return Err(ModelError::abort("Bedrock stream was aborted")
                     .with_stage(ErrorStage::StreamRead)
-                    .with_bytes_received(live.count)
-            })?,
-            _ = live.abort.aborted() => return Err(ModelError::abort("Bedrock stream was aborted")
-                .with_stage(ErrorStage::StreamRead)
-                .with_bytes_received(live.count)),
+                    .with_bytes_received(live.count));
+            }
+            oven_sdk::provider_support::StreamRead::TimedOut => {
+                return Err(ModelError::timeout("Bedrock stream idle timeout")
+                    .with_stage(ErrorStage::StreamRead)
+                    .with_bytes_received(live.count));
+            }
+            oven_sdk::provider_support::StreamRead::Item(value) => value,
         };
         let messages = match next {
             Some(Ok(chunk)) => {
@@ -1137,7 +1147,10 @@ mod tests {
             pending_messages: VecDeque::new(),
             terminal_queue: VecDeque::new(),
             pending_error: None,
-            abort: AbortSignal::default(),
+            deadline: oven_sdk::provider_support::StreamReadDeadline::new(
+                tokio::time::sleep(Duration::from_secs(1)),
+                &AbortSignal::default(),
+            ),
             idle: Duration::from_secs(1),
             count: 0,
             eof: false,
