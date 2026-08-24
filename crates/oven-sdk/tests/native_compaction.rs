@@ -24,17 +24,12 @@ fn window() -> NativeContextWindow {
 }
 
 struct DefaultModel {
-    capabilities: ModelCapabilities,
+    descriptor: LanguageModelDescriptor,
 }
 
 impl LanguageModel for DefaultModel {
-    fn descriptor(&self) -> LanguageModelDescriptor {
-        LanguageModelDescriptor::new(
-            ModelIdentity::new(ProviderId::new("test"), ModelId::new("model")).expect("identity"),
-            AdapterId::new("test.adapter"),
-            self.capabilities.clone(),
-        )
-        .expect("descriptor")
+    fn descriptor(&self) -> &LanguageModelDescriptor {
+        &self.descriptor
     }
 
     fn stream<'a>(
@@ -157,7 +152,12 @@ fn request_and_compaction_validation_cover_the_complete_capability_matrix() {
 #[test]
 fn language_model_defaults_are_object_safe_and_reject_unsupported_compaction() {
     let model = DefaultModel {
-        capabilities: ModelCapabilities::conservative(),
+        descriptor: LanguageModelDescriptor::new(
+            ModelIdentity::new(ProviderId::new("test"), ModelId::new("model")).expect("identity"),
+            AdapterId::new("test.adapter"),
+            ModelCapabilities::conservative(),
+        )
+        .expect("descriptor"),
     };
     let object: &dyn LanguageModel = &model;
     let request = Request::new(Vec::new());

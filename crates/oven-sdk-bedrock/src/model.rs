@@ -159,7 +159,7 @@ impl BedrockModel {
     ) -> BoxFuture<'a, Result<CompleteResult, ModelError>> {
         Box::pin(async move {
             let response = self.execute(request, abort, false).await?;
-            collect_direct(response, self.descriptor()).await
+            collect_direct(response, self.descriptor().clone()).await
         })
     }
 
@@ -195,7 +195,7 @@ impl BedrockModel {
             let descriptor = self.descriptor();
             let encoded = crate::request::encode_request(
                 &request,
-                &descriptor,
+                descriptor,
                 &self.config.native_context_scope,
                 self.config.reasoning_wire_format,
                 self.config.signed_reasoning,
@@ -382,8 +382,8 @@ impl BedrockModel {
 }
 
 impl LanguageModel for BedrockModel {
-    fn descriptor(&self) -> LanguageModelDescriptor {
-        self.config.descriptor.clone()
+    fn descriptor(&self) -> &LanguageModelDescriptor {
+        &self.config.descriptor
     }
 
     fn validate_request(&self, request: &Request) -> Result<(), ModelError> {
@@ -415,8 +415,8 @@ struct DirectResponseCollector {
 }
 
 impl LanguageModel for DirectResponseCollector {
-    fn descriptor(&self) -> LanguageModelDescriptor {
-        self.descriptor.clone()
+    fn descriptor(&self) -> &LanguageModelDescriptor {
+        &self.descriptor
     }
 
     fn validate_request(&self, _request: &Request) -> Result<(), ModelError> {

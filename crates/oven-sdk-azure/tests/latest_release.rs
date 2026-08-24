@@ -68,7 +68,7 @@ fn model_names_never_infer_capabilities_limits_or_replay() {
     let conservative = provider
         .chat("gpt-4.1-2025-04-14", common::conservative())
         .unwrap();
-    let capabilities = conservative.descriptor().capabilities;
+    let capabilities = &conservative.descriptor().capabilities;
     assert_eq!(
         conservative.descriptor().identity.provider_id.as_str(),
         "azure.openai"

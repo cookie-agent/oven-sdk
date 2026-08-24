@@ -38,7 +38,7 @@ async fn core_04_declaration_media_lifecycle_compaction_and_replay_conformance()
         .unwrap()
         .scope()
         .clone();
-    assert_replay_artifact(&first.descriptor(), &scope, &completed.turn).unwrap();
+    assert_replay_artifact(first.descriptor(), &scope, &completed.turn).unwrap();
     assert_replay_round_trip(
         &first,
         &scope,
@@ -58,7 +58,7 @@ async fn core_04_declaration_media_lifecycle_compaction_and_replay_conformance()
     let mut invalid_turn = completed.turn.clone();
     invalid_turn.finish.native_replay = Some(
         NativeReplayArtifact::new(
-            first.descriptor().adapter_id,
+            first.descriptor().adapter_id.clone(),
             scope.clone(),
             serde_json::json!({"invalid":true}),
         )
@@ -98,7 +98,7 @@ async fn core_04_declaration_media_lifecycle_compaction_and_replay_conformance()
     let mut foreign_scope_turn = completed.turn;
     foreign_scope_turn.finish.native_replay = Some(
         NativeReplayArtifact::new(
-            first.descriptor().adapter_id,
+            first.descriptor().adapter_id.clone(),
             foreign_scope,
             original_payload,
         )

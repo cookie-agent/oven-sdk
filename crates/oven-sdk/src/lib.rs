@@ -1345,7 +1345,6 @@ impl Request {
 
     /// Validates structural request invariants and declared model capabilities.
     pub fn validate_for(&self, capabilities: &ModelCapabilities) -> Result<(), ModelError> {
-        capabilities.validate()?;
         if self.native_context.is_some()
             && capabilities.compaction == CompactionCapability::Unsupported
         {
@@ -3631,16 +3630,16 @@ struct EndedToolBlock {
 /// object safety without `async_trait` or native async trait methods.
 pub trait LanguageModel: Send + Sync {
     /// Returns configured provider, model, adapter, capability, and metadata information.
-    fn descriptor(&self) -> LanguageModelDescriptor;
+    fn descriptor(&self) -> &LanguageModelDescriptor;
 
     /// Returns explicit model capabilities.
-    fn capabilities(&self) -> ModelCapabilities {
-        self.descriptor().capabilities
+    fn capabilities(&self) -> &ModelCapabilities {
+        &self.descriptor().capabilities
     }
 
     /// Validates a request before the adapter performs network I/O.
     fn validate_request(&self, request: &Request) -> Result<(), ModelError> {
-        request.validate_for(&self.capabilities())
+        request.validate_for(self.capabilities())
     }
 
     /// Returns whether a request is supported by this configured profile.
@@ -3650,7 +3649,7 @@ pub trait LanguageModel: Send + Sync {
 
     /// Validates a provider-native compaction request before network I/O.
     fn validate_compaction(&self, request: &CompactionRequest) -> Result<(), ModelError> {
-        request.validate_for(&self.capabilities())
+        request.validate_for(self.capabilities())
     }
 
     /// Returns whether provider-native compaction supports this request.
@@ -4049,25 +4048,27 @@ mod tests {
 
     struct Scripted {
         items: Vec<StreamItem>,
+        descriptor: LanguageModelDescriptor,
     }
 
     impl Scripted {
         fn new(parts: Vec<StreamPart>) -> Self {
             Self {
                 items: parts.into_iter().map(Ok).collect(),
+                descriptor: LanguageModelDescriptor::new(
+                    ModelIdentity::new(ProviderId::new("test"), ModelId::new("scripted"))
+                        .expect("identity"),
+                    AdapterId::new("test.scripted"),
+                    text_capabilities(),
+                )
+                .expect("descriptor"),
             }
         }
     }
 
     impl LanguageModel for Scripted {
-        fn descriptor(&self) -> LanguageModelDescriptor {
-            LanguageModelDescriptor::new(
-                ModelIdentity::new(ProviderId::new("test"), ModelId::new("scripted"))
-                    .expect("identity"),
-                AdapterId::new("test.scripted"),
-                text_capabilities(),
-            )
-            .expect("descriptor")
+        fn descriptor(&self) -> &LanguageModelDescriptor {
+            &self.descriptor
         }
 
         fn validate_request(&self, _: &Request) -> Result<(), ModelError> {

@@ -81,8 +81,8 @@ struct Settings {
 }
 
 impl LanguageModel for AzureOpenAiChatModel {
-    fn descriptor(&self) -> LanguageModelDescriptor {
-        self.descriptor.clone()
+    fn descriptor(&self) -> &LanguageModelDescriptor {
+        &self.descriptor
     }
 
     fn validate_request(&self, request_value: &Request) -> Result<(), ModelError> {
@@ -106,7 +106,7 @@ impl LanguageModel for AzureOpenAiChatModel {
         Box::pin(async move {
             self.validate_request(&request_value)?;
             let settings = configured_settings(&self.config, &abort).await?;
-            start_stream(self.descriptor(), request_value, abort, settings).await
+            start_stream(self.descriptor().clone(), request_value, abort, settings).await
         })
     }
 }

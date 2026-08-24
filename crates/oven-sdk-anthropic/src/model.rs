@@ -588,8 +588,8 @@ fn validate_aws_caller_headers(headers: &HeaderMap) -> Result<(), ModelError> {
 macro_rules! impl_language_model {
     ($name:ident) => {
         impl LanguageModel for $name {
-            fn descriptor(&self) -> LanguageModelDescriptor {
-                self.0.descriptor.clone()
+            fn descriptor(&self) -> &LanguageModelDescriptor {
+                &self.0.descriptor
             }
 
             fn validate_request(&self, request: &Request) -> Result<(), ModelError> {

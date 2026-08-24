@@ -404,7 +404,7 @@ impl GoogleVertexModel {
                 streaming && self.config.settings.stream_function_call_arguments;
             let encoded = crate::request::encode_request(
                 &request,
-                &descriptor,
+                descriptor,
                 descriptor.capabilities.replay.policy,
                 stream_function_call_arguments,
                 &self.config.settings.native_context_scope,
@@ -670,8 +670,8 @@ fn sha256(input: &[u8]) -> [u8; 32] {
 }
 
 impl LanguageModel for GoogleVertexModel {
-    fn descriptor(&self) -> LanguageModelDescriptor {
-        self.config.descriptor.clone()
+    fn descriptor(&self) -> &LanguageModelDescriptor {
+        &self.config.descriptor
     }
 
     fn validate_request(&self, request: &Request) -> Result<(), ModelError> {
@@ -697,20 +697,12 @@ impl LanguageModel for GoogleVertexModel {
 
 struct DirectResponseCollector {
     response: Mutex<Option<StreamResponse>>,
+    descriptor: LanguageModelDescriptor,
 }
 
 impl LanguageModel for DirectResponseCollector {
-    fn descriptor(&self) -> LanguageModelDescriptor {
-        LanguageModelDescriptor::new(
-            ModelIdentity::new(
-                oven_sdk::ProviderId::new("google.vertex.direct-collector"),
-                oven_sdk::ModelId::new("direct-response-collector"),
-            )
-            .expect("constant collector identity is valid"),
-            AdapterId::new(GOOGLE_VERTEX_GENERATE_CONTENT_ADAPTER_ID),
-            ModelCapabilities::conservative(),
-        )
-        .expect("constant collector descriptor is valid")
+    fn descriptor(&self) -> &LanguageModelDescriptor {
+        &self.descriptor
     }
 
     fn validate_request(&self, _request: &Request) -> Result<(), ModelError> {
@@ -742,6 +734,16 @@ impl LanguageModel for DirectResponseCollector {
 async fn collect_direct(response: StreamResponse) -> Result<CompleteResult, ModelError> {
     let collector = DirectResponseCollector {
         response: Mutex::new(Some(response)),
+        descriptor: LanguageModelDescriptor::new(
+            ModelIdentity::new(
+                oven_sdk::ProviderId::new("google.vertex.direct-collector"),
+                oven_sdk::ModelId::new("direct-response-collector"),
+            )
+            .expect("constant collector identity is valid"),
+            AdapterId::new(GOOGLE_VERTEX_GENERATE_CONTENT_ADAPTER_ID),
+            ModelCapabilities::conservative(),
+        )
+        .expect("constant collector descriptor is valid"),
     };
     collector
         .complete(Request::new(Vec::new()), AbortSignal::default())

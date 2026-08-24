@@ -282,7 +282,7 @@ async fn native_compaction_passes_core_conformance_round_trip_and_cancellation()
     let result = assert_native_compaction(&model, &scope, compaction.clone())
         .await
         .unwrap();
-    assert_native_context_window(&model.descriptor(), &scope, &result.native_context).unwrap();
+    assert_native_context_window(model.descriptor(), &scope, &result.native_context).unwrap();
     assert_compaction_cancellation(&model, compaction.clone())
         .await
         .unwrap();

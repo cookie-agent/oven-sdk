@@ -45,8 +45,8 @@ impl AzureOpenAiResponsesModel {
 }
 
 impl LanguageModel for AzureOpenAiResponsesModel {
-    fn descriptor(&self) -> LanguageModelDescriptor {
-        self.descriptor.clone()
+    fn descriptor(&self) -> &LanguageModelDescriptor {
+        &self.descriptor
     }
 
     fn validate_request(&self, request_value: &Request) -> Result<(), ModelError> {
@@ -90,7 +90,7 @@ impl LanguageModel for AzureOpenAiResponsesModel {
                 configured_headers(&self.config, &abort).await?;
             let encoded = request::encode_request(
                 &request_value,
-                &descriptor,
+                descriptor,
                 replay_policy,
                 &replay_binding,
                 &replay_scope,

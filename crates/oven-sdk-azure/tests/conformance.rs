@@ -54,7 +54,7 @@ async fn chat_and_responses_pass_applicable_core_04_conformance() {
             .and_then(serde_json::Value::as_str),
         Some("oven.azure.openai.chat.assistant.v4")
     );
-    assert_replay_artifact(&chat.descriptor(), &chat_scope, &completed.turn).unwrap();
+    assert_replay_artifact(chat.descriptor(), &chat_scope, &completed.turn).unwrap();
     assert_replay_round_trip(
         &chat,
         &chat_scope,
@@ -97,7 +97,7 @@ async fn chat_and_responses_pass_applicable_core_04_conformance() {
             .and_then(serde_json::Value::as_str),
         Some("oven.azure.openai.responses.output.v4")
     );
-    assert_replay_artifact(&responses.descriptor(), &responses_scope, &completed.turn).unwrap();
+    assert_replay_artifact(responses.descriptor(), &responses_scope, &completed.turn).unwrap();
     assert_replay_round_trip(
         &responses,
         &responses_scope,

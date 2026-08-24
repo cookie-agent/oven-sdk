@@ -345,7 +345,7 @@ async fn full_anthropic_conformance_suite() {
         .scope()
         .clone();
     assert_replay_artifact(
-        &model.descriptor(),
+        model.descriptor(),
         &native_context_scope,
         &completed_result.turn,
     )

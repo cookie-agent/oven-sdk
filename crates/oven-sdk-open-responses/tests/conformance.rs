@@ -71,7 +71,7 @@ async fn generic_and_hugging_face_profiles_pass_core_04_conformance() {
         payload["binding"]["version"],
         "open.responses.native_context_scope.v2"
     );
-    assert_replay_artifact(&first.descriptor(), &scope, &completed.turn).unwrap();
+    assert_replay_artifact(first.descriptor(), &scope, &completed.turn).unwrap();
     assert_replay_round_trip(
         &first,
         &scope,
@@ -84,8 +84,12 @@ async fn generic_and_hugging_face_profiles_pass_core_04_conformance() {
     old_payload["format"] = "open.responses.items.v1".into();
     let mut old_turn = completed.turn;
     old_turn.finish.native_replay = Some(
-        NativeReplayArtifact::new(first.descriptor().adapter_id, scope.clone(), old_payload)
-            .unwrap(),
+        NativeReplayArtifact::new(
+            first.descriptor().adapter_id.clone(),
+            scope.clone(),
+            old_payload,
+        )
+        .unwrap(),
     );
     assert_invalid_replay_reconstructs(
         &first,

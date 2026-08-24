@@ -352,8 +352,8 @@ impl GoogleModel {
 }
 
 impl LanguageModel for GoogleModel {
-    fn descriptor(&self) -> LanguageModelDescriptor {
-        self.config.descriptor.clone()
+    fn descriptor(&self) -> &LanguageModelDescriptor {
+        &self.config.descriptor
     }
 
     fn validate_request(&self, request: &Request) -> Result<(), ModelError> {

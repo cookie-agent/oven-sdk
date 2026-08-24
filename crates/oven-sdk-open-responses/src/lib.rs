@@ -295,8 +295,8 @@ impl Config {
 }
 
 impl LanguageModel for OpenResponsesModel {
-    fn descriptor(&self) -> LanguageModelDescriptor {
-        self.descriptor.clone()
+    fn descriptor(&self) -> &LanguageModelDescriptor {
+        &self.descriptor
     }
     fn validate_request(&self, request: &Request) -> Result<(), ModelError> {
         request.validate_for(&self.config.capabilities)?;

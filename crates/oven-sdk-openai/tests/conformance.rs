@@ -43,7 +43,7 @@ async fn official_chat_passes_lifecycle_complete_capability_and_replay_suites() 
         .unwrap()
         .scope()
         .clone();
-    assert_replay_artifact(&model.descriptor(), &scope, &completed.turn).unwrap();
+    assert_replay_artifact(model.descriptor(), &scope, &completed.turn).unwrap();
     assert_replay_round_trip(
         &model,
         &scope,
@@ -75,7 +75,7 @@ async fn official_responses_passes_lifecycle_complete_capability_and_replay_suit
         .unwrap()
         .scope()
         .clone();
-    assert_replay_artifact(&model.descriptor(), &scope, &completed.turn).unwrap();
+    assert_replay_artifact(model.descriptor(), &scope, &completed.turn).unwrap();
     assert_replay_round_trip(
         &model,
         &scope,

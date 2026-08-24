@@ -75,7 +75,7 @@ async fn native_replay_round_trip_is_reported() {
         .await
         .unwrap()
         .turn;
-    assert_replay_artifact(&model.descriptor(), model.native_context_scope(), &turn).unwrap();
+    assert_replay_artifact(model.descriptor(), model.native_context_scope(), &turn).unwrap();
     let request = Request::new(vec![oven_sdk::HistoryTurn::assistant(turn)]);
     assert_replay_round_trip(&model, model.native_context_scope(), request)
         .await

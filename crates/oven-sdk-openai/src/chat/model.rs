@@ -231,8 +231,8 @@ enum Authentication {
 }
 
 impl LanguageModel for OpenAiChatModel {
-    fn descriptor(&self) -> LanguageModelDescriptor {
-        self.runtime.descriptor.clone()
+    fn descriptor(&self) -> &LanguageModelDescriptor {
+        &self.runtime.descriptor
     }
 
     fn validate_request(&self, request_value: &Request) -> Result<(), ModelError> {
@@ -260,8 +260,8 @@ impl LanguageModel for OpenAiChatModel {
 }
 
 impl LanguageModel for OpenAiCompatibleChatModel {
-    fn descriptor(&self) -> LanguageModelDescriptor {
-        self.runtime.descriptor.clone()
+    fn descriptor(&self) -> &LanguageModelDescriptor {
+        &self.runtime.descriptor
     }
 
     fn validate_request(&self, request_value: &Request) -> Result<(), ModelError> {

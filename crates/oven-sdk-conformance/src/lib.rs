@@ -470,8 +470,8 @@ fn replay_outcome_for(
 }
 
 impl LanguageModel for MockLanguageModel {
-    fn descriptor(&self) -> LanguageModelDescriptor {
-        self.descriptor.clone()
+    fn descriptor(&self) -> &LanguageModelDescriptor {
+        &self.descriptor
     }
 
     fn validate_request(&self, request: &Request) -> Result<(), ModelError> {
@@ -727,7 +727,7 @@ pub fn assert_declaration_honesty(model: &dyn LanguageModel) -> Result<(), Confo
     descriptor.identity.validate().map_err(model_error)?;
     descriptor.adapter_id.validate().map_err(model_error)?;
     descriptor.capabilities.validate().map_err(model_error)?;
-    if model.capabilities() != descriptor.capabilities {
+    if model.capabilities() != &descriptor.capabilities {
         return Err(ConformanceError::new(
             "LanguageModel::capabilities differs from descriptor capabilities",
         ));
@@ -837,7 +837,7 @@ pub async fn assert_native_compaction(
         .compact(request, AbortSignal::default())
         .await
         .map_err(model_error)?;
-    assert_native_context_window(&model.descriptor(), expected_scope, &result.native_context)?;
+    assert_native_context_window(model.descriptor(), expected_scope, &result.native_context)?;
     Ok(result)
 }
 
@@ -1122,7 +1122,7 @@ pub fn assert_validate_for_consistency(
     model: &dyn LanguageModel,
     request: &Request,
 ) -> Result<(), ConformanceError> {
-    let core = request.validate_for(&model.capabilities());
+    let core = request.validate_for(model.capabilities());
     let adapter = model.validate_request(request);
     match (core, adapter) {
         (Ok(()), Ok(())) if model.supports_request(request) => Ok(()),
@@ -1560,7 +1560,7 @@ pub fn assert_history_round_trip(
 ) -> Result<(), ConformanceError> {
     let request = Request::new(vec![HistoryTurn::assistant(turn)]);
     request
-        .validate_for(&model.capabilities())
+        .validate_for(model.capabilities())
         .map_err(model_error)?;
     Ok(())
 }
@@ -2184,7 +2184,7 @@ fn media_type_matches(declared: &str, media_type: &str) -> bool {
 /// Verifies every positive and negative media probe against model validation.
 pub fn assert_media_honesty(model: &dyn LanguageModel) -> Result<(), ConformanceError> {
     let capabilities = model.capabilities();
-    for probe in media_probe_requests(&capabilities)? {
+    for probe in media_probe_requests(capabilities)? {
         let validation = model.validate_request(&probe.request);
         if probe.expected_supported {
             validation.map_err(|error| {
@@ -2262,7 +2262,7 @@ mod tests {
     }
 
     impl LanguageModel for DivergentCompleteModel {
-        fn descriptor(&self) -> LanguageModelDescriptor {
+        fn descriptor(&self) -> &LanguageModelDescriptor {
             self.inner.descriptor()
         }
         fn validate_request(&self, request: &Request) -> Result<(), ModelError> {
@@ -2946,7 +2946,7 @@ mod tests {
         let turn = block_on(assert_complete_drain(&model, Request::new(Vec::new())))
             .expect("turn")
             .turn;
-        assert_replay_artifact(&model.descriptor(), &scope, &turn).expect("artifact");
+        assert_replay_artifact(model.descriptor(), &scope, &turn).expect("artifact");
         let garbage =
             NativeReplayArtifact::new(adapter, scope.clone(), serde_json::json!("garbage"))
                 .expect("artifact");

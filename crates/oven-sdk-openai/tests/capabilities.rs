@@ -9,7 +9,7 @@ async fn descriptors_use_only_caller_declared_capabilities_and_limits() {
     let server = MockServer::start().await;
     let model = common::official_chat(&server, "unpublished/future-model");
     let capabilities = model.capabilities();
-    assert_eq!(capabilities, common::chat_capabilities());
+    assert_eq!(capabilities, &common::chat_capabilities());
     assert_eq!(capabilities.limits.context, Some(400_000));
     assert_eq!(capabilities.limits.output, Some(128_000));
     assert!(capabilities.features.contains(Capability::TOOL_CALLING));
