@@ -1,16 +1,18 @@
 use oven_sdk::{
     AbortSignal, AdapterId, AssistantMessage, AssistantPart, CompactionCapability, CompletedTurn,
-    CustomPart, FilePart, FileSource, Finish, FinishReason, HistoryTurn, InferenceOptions,
-    InputPart, JsonSchema, LanguageModel, NativeReplayArtifact, ReplayDisposition, Request,
-    ResponseFormat, SystemMessage, SystemPart, TextPart, ToolCallPart, ToolChoice, ToolContent,
-    ToolDefinition, ToolMessage, ToolResultPart, UserMessage,
+    CustomPart, FilePart, FileSource, Finish, FinishReason, HeaderOverrides, HeaderProvider,
+    HistoryTurn, InferenceOptions, InputPart, JsonSchema, LanguageModel, ModelError,
+    NativeReplayArtifact, ReplayDisposition, Request, ResponseFormat, SystemMessage, SystemPart,
+    TextPart, ToolCallPart, ToolChoice, ToolContent, ToolDefinition, ToolMessage, ToolResultPart,
+    UserMessage,
 };
 use oven_sdk_google::{
     GoogleModel, GoogleProviderTool, GoogleRequestExt, GoogleRequestOptions, GoogleThinkingConfig,
     GoogleToolExt, GoogleToolOptions, GoogleToolSettings,
 };
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::json;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{body_partial_json, header, method, path, query_param},
@@ -31,6 +33,48 @@ fn terminal_sse(text: &str) -> String {
             "usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2}
         })
     )
+}
+
+struct DynamicHeaders(HeaderMap);
+
+impl HeaderProvider for DynamicHeaders {
+    fn headers(&self) -> Result<HeaderOverrides, ModelError> {
+        Ok(HeaderOverrides::new(self.0.clone()))
+    }
+}
+
+#[tokio::test]
+async fn dynamic_headers_cannot_override_content_type() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(terminal_sse("ok")),
+        )
+        .mount(&server)
+        .await;
+    let mut config = config_with(
+        format!("{}/v1beta", server.uri()),
+        "gemini-2.5-flash",
+        "models/gemini-2.5-flash",
+        "secret",
+        full_capabilities(),
+        level_thinking(),
+        default_tools(),
+    );
+    let mut dynamic = HeaderMap::new();
+    dynamic.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    config.provider.headers.dynamic_headers = Some(Arc::new(DynamicHeaders(dynamic)));
+    let model = GoogleModel::new(config).unwrap();
+
+    model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers[CONTENT_TYPE], "application/json");
 }
 
 #[tokio::test]

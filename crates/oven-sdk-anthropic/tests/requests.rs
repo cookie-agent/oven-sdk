@@ -10,10 +10,45 @@ use oven_sdk_anthropic::{
     AnthropicAwsCredentials, AnthropicCacheControl, AnthropicCacheTtl, AnthropicRequestExt,
     AnthropicRequestOptions, AnthropicThinking, AnthropicToolOptions,
 };
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use std::sync::Arc;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 
 fn response() -> &'static str {
     "event: message_start\ndata: {\"message\":{}}\n\nevent: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\nevent: message_stop\ndata: {}\n\n"
+}
+
+#[tokio::test]
+async fn dynamic_headers_cannot_override_transport_constants() {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(response()))
+        .mount(&server)
+        .await;
+    let dynamic = Arc::new(|| {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+        headers.insert(
+            "anthropic-version",
+            HeaderValue::from_static("dynamic-version"),
+        );
+        headers
+    });
+    let model = Anthropic::builder()
+        .base_url(server.uri())
+        .header_provider(dynamic)
+        .build()
+        .unwrap()
+        .model("future-id");
+
+    model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers[CONTENT_TYPE], "application/json");
+    assert_eq!(requests[0].headers["anthropic-version"], "2023-06-01");
 }
 
 #[tokio::test]

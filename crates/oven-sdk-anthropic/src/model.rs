@@ -115,6 +115,7 @@ impl InnerModel {
             if self.config.protocol == Protocol::AnthropicAws {
                 validate_aws_caller_headers(&headers)?;
             }
+            apply_transport_headers(&mut headers, self.config.protocol);
             if !encoded.betas.is_empty() && self.config.protocol.is_first_party() {
                 headers.insert(
                     HeaderName::from_static("anthropic-beta"),
@@ -620,6 +621,11 @@ macro_rules! impl_language_model {
 
 fn base_headers(configured: &HeaderConfig, protocol: Protocol) -> HeaderMap {
     let mut headers = configured.static_headers.as_map().clone();
+    apply_transport_headers(&mut headers, protocol);
+    headers
+}
+
+fn apply_transport_headers(headers: &mut HeaderMap, protocol: Protocol) {
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     if protocol != Protocol::MiniMax {
         headers.insert(
@@ -627,7 +633,6 @@ fn base_headers(configured: &HeaderConfig, protocol: Protocol) -> HeaderMap {
             HeaderValue::from_static(VERSION),
         );
     }
-    headers
 }
 
 /// A caller-configured direct Anthropic Messages model.

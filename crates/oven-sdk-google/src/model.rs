@@ -228,6 +228,7 @@ impl GoogleModel {
                 validate_header_map(dynamic.as_map())?;
                 headers.extend(dynamic.as_map().clone());
             }
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
             headers.insert(
                 HeaderName::from_static("x-goog-api-key"),
                 HeaderValue::from_str(self.config.provider.auth.api_key.expose_secret()).map_err(

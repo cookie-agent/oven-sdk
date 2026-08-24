@@ -431,6 +431,7 @@ impl GoogleVertexModel {
                 validate_headers(dynamic.as_map())?;
                 headers.extend(dynamic.as_map().clone());
             }
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
             headers.insert(
                 AUTHORIZATION,
                 HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {

@@ -2,17 +2,19 @@ mod support;
 
 use oven_sdk::{
     AbortSignal, AdapterId, AssistantPart, Capability, CompactionCapability, FilePart, FileSource,
-    HeaderConfig, HeaderOverrides, HistoryTurn, InputPart, JsonSchema, LanguageModel, ModelConfig,
-    NativeContextScope, NativeReplayArtifact, ReplayDisposition, Request, ResourceId, SecretString,
-    ToolContent, ToolDefinition, ToolMessage, ToolResultPart, UserMessage,
+    HeaderConfig, HeaderOverrides, HeaderProvider, HistoryTurn, InputPart, JsonSchema,
+    LanguageModel, ModelConfig, ModelError, NativeContextScope, NativeReplayArtifact,
+    ReplayDisposition, Request, ResourceId, SecretString, ToolContent, ToolDefinition, ToolMessage,
+    ToolResultPart, UserMessage,
 };
 use oven_sdk_google_vertex::{
-    GoogleVertexProviderTool, GoogleVertexRequestExt, GoogleVertexRequestOptions,
-    GoogleVertexResource, GoogleVertexThinkingConfig, GoogleVertexToolExt, GoogleVertexToolOptions,
-    VertexAuth,
+    GoogleVertexModel, GoogleVertexProviderTool, GoogleVertexRequestExt,
+    GoogleVertexRequestOptions, GoogleVertexResource, GoogleVertexThinkingConfig,
+    GoogleVertexToolExt, GoogleVertexToolOptions, VertexAuth,
 };
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::json;
+use std::sync::Arc;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{body_partial_json, method, path, query_param},
@@ -23,6 +25,44 @@ fn publisher_resource() -> GoogleVertexResource {
         publisher: "google".into(),
         model: "resource-model-v1".into(),
     }
+}
+
+struct DynamicHeaders(HeaderMap);
+
+impl HeaderProvider for DynamicHeaders {
+    fn headers(&self) -> Result<HeaderOverrides, ModelError> {
+        Ok(HeaderOverrides::new(self.0.clone()))
+    }
+}
+
+#[tokio::test]
+async fn dynamic_headers_cannot_override_content_type() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!(
+                    "data: {}\n\n",
+                    json!({"candidates":[{"finishReason":"STOP"}]})
+                )),
+        )
+        .mount(&server)
+        .await;
+    let mut config =
+        support::full_config(&server.uri(), "gemini-future", publisher_resource(), true);
+    let mut dynamic = HeaderMap::new();
+    dynamic.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    config.provider.headers.dynamic_headers = Some(Arc::new(DynamicHeaders(dynamic)));
+    let model = GoogleVertexModel::new(config).unwrap();
+
+    model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers[CONTENT_TYPE], "application/json");
 }
 
 #[tokio::test]
