@@ -63,11 +63,10 @@ impl SseParser {
     }
 
     /// Feeds one arbitrary byte chunk into a caller-owned event buffer.
-    pub fn feed_into(
-        &mut self,
-        chunk: &[u8],
-        events: &mut Vec<SseEvent>,
-    ) -> Result<(), ModelError> {
+    pub fn feed_into<C>(&mut self, chunk: &[u8], events: &mut C) -> Result<(), ModelError>
+    where
+        C: Extend<SseEvent>,
+    {
         let mut bytes = std::mem::take(&mut self.bytes);
         bytes.extend_from_slice(chunk);
         let mut start = 0;
@@ -105,7 +104,10 @@ impl SseParser {
         Ok(events)
     }
 
-    fn line(&mut self, raw: &[u8], events: &mut Vec<SseEvent>) -> Result<(), ModelError> {
+    fn line<C>(&mut self, raw: &[u8], events: &mut C) -> Result<(), ModelError>
+    where
+        C: Extend<SseEvent>,
+    {
         let raw = if self.saw_first_line {
             raw
         } else {
@@ -141,17 +143,20 @@ impl SseParser {
         Ok(())
     }
 
-    fn dispatch(&mut self, events: &mut Vec<SseEvent>) {
+    fn dispatch<C>(&mut self, events: &mut C)
+    where
+        C: Extend<SseEvent>,
+    {
         if self.data.is_empty() {
             if self.clear_name_on_empty_event {
                 self.name.clear();
             }
             return;
         }
-        events.push(SseEvent {
+        events.extend([SseEvent {
             name: std::mem::take(&mut self.name),
             data: std::mem::take(&mut self.data),
-        });
+        }]);
     }
 }
 

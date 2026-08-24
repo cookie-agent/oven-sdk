@@ -1127,10 +1127,10 @@ struct Live {
 async fn read_live(live: &mut Live) -> Result<(), ModelError> {
     if live.events.is_empty() {
         let next = tokio::select! {value=tokio::time::timeout(live.idle,live.bytes.next())=>value.map_err(|_|ModelError::timeout("Open Responses stream idle timeout").with_stage(ErrorStage::StreamRead).with_bytes_received(live.count))?,_=live.abort.aborted()=>return Err(ModelError::abort("Open Responses stream was aborted").with_stage(ErrorStage::StreamRead).with_bytes_received(live.count))};
-        let events = match next {
+        match next {
             Some(Ok(chunk)) => {
                 live.count = live.count.saturating_add(chunk.len() as u64);
-                live.parser.feed(&chunk)?
+                live.parser.feed_into(&chunk, &mut live.events)?;
             }
             Some(Err(_)) => {
                 return Err(ModelError::transport("Open Responses stream read failed")
@@ -1139,10 +1139,9 @@ async fn read_live(live: &mut Live) -> Result<(), ModelError> {
             }
             None => {
                 live.eof = true;
-                live.parser.finish()?
+                live.events.extend(live.parser.finish()?);
             }
-        };
-        live.events.extend(events);
+        }
     }
     while let Some(event) = live.events.pop_front() {
         if event.data.is_empty() {

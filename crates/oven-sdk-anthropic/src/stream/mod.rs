@@ -54,7 +54,7 @@ pub(crate) async fn read_live(
         value = tokio::time::timeout(live.idle, live.bytes.next()) => value.map_err(|_| ModelError::timeout("stream idle timeout").with_stage(ErrorStage::StreamRead).with_bytes_received(live.count))?,
         _ = live.abort.aborted() => return Err(ModelError::abort("stream was aborted").with_stage(ErrorStage::StreamRead).with_bytes_received(live.count)),
     };
-    let events = match next {
+    match next {
         Some(Ok(chunk)) => {
             let chunk_len = u64::try_from(chunk.len()).map_err(|_| {
                 ModelError::transport("Messages stream byte count overflowed")
@@ -66,7 +66,7 @@ pub(crate) async fn read_live(
                     .with_stage(ErrorStage::StreamRead)
                     .with_bytes_received(live.count)
             })?;
-            live.parser.feed(&chunk)?
+            live.parser.feed_into(&chunk, &mut live.pending_events)?;
         }
         Some(Err(_)) => {
             return Err(ModelError::transport("Messages stream read failed")
@@ -75,10 +75,9 @@ pub(crate) async fn read_live(
         }
         None => {
             live.eof = true;
-            live.parser.finish()?
+            live.pending_events.extend(live.parser.finish()?);
         }
-    };
-    live.pending_events.extend(events);
+    }
     process_live_events(live, stop_at_first_semantic)
 }
 fn process_live_events(

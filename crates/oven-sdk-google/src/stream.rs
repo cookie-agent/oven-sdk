@@ -694,7 +694,7 @@ pub(crate) async fn read_live(
                 .with_stage(ErrorStage::StreamRead)
                 .with_bytes_received(live.count)),
         };
-        let events = match next {
+        match next {
             Some(Ok(chunk)) => {
                 live.count = live
                     .count
@@ -702,7 +702,8 @@ pub(crate) async fn read_live(
                         ModelError::transport("Gemini stream byte count overflowed")
                     })?)
                     .ok_or_else(|| ModelError::transport("Gemini stream byte count overflowed"))?;
-                live.parser.feed_events(&chunk)?
+                live.parser
+                    .feed_events_into(&chunk, &mut live.pending_events)?;
             }
             Some(Err(_)) => {
                 return Err(ModelError::transport("Gemini stream read failed")
@@ -711,10 +712,9 @@ pub(crate) async fn read_live(
             }
             None => {
                 live.eof = true;
-                live.parser.finish_events()?
+                live.pending_events.extend(live.parser.finish_events()?);
             }
-        };
-        live.pending_events.extend(events);
+        }
     }
     let mut semantic = false;
     while let Some(event) = live.pending_events.pop_front() {

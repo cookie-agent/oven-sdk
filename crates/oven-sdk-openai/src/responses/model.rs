@@ -403,12 +403,12 @@ async fn read_live(live: &mut LiveState, stop_after_event: bool) -> Result<bool,
             .map_err(|_| ModelError::timeout("stream idle timeout").with_stage(ErrorStage::StreamRead).with_bytes_received(live.count))?,
         _ = live.abort.aborted() => return Err(ModelError::abort("stream was aborted").with_stage(ErrorStage::StreamRead).with_bytes_received(live.count)),
     };
-    let events = match next {
+    match next {
         Some(Ok(chunk)) => {
             live.count = live.count.saturating_add(chunk.len() as u64);
             live.parser
-                .feed(&chunk)
-                .map_err(|error| error.with_bytes_received(live.count))?
+                .feed_into(&chunk, &mut live.pending_events)
+                .map_err(|error| error.with_bytes_received(live.count))?;
         }
         Some(Err(_)) => {
             return Err(ModelError::transport("OpenAI Responses stream read failed")
@@ -417,12 +417,13 @@ async fn read_live(live: &mut LiveState, stop_after_event: bool) -> Result<bool,
         }
         None => {
             live.eof = true;
-            live.parser
-                .finish()
-                .map_err(|error| error.with_bytes_received(live.count))?
+            live.pending_events.extend(
+                live.parser
+                    .finish()
+                    .map_err(|error| error.with_bytes_received(live.count))?,
+            );
         }
-    };
-    live.pending_events.extend(events);
+    }
     let semantic = process_events(live, stop_after_event)?;
     if live.eof && !live.state.done() {
         return Err(ModelError::unexpected_eof(

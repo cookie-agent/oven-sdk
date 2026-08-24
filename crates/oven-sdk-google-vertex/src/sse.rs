@@ -1,6 +1,7 @@
 //! Incremental server-sent-event framing.
 
 use oven_sdk::{ModelError, provider_support::SseParser};
+use std::collections::VecDeque;
 
 pub(crate) use oven_sdk::provider_support::SseEvent as Event;
 
@@ -30,6 +31,14 @@ impl Parser {
 
     pub(crate) fn feed_events(&mut self, chunk: &[u8]) -> Result<Vec<Event>, ModelError> {
         self.inner.feed(chunk)
+    }
+
+    pub(crate) fn feed_events_into(
+        &mut self,
+        chunk: &[u8],
+        events: &mut VecDeque<Event>,
+    ) -> Result<(), ModelError> {
+        self.inner.feed_into(chunk, events)
     }
 
     pub(crate) fn finish_events(&mut self) -> Result<Vec<Event>, ModelError> {
