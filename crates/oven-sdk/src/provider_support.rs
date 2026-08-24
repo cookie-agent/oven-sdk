@@ -74,6 +74,7 @@ pub struct SseParser {
     bytes: Vec<u8>,
     name: String,
     data: String,
+    saw_data: bool,
     saw_first_line: bool,
     invalid_utf8_message: &'static str,
     clear_name_on_empty_event: bool,
@@ -93,6 +94,7 @@ impl SseParser {
             bytes: Vec::new(),
             name: String::new(),
             data: String::new(),
+            saw_data: false,
             saw_first_line: false,
             invalid_utf8_message,
             clear_name_on_empty_event: false,
@@ -184,9 +186,10 @@ impl SseParser {
                 self.name.push_str(value);
             }
             "data" => {
-                if !self.data.is_empty() {
+                if self.saw_data {
                     self.data.push('\n');
                 }
+                self.saw_data = true;
                 self.data.push_str(value);
             }
             _ => {}
@@ -198,12 +201,13 @@ impl SseParser {
     where
         C: Extend<SseEvent>,
     {
-        if self.data.is_empty() {
+        if !self.saw_data {
             if self.clear_name_on_empty_event {
                 self.name.clear();
             }
             return;
         }
+        self.saw_data = false;
         events.extend([SseEvent {
             name: std::mem::take(&mut self.name),
             data: std::mem::take(&mut self.data),
@@ -230,6 +234,45 @@ mod tests {
         let events = parser.feed(b"event: foo\n\ndata: x\n\n").unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].name, "");
+    }
+
+    #[test]
+    fn empty_data_field_is_preserved_when_joining() {
+        let mut parser = SseParser::default();
+        let events = parser.feed(b"data: first\ndata:\n\n").unwrap();
+        assert_eq!(
+            events,
+            [super::SseEvent {
+                name: String::new(),
+                data: "first\n".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn empty_then_nonempty_data_fields_keep_leading_newline() {
+        let mut parser = SseParser::default();
+        let events = parser.feed(b"data:\ndata: x\n\n").unwrap();
+        assert_eq!(
+            events,
+            [super::SseEvent {
+                name: String::new(),
+                data: "\nx".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn fully_empty_data_event_is_dispatched() {
+        let mut parser = SseParser::default();
+        let events = parser.feed(b"data:\n\n").unwrap();
+        assert_eq!(
+            events,
+            [super::SseEvent {
+                name: String::new(),
+                data: String::new(),
+            }]
+        );
     }
 }
 
