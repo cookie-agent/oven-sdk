@@ -1,6 +1,6 @@
 //! Typed Azure OpenAI request options.
 
-use oven_sdk::{CompactionRequest, Request};
+use oven_sdk::{CompactionRequest, FilePart, PartMetadata, Request, TextPart};
 use serde::{Deserialize, Serialize};
 
 /// Azure OpenAI Chat Completions options.
@@ -21,6 +21,8 @@ pub struct AzureOpenAiChatOptions {
     pub prompt_cache_key: Option<String>,
     /// Optional prompt-cache retention policy.
     pub prompt_cache_retention: Option<AzureOpenAiPromptCacheRetention>,
+    /// GPT-5.6+ prompt-cache mode and TTL controls.
+    pub prompt_cache_options: Option<AzureOpenAiPromptCacheOptions>,
 }
 
 /// Azure OpenAI Responses options.
@@ -48,6 +50,8 @@ pub struct AzureOpenAiResponsesOptions {
     pub prompt_cache_key: Option<String>,
     /// Optional prompt-cache retention policy.
     pub prompt_cache_retention: Option<AzureOpenAiPromptCacheRetention>,
+    /// GPT-5.6+ prompt-cache mode and TTL controls.
+    pub prompt_cache_options: Option<AzureOpenAiPromptCacheOptions>,
 }
 
 /// Azure OpenAI prompt-cache retention policy.
@@ -59,6 +63,82 @@ pub enum AzureOpenAiPromptCacheRetention {
     /// Enable extended retention for up to 24 hours.
     #[serde(rename = "24h")]
     TwentyFourHours,
+}
+
+/// GPT-5.6+ Azure OpenAI prompt-cache controls.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AzureOpenAiPromptCacheOptions {
+    /// Cache breakpoint mode.
+    pub mode: AzureOpenAiPromptCacheMode,
+    /// Cache TTL. The API currently accepts only 30 minutes.
+    pub ttl: AzureOpenAiPromptCacheTtl,
+}
+
+/// GPT-5.6+ Azure OpenAI prompt-cache breakpoint mode.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AzureOpenAiPromptCacheMode {
+    /// Add the service-managed latest-message breakpoint in addition to explicit markers.
+    Implicit,
+    /// Use only explicitly marked content blocks.
+    Explicit,
+}
+
+/// GPT-5.6+ Azure OpenAI prompt-cache TTL.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum AzureOpenAiPromptCacheTtl {
+    /// Retain written cache entries for at least 30 minutes.
+    #[serde(rename = "30m")]
+    ThirtyMinutes,
+}
+
+const PROMPT_CACHE_BREAKPOINT_METADATA: &str = "azure_openai.prompt_cache_breakpoint";
+
+/// Marks normalized content for an explicit GPT-5.6+ prompt-cache write.
+///
+/// The API accepts at most four cache writes per request and requires at least
+/// 1,024 tokens before each breakpoint. The adapter enforces the write count
+/// but does not estimate tokens. Cache reads may consider the latest 50
+/// breakpoints; that provider-side read window is not a request validation limit.
+pub trait AzureOpenAiPromptCacheBreakpointExt {
+    /// Adds an explicit prompt-cache breakpoint to this content part.
+    fn with_azure_openai_prompt_cache_breakpoint(self) -> Self;
+}
+
+impl AzureOpenAiPromptCacheBreakpointExt for TextPart {
+    fn with_azure_openai_prompt_cache_breakpoint(mut self) -> Self {
+        set_prompt_cache_breakpoint(&mut self.metadata);
+        self
+    }
+}
+
+impl AzureOpenAiPromptCacheBreakpointExt for FilePart {
+    fn with_azure_openai_prompt_cache_breakpoint(mut self) -> Self {
+        set_prompt_cache_breakpoint(&mut self.metadata);
+        self
+    }
+}
+
+fn set_prompt_cache_breakpoint(metadata: &mut PartMetadata) {
+    metadata
+        .get_or_insert_default()
+        .insert(PROMPT_CACHE_BREAKPOINT_METADATA.into(), true.into());
+}
+
+pub(crate) fn prompt_cache_breakpoint(
+    metadata: &PartMetadata,
+) -> Result<bool, oven_sdk::ModelError> {
+    match metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(PROMPT_CACHE_BREAKPOINT_METADATA))
+    {
+        None => Ok(false),
+        Some(serde_json::Value::Bool(true)) => Ok(true),
+        Some(_) => Err(oven_sdk::ModelError::invalid_request(
+            "invalid Azure OpenAI prompt-cache breakpoint metadata",
+        )),
+    }
 }
 
 /// Azure Responses V1 standalone compaction options.

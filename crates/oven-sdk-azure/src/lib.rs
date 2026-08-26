@@ -23,8 +23,9 @@ pub use configuration::{
 };
 pub use options::{
     AzureOpenAiChatOptions, AzureOpenAiChatRequestExt, AzureOpenAiCompactionOptions,
-    AzureOpenAiCompactionRequestExt, AzureOpenAiOptions, AzureOpenAiPromptCacheRetention,
-    AzureOpenAiResponsesOptions, AzureOpenAiResponsesRequestExt,
+    AzureOpenAiCompactionRequestExt, AzureOpenAiOptions, AzureOpenAiPromptCacheBreakpointExt,
+    AzureOpenAiPromptCacheMode, AzureOpenAiPromptCacheOptions, AzureOpenAiPromptCacheRetention,
+    AzureOpenAiPromptCacheTtl, AzureOpenAiResponsesOptions, AzureOpenAiResponsesRequestExt,
 };
 pub use responses::model::AzureOpenAiResponsesModel;
 pub use transport::AzureOpenAiTimeouts;

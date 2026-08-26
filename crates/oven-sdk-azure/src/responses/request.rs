@@ -2,15 +2,15 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use oven_sdk::{
-    AssistantPart, Capability, ErrorStage, FilePart, FileSource, HistoryTurn, InputPart, JsonValue,
-    LanguageModelDescriptor, ModelCapabilities, ModelError, NativeContextScope, ReplayDecision,
-    ReplayDisposition, ReplayOutcome, ReplayPolicy, Request, ResponseFormat, ToolChoice,
-    ToolContent, ToolResultPart,
+    AssistantPart, Capability, ContentValue, ErrorStage, FilePart, FileSource, HistoryTurn,
+    InputPart, JsonValue, LanguageModelDescriptor, ModelCapabilities, ModelError,
+    NativeContextScope, ReplayDecision, ReplayDisposition, ReplayOutcome, ReplayPolicy, Request,
+    ResponseFormat, ToolChoice, ToolContent, ToolResultPart,
 };
 
 use crate::{
     media,
-    options::{AzureOpenAiResponsesOptions, validate_prompt_cache_key},
+    options::{AzureOpenAiResponsesOptions, prompt_cache_breakpoint, validate_prompt_cache_key},
     responses::replay,
     schema,
 };
@@ -35,6 +35,7 @@ pub(crate) fn validate_request(
     native_scope: Option<&NativeContextScope>,
 ) -> Result<(), ModelError> {
     validate_prompt_cache_key(options.prompt_cache_key.as_deref())?;
+    validate_prompt_cache_breakpoints(request)?;
     request.validate_for(capabilities)?;
     if !request.tools.is_empty() && !capabilities.features.contains(Capability::TOOL_CALLING) {
         return Err(ModelError::unsupported(
@@ -98,17 +99,39 @@ pub(crate) fn encode_input(
     for (history_index, turn) in request.history.iter().enumerate() {
         match turn {
             HistoryTurn::System(message) => {
-                let content = message
-                    .content
-                    .iter()
-                    .filter_map(|part| match part {
-                        oven_sdk::SystemPart::Text(text) => Some(text.text.as_str()),
-                        oven_sdk::SystemPart::Custom(_) => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !content.is_empty() {
-                    input.push(serde_json::json!({"type":"message","role":"developer","content":[{"type":"input_text","text":content}]}));
+                let has_breakpoint = message.content.iter().any(|part| {
+                    matches!(part, oven_sdk::SystemPart::Text(text) if prompt_cache_breakpoint(&text.metadata).unwrap_or(false))
+                });
+                if has_breakpoint {
+                    let content = message
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            oven_sdk::SystemPart::Text(text) if !text.text.is_empty() => {
+                                Some(attach_prompt_cache_breakpoint(
+                                    serde_json::json!({"type":"input_text","text":text.text}),
+                                    &text.metadata,
+                                ))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if !content.is_empty() {
+                        input.push(serde_json::json!({"type":"message","role":"developer","content":content}));
+                    }
+                } else {
+                    let content = message
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            oven_sdk::SystemPart::Text(text) => Some(text.text.as_str()),
+                            oven_sdk::SystemPart::Custom(_) => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !content.is_empty() {
+                        input.push(serde_json::json!({"type":"message","role":"developer","content":[{"type":"input_text","text":content}]}));
+                    }
                 }
             }
             HistoryTurn::User(message) => {
@@ -116,8 +139,9 @@ pub(crate) fn encode_input(
                     .content
                     .iter()
                     .filter_map(|part| match part {
-                        InputPart::Text(text) => Some(Ok(
+                        InputPart::Text(text) => Some(attach_prompt_cache_breakpoint(
                             serde_json::json!({"type":"input_text","text":text.text}),
+                            &text.metadata,
                         )),
                         InputPart::File(file) => Some(input_file(file)),
                         InputPart::Custom(_) => None,
@@ -284,6 +308,10 @@ pub(crate) fn encode_request(
         body["prompt_cache_retention"] =
             serde_json::to_value(retention).expect("prompt-cache retention is serializable");
     }
+    if let Some(cache_options) = &options.prompt_cache_options {
+        body["prompt_cache_options"] =
+            serde_json::to_value(cache_options).expect("prompt-cache options are serializable");
+    }
     if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {
         body["tools"] = JsonValue::Array(
             request
@@ -336,13 +364,19 @@ fn input_file(file: &FilePart) -> Result<JsonValue, ModelError> {
         }
         FileSource::Url(url) => {
             if media::is_image(&file.media_type) {
-                return Ok(serde_json::json!({"type":"input_image","image_url":url}));
+                return attach_prompt_cache_breakpoint(
+                    serde_json::json!({"type":"input_image","image_url":url}),
+                    &file.metadata,
+                );
             }
-            return Ok(serde_json::json!({
-                "type":"input_file",
-                "filename":file.filename.clone().unwrap_or_else(|| "document.pdf".into()),
-                "file_url":url
-            }));
+            return attach_prompt_cache_breakpoint(
+                serde_json::json!({
+                    "type":"input_file",
+                    "filename":file.filename.clone().unwrap_or_else(|| "document.pdf".into()),
+                    "file_url":url
+                }),
+                &file.metadata,
+            );
         }
         FileSource::ProviderReference { .. } => {
             return Err(
@@ -351,13 +385,103 @@ fn input_file(file: &FilePart) -> Result<JsonValue, ModelError> {
             );
         }
     };
-    if media::is_image(&file.media_type) {
-        Ok(serde_json::json!({"type":"input_image","image_url":data}))
+    let value = if media::is_image(&file.media_type) {
+        serde_json::json!({"type":"input_image","image_url":data})
     } else {
-        Ok(
-            serde_json::json!({"type":"input_file","filename":file.filename.clone().unwrap_or_else(|| "document.pdf".into()),"file_data":data}),
-        )
+        serde_json::json!({"type":"input_file","filename":file.filename.clone().unwrap_or_else(|| "document.pdf".into()),"file_data":data})
+    };
+    attach_prompt_cache_breakpoint(value, &file.metadata)
+}
+
+fn validate_prompt_cache_breakpoints(request: &Request) -> Result<(), ModelError> {
+    let mut count = 0_usize;
+    for turn in &request.history {
+        match turn {
+            HistoryTurn::System(message) => {
+                for part in &message.content {
+                    if let oven_sdk::SystemPart::Text(text) = part
+                        && prompt_cache_breakpoint(&text.metadata)?
+                    {
+                        if text.text.is_empty() {
+                            return Err(ModelError::invalid_request(
+                                "Azure OpenAI prompt-cache breakpoint has no encodable Responses text block",
+                            ));
+                        }
+                        count += 1;
+                    }
+                }
+            }
+            HistoryTurn::User(message) => {
+                for part in &message.content {
+                    match part {
+                        InputPart::Text(text) if prompt_cache_breakpoint(&text.metadata)? => {
+                            if text.text.is_empty() {
+                                return Err(ModelError::invalid_request(
+                                    "Azure OpenAI prompt-cache breakpoint has no encodable Responses text block",
+                                ));
+                            }
+                            count += 1;
+                        }
+                        InputPart::File(file) if prompt_cache_breakpoint(&file.metadata)? => {
+                            count += 1
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            HistoryTurn::Assistant(turn) => {
+                for part in &turn.message.content {
+                    let marked = match part {
+                        AssistantPart::Text(text) => prompt_cache_breakpoint(&text.metadata)?,
+                        AssistantPart::File(file) => prompt_cache_breakpoint(&file.metadata)?,
+                        AssistantPart::ToolResult(result) => {
+                            tool_content_has_prompt_cache_breakpoint(&result.content)?
+                        }
+                        _ => false,
+                    };
+                    if marked {
+                        return Err(ModelError::invalid_request(
+                            "Azure OpenAI Responses prompt-cache breakpoints are valid only on system or user input content",
+                        ));
+                    }
+                }
+            }
+            HistoryTurn::Tool(message) => {
+                for result in &message.results {
+                    if tool_content_has_prompt_cache_breakpoint(&result.content)? {
+                        return Err(ModelError::invalid_request(
+                            "Azure OpenAI Responses prompt-cache breakpoints are not valid on function outputs",
+                        ));
+                    }
+                }
+            }
+        }
     }
+    if count > 4 {
+        return Err(ModelError::invalid_request(
+            "Azure OpenAI allows at most four prompt-cache breakpoints per request",
+        ));
+    }
+    Ok(())
+}
+
+fn tool_content_has_prompt_cache_breakpoint(content: &ToolContent) -> Result<bool, ModelError> {
+    match content {
+        ToolContent::Mixed(values) => values.iter().try_fold(false, |marked, value| {
+            Ok(marked || matches!(value, ContentValue::File(file) if prompt_cache_breakpoint(&file.metadata)?))
+        }),
+        _ => Ok(false),
+    }
+}
+
+fn attach_prompt_cache_breakpoint(
+    mut block: JsonValue,
+    metadata: &oven_sdk::PartMetadata,
+) -> Result<JsonValue, ModelError> {
+    if prompt_cache_breakpoint(metadata)? {
+        block["prompt_cache_breakpoint"] = serde_json::json!({"mode":"explicit"});
+    }
+    Ok(block)
 }
 
 fn function_output(result: &ToolResultPart) -> JsonValue {

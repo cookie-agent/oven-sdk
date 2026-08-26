@@ -8,7 +8,9 @@ use oven_sdk::{
 };
 use oven_sdk_azure::{
     AzureApiRoute, AzureOpenAiChatOptions, AzureOpenAiChatRequestExt,
-    AzureOpenAiPromptCacheRetention, AzureOpenAiResponsesOptions, AzureOpenAiResponsesRequestExt,
+    AzureOpenAiPromptCacheBreakpointExt, AzureOpenAiPromptCacheMode, AzureOpenAiPromptCacheOptions,
+    AzureOpenAiPromptCacheRetention, AzureOpenAiPromptCacheTtl, AzureOpenAiResponsesOptions,
+    AzureOpenAiResponsesRequestExt,
 };
 use wiremock::MockServer;
 
@@ -35,11 +37,14 @@ async fn chat_encodes_tools_structured_output_media_usage_and_open_labels() {
     tool.provider_options
         .insert("azure_openai".into(), serde_json::json!({"strict":true}));
     let request = Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
-        InputPart::Text(TextPart::new("look")),
-        InputPart::File(FilePart::image(
-            "image/png",
-            FileSource::Bytes(bytes::Bytes::from_static(b"png")),
-        )),
+        InputPart::Text(TextPart::new("look").with_azure_openai_prompt_cache_breakpoint()),
+        InputPart::File(
+            FilePart::image(
+                "image/png",
+                FileSource::Bytes(bytes::Bytes::from_static(b"png")),
+            )
+            .with_azure_openai_prompt_cache_breakpoint(),
+        ),
     ]))])
     .with_tools(vec![tool])
     .with_tool_choice(ToolChoice::Tool("lookup".into()))
@@ -50,6 +55,10 @@ async fn chat_encodes_tools_structured_output_media_usage_and_open_labels() {
         parallel_tool_calls: Some(false),
         prompt_cache_key: Some("shared-chat-prefix".into()),
         prompt_cache_retention: Some(AzureOpenAiPromptCacheRetention::TwentyFourHours),
+        prompt_cache_options: Some(AzureOpenAiPromptCacheOptions {
+            mode: AzureOpenAiPromptCacheMode::Explicit,
+            ttl: AzureOpenAiPromptCacheTtl::ThirtyMinutes,
+        }),
         ..Default::default()
     });
     let result = model
@@ -67,6 +76,16 @@ async fn chat_encodes_tools_structured_output_media_usage_and_open_labels() {
     assert_eq!(body["verbosity"], "future-verbosity");
     assert_eq!(body["prompt_cache_key"], "shared-chat-prefix");
     assert_eq!(body["prompt_cache_retention"], "24h");
+    assert_eq!(body["prompt_cache_options"]["mode"], "explicit");
+    assert_eq!(body["prompt_cache_options"]["ttl"], "30m");
+    assert_eq!(
+        body["messages"][0]["content"][0]["prompt_cache_breakpoint"]["mode"],
+        "explicit"
+    );
+    assert_eq!(
+        body["messages"][0]["content"][1]["prompt_cache_breakpoint"]["mode"],
+        "explicit"
+    );
     assert_eq!(body["messages"][0]["content"][1]["type"], "image_url");
 }
 
@@ -121,16 +140,43 @@ async fn responses_encodes_reasoning_structured_output_and_emits_filter_events()
     .unwrap();
     let mut inference = InferenceOptions::new();
     inference.reasoning_effort = Some("future-effort".into());
-    let request = Request::new(Vec::new())
-        .with_response_format(ResponseFormat::structured(schema))
-        .with_inference(inference)
-        .with_azure_openai_responses_options(AzureOpenAiResponsesOptions {
-            reasoning_summary: Some("future-summary".into()),
-            service_tier: Some("future-tier".into()),
-            prompt_cache_key: Some("shared-responses-prefix".into()),
-            prompt_cache_retention: Some(AzureOpenAiPromptCacheRetention::InMemory),
-            ..Default::default()
-        });
+    let request = Request::new(vec![
+        HistoryTurn::system(oven_sdk::SystemMessage::new(vec![
+            oven_sdk::SystemPart::Text(
+                TextPart::new("system").with_azure_openai_prompt_cache_breakpoint(),
+            ),
+        ])),
+        HistoryTurn::user(UserMessage::new(vec![
+            InputPart::Text(TextPart::new("inspect").with_azure_openai_prompt_cache_breakpoint()),
+            InputPart::File(
+                FilePart::image(
+                    "image/png",
+                    FileSource::Bytes(bytes::Bytes::from_static(b"png")),
+                )
+                .with_azure_openai_prompt_cache_breakpoint(),
+            ),
+            InputPart::File(
+                FilePart::document(
+                    "application/pdf",
+                    FileSource::Bytes(bytes::Bytes::from_static(b"pdf")),
+                )
+                .with_azure_openai_prompt_cache_breakpoint(),
+            ),
+        ])),
+    ])
+    .with_response_format(ResponseFormat::structured(schema))
+    .with_inference(inference)
+    .with_azure_openai_responses_options(AzureOpenAiResponsesOptions {
+        reasoning_summary: Some("future-summary".into()),
+        service_tier: Some("future-tier".into()),
+        prompt_cache_key: Some("shared-responses-prefix".into()),
+        prompt_cache_retention: Some(AzureOpenAiPromptCacheRetention::InMemory),
+        prompt_cache_options: Some(AzureOpenAiPromptCacheOptions {
+            mode: AzureOpenAiPromptCacheMode::Implicit,
+            ttl: AzureOpenAiPromptCacheTtl::ThirtyMinutes,
+        }),
+        ..Default::default()
+    });
     let mut response = model.stream(request, AbortSignal::default()).await.unwrap();
     let mut filter_events = 0;
     let mut finish = false;
@@ -154,6 +200,24 @@ async fn responses_encodes_reasoning_structured_output_and_emits_filter_events()
     assert_eq!(body["store"], false);
     assert_eq!(body["prompt_cache_key"], "shared-responses-prefix");
     assert_eq!(body["prompt_cache_retention"], "in_memory");
+    assert_eq!(body["prompt_cache_options"]["mode"], "implicit");
+    assert_eq!(body["prompt_cache_options"]["ttl"], "30m");
+    assert_eq!(
+        body["input"][0]["content"][0]["prompt_cache_breakpoint"]["mode"],
+        "explicit"
+    );
+    assert_eq!(
+        body["input"][1]["content"][0]["prompt_cache_breakpoint"]["mode"],
+        "explicit"
+    );
+    assert_eq!(
+        body["input"][1]["content"][1]["prompt_cache_breakpoint"]["mode"],
+        "explicit"
+    );
+    assert_eq!(
+        body["input"][1]["content"][2]["prompt_cache_breakpoint"]["mode"],
+        "explicit"
+    );
 }
 
 #[tokio::test]
@@ -175,6 +239,25 @@ async fn cache_keys_over_64_characters_are_rejected_before_network() {
 
     assert!(chat.validate_request(&chat_request).is_err());
     assert!(responses.validate_request(&responses_request).is_err());
+
+    let too_many = Request::new(vec![HistoryTurn::user(UserMessage::new(
+        (0..5)
+            .map(|index| {
+                InputPart::Text(
+                    TextPart::new(format!("block-{index}"))
+                        .with_azure_openai_prompt_cache_breakpoint(),
+                )
+            })
+            .collect(),
+    ))]);
+    assert!(chat.validate_request(&too_many).is_err());
+
+    let mut malformed = Request::new(Vec::new());
+    malformed.provider_options.insert(
+        "azure_openai".into(),
+        serde_json::json!({"chat":{"prompt_cache_options":{"mode":"future","ttl":"forever"}}}),
+    );
+    assert!(chat.validate_request(&malformed).is_err());
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
