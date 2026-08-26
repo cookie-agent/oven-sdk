@@ -8,7 +8,9 @@ use oven_sdk::{
     ToolDefinition, ToolMessage, ToolResultPart, UserMessage,
 };
 use oven_sdk_openai::{
-    OpenAiPromptCacheRetention, OpenAiResponsesOptions, OpenAiResponsesRequestExt,
+    OpenAiPromptCacheBreakpointExt, OpenAiPromptCacheMode, OpenAiPromptCacheOptions,
+    OpenAiPromptCacheRetention, OpenAiPromptCacheTtl, OpenAiResponsesOptions,
+    OpenAiResponsesRequestExt,
 };
 use wiremock::MockServer;
 
@@ -64,23 +66,34 @@ async fn responses_maps_system_media_tools_and_structured_output() {
     let model = common::official_responses(&server, "gpt-5-mini");
     let schema = JsonSchema::new(serde_json::json!({"type":"object"})).unwrap();
     let request = Request::new(vec![
-        HistoryTurn::system(SystemMessage::new(vec![SystemPart::Text(TextPart::new(
-            "system",
-        ))])),
+        HistoryTurn::system(SystemMessage::new(vec![SystemPart::Text(
+            TextPart::new("system").with_openai_prompt_cache_breakpoint(),
+        )])),
         HistoryTurn::user(UserMessage::new(vec![
-            InputPart::File(FilePart::image(
-                "image/png",
-                FileSource::Bytes(bytes::Bytes::from_static(b"png")),
-            )),
-            InputPart::File(FilePart::document(
-                "application/pdf",
-                FileSource::Text("pdf".into()),
-            )),
+            InputPart::Text(TextPart::new("inspect").with_openai_prompt_cache_breakpoint()),
+            InputPart::File(
+                FilePart::image(
+                    "image/png",
+                    FileSource::Bytes(bytes::Bytes::from_static(b"png")),
+                )
+                .with_openai_prompt_cache_breakpoint(),
+            ),
+            InputPart::File(
+                FilePart::document("application/pdf", FileSource::Text("pdf".into()))
+                    .with_openai_prompt_cache_breakpoint(),
+            ),
         ])),
     ])
     .with_tools(vec![ToolDefinition::new("lookup", "find", schema.clone())])
     .with_tool_choice(ToolChoice::Required)
-    .with_response_format(ResponseFormat::structured(schema));
+    .with_response_format(ResponseFormat::structured(schema))
+    .with_openai_responses_options(OpenAiResponsesOptions {
+        prompt_cache_options: Some(OpenAiPromptCacheOptions {
+            mode: OpenAiPromptCacheMode::Implicit,
+            ttl: OpenAiPromptCacheTtl::ThirtyMinutes,
+        }),
+        ..Default::default()
+    });
     model
         .complete(request, AbortSignal::default())
         .await
@@ -88,8 +101,27 @@ async fn responses_maps_system_media_tools_and_structured_output() {
     let body: serde_json::Value =
         serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
     assert_eq!(body["input"][0]["role"], "developer");
-    assert_eq!(body["input"][1]["content"][0]["type"], "input_image");
-    assert_eq!(body["input"][1]["content"][1]["type"], "input_file");
+    assert_eq!(
+        body["input"][0]["content"][0]["prompt_cache_breakpoint"]["mode"],
+        "explicit"
+    );
+    assert_eq!(body["input"][1]["content"][0]["type"], "input_text");
+    assert_eq!(
+        body["input"][1]["content"][0]["prompt_cache_breakpoint"]["mode"],
+        "explicit"
+    );
+    assert_eq!(body["input"][1]["content"][1]["type"], "input_image");
+    assert_eq!(
+        body["input"][1]["content"][1]["prompt_cache_breakpoint"]["mode"],
+        "explicit"
+    );
+    assert_eq!(body["input"][1]["content"][2]["type"], "input_file");
+    assert_eq!(
+        body["input"][1]["content"][2]["prompt_cache_breakpoint"]["mode"],
+        "explicit"
+    );
+    assert_eq!(body["prompt_cache_options"]["mode"], "implicit");
+    assert_eq!(body["prompt_cache_options"]["ttl"], "30m");
     assert_eq!(body["tools"][0]["type"], "function");
     assert_eq!(body["tool_choice"], "required");
     assert_eq!(body["text"]["format"]["type"], "json_schema");

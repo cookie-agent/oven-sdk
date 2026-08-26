@@ -1,6 +1,6 @@
 //! Typed provider options stored in normalized request namespaces.
 
-use oven_sdk::{CompactionRequest, Request};
+use oven_sdk::{CompactionRequest, FilePart, PartMetadata, Request, TextPart};
 use serde::{Deserialize, Serialize};
 
 /// Official Chat Completions request options.
@@ -20,6 +20,8 @@ pub struct OpenAiChatOptions {
     pub prompt_cache_key: Option<String>,
     /// Optional prompt-cache retention policy.
     pub prompt_cache_retention: Option<OpenAiPromptCacheRetention>,
+    /// GPT-5.6+ prompt-cache mode and TTL controls.
+    pub prompt_cache_options: Option<OpenAiPromptCacheOptions>,
 }
 
 /// Official Responses request options.
@@ -49,6 +51,8 @@ pub struct OpenAiResponsesOptions {
     pub prompt_cache_key: Option<String>,
     /// Optional prompt-cache retention policy.
     pub prompt_cache_retention: Option<OpenAiPromptCacheRetention>,
+    /// GPT-5.6+ prompt-cache mode and TTL controls.
+    pub prompt_cache_options: Option<OpenAiPromptCacheOptions>,
 }
 
 /// OpenAI prompt-cache retention policy.
@@ -82,13 +86,79 @@ pub struct OpenAiResponsesCompactionOptions {
 }
 
 /// Prompt-cache controls accepted by standalone Responses compaction.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenAiPromptCacheOptions {
     /// Cache breakpoint mode.
-    pub mode: String,
-    /// Cache TTL.
-    pub ttl: String,
+    pub mode: OpenAiPromptCacheMode,
+    /// Cache TTL. The API currently accepts only 30 minutes.
+    pub ttl: OpenAiPromptCacheTtl,
+}
+
+/// GPT-5.6+ prompt-cache breakpoint mode.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiPromptCacheMode {
+    /// Add the service-managed latest-message breakpoint in addition to explicit markers.
+    Implicit,
+    /// Use only explicitly marked content blocks.
+    Explicit,
+}
+
+/// GPT-5.6+ prompt-cache TTL.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum OpenAiPromptCacheTtl {
+    /// Retain written cache entries for at least 30 minutes.
+    #[serde(rename = "30m")]
+    ThirtyMinutes,
+}
+
+const PROMPT_CACHE_BREAKPOINT_METADATA: &str = "openai.prompt_cache_breakpoint";
+
+/// Marks normalized content for an explicit GPT-5.6+ prompt-cache write.
+///
+/// The API accepts at most four cache writes per request and requires at least
+/// 1,024 tokens before each breakpoint. The adapter enforces the write count
+/// but does not estimate tokens. Cache reads may consider the latest 50
+/// breakpoints; that provider-side read window is not a request validation limit.
+pub trait OpenAiPromptCacheBreakpointExt {
+    /// Adds an explicit prompt-cache breakpoint to this content part.
+    fn with_openai_prompt_cache_breakpoint(self) -> Self;
+}
+
+impl OpenAiPromptCacheBreakpointExt for TextPart {
+    fn with_openai_prompt_cache_breakpoint(mut self) -> Self {
+        set_prompt_cache_breakpoint(&mut self.metadata);
+        self
+    }
+}
+
+impl OpenAiPromptCacheBreakpointExt for FilePart {
+    fn with_openai_prompt_cache_breakpoint(mut self) -> Self {
+        set_prompt_cache_breakpoint(&mut self.metadata);
+        self
+    }
+}
+
+fn set_prompt_cache_breakpoint(metadata: &mut PartMetadata) {
+    metadata
+        .get_or_insert_default()
+        .insert(PROMPT_CACHE_BREAKPOINT_METADATA.into(), true.into());
+}
+
+pub(crate) fn prompt_cache_breakpoint(
+    metadata: &PartMetadata,
+) -> Result<bool, oven_sdk::ModelError> {
+    match metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(PROMPT_CACHE_BREAKPOINT_METADATA))
+    {
+        None => Ok(false),
+        Some(serde_json::Value::Bool(true)) => Ok(true),
+        Some(_) => Err(oven_sdk::ModelError::invalid_request(
+            "invalid OpenAI prompt-cache breakpoint metadata",
+        )),
+    }
 }
 
 /// Current request-level official OpenAI provider-options envelope.
@@ -226,6 +296,7 @@ pub(crate) fn compatible_options(
         "parallel_tool_calls",
         "prompt_cache_key",
         "prompt_cache_retention",
+        "prompt_cache_options",
         "tools",
         "tool_choice",
         "response_format",

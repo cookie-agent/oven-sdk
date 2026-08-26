@@ -7,8 +7,9 @@ use oven_sdk::{
     ResponseFormat, SystemMessage, SystemPart, TextPart, ToolChoice, ToolDefinition, UserMessage,
 };
 use oven_sdk_openai::{
-    OpenAiChatOptions, OpenAiChatRequestExt, OpenAiPromptCacheRetention, OpenAiResponsesOptions,
-    OpenAiResponsesRequestExt,
+    OpenAiChatOptions, OpenAiChatRequestExt, OpenAiPromptCacheBreakpointExt, OpenAiPromptCacheMode,
+    OpenAiPromptCacheOptions, OpenAiPromptCacheRetention, OpenAiPromptCacheTtl,
+    OpenAiResponsesOptions, OpenAiResponsesRequestExt,
 };
 use wiremock::MockServer;
 
@@ -90,16 +91,26 @@ async fn chat_encodes_image_and_pdf_inputs() {
     common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
     let model = common::official_chat(&server, "gpt-4o-mini");
     let request = Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
-        InputPart::Text(TextPart::new("look")),
-        InputPart::File(FilePart::image(
-            "image/png",
-            FileSource::Bytes(bytes::Bytes::from_static(b"png")),
-        )),
-        InputPart::File(FilePart::document(
-            "application/pdf",
-            FileSource::Text("pdf".into()),
-        )),
-    ]))]);
+        InputPart::Text(TextPart::new("look").with_openai_prompt_cache_breakpoint()),
+        InputPart::File(
+            FilePart::image(
+                "image/png",
+                FileSource::Bytes(bytes::Bytes::from_static(b"png")),
+            )
+            .with_openai_prompt_cache_breakpoint(),
+        ),
+        InputPart::File(
+            FilePart::document("application/pdf", FileSource::Text("pdf".into()))
+                .with_openai_prompt_cache_breakpoint(),
+        ),
+    ]))])
+    .with_openai_chat_options(OpenAiChatOptions {
+        prompt_cache_options: Some(OpenAiPromptCacheOptions {
+            mode: OpenAiPromptCacheMode::Explicit,
+            ttl: OpenAiPromptCacheTtl::ThirtyMinutes,
+        }),
+        ..Default::default()
+    });
     model
         .complete(request, AbortSignal::default())
         .await
@@ -107,7 +118,9 @@ async fn chat_encodes_image_and_pdf_inputs() {
     let body: serde_json::Value =
         serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
     let content = body["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content[0]["prompt_cache_breakpoint"]["mode"], "explicit");
     assert_eq!(content[1]["type"], "image_url");
+    assert_eq!(content[1]["prompt_cache_breakpoint"]["mode"], "explicit");
     assert!(
         content[1]["image_url"]["url"]
             .as_str()
@@ -115,6 +128,40 @@ async fn chat_encodes_image_and_pdf_inputs() {
             .starts_with("data:image/png;base64,")
     );
     assert_eq!(content[2]["type"], "file");
+    assert_eq!(content[2]["prompt_cache_breakpoint"]["mode"], "explicit");
+    assert_eq!(body["prompt_cache_options"]["mode"], "explicit");
+    assert_eq!(body["prompt_cache_options"]["ttl"], "30m");
+}
+
+#[tokio::test]
+async fn chat_rejects_too_many_or_malformed_cache_controls() {
+    let server = MockServer::start().await;
+    let model = common::official_chat(&server, "gpt-5.6");
+    let request = Request::new(vec![HistoryTurn::user(UserMessage::new(
+        (0..5)
+            .map(|index| {
+                InputPart::Text(
+                    TextPart::new(format!("block-{index}")).with_openai_prompt_cache_breakpoint(),
+                )
+            })
+            .collect(),
+    ))]);
+    assert!(model.validate_request(&request).is_err());
+
+    let assistant_marker = Request::new(vec![HistoryTurn::assistant(CompletedTurn::new(
+        AssistantMessage::new(vec![AssistantPart::Text(
+            TextPart::new("assistant").with_openai_prompt_cache_breakpoint(),
+        )]),
+        Finish::new(Default::default(), FinishReason::Stop),
+    ))]);
+    assert!(model.validate_request(&assistant_marker).is_err());
+
+    let mut malformed = Request::new(Vec::new());
+    malformed.provider_options.insert(
+        "openai".into(),
+        serde_json::json!({"chat":{"prompt_cache_options":{"mode":"future","ttl":"forever"}}}),
+    );
+    assert!(model.validate_request(&malformed).is_err());
 }
 
 #[tokio::test]

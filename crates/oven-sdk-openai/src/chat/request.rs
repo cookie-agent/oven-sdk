@@ -2,10 +2,10 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use oven_sdk::{
-    AssistantPart, ErrorStage, FilePart, FileSource, HistoryTurn, InputPart, JsonValue,
-    LanguageModelDescriptor, ModelCapabilities, ModelError, NativeContextScope, ReplayDecision,
-    ReplayDisposition, ReplayOutcome, ReplayPolicy, Request, ResponseFormat, ToolChoice,
-    ToolContent, ToolResultPart,
+    AssistantPart, ContentValue, ErrorStage, FilePart, FileSource, HistoryTurn, InputPart,
+    JsonValue, LanguageModelDescriptor, ModelCapabilities, ModelError, NativeContextScope,
+    ReplayDecision, ReplayDisposition, ReplayOutcome, ReplayPolicy, Request, ResponseFormat,
+    ToolChoice, ToolContent, ToolResultPart,
 };
 
 use crate::{
@@ -13,7 +13,7 @@ use crate::{
     configuration::{MaxTokensField, ReasoningField, StructuredOutputSupport, SystemMessageRole},
     options::{
         CompatibleChatOptions, OpenAiChatOptions, chat_options, compatible_options,
-        validate_prompt_cache_key,
+        prompt_cache_breakpoint, validate_prompt_cache_key,
     },
 };
 
@@ -48,9 +48,10 @@ pub(crate) fn validate_request(
     request: &Request,
     options: &ParsedOptions,
     capabilities: &ModelCapabilities,
-    _profile: &ChatWireProfile,
+    profile: &ChatWireProfile,
 ) -> Result<(), ModelError> {
     validate_prompt_cache_key(options.official.prompt_cache_key.as_deref())?;
+    validate_prompt_cache_breakpoints(request, profile)?;
     request.validate_for(capabilities)?;
     validate_media(request)?;
     Ok(())
@@ -125,17 +126,39 @@ pub(crate) fn encode_request(
                         continue;
                     }
                 };
-                let content = message
-                    .content
-                    .iter()
-                    .filter_map(|part| match part {
-                        oven_sdk::SystemPart::Text(text) => Some(text.text.as_str()),
-                        oven_sdk::SystemPart::Custom(_) => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !content.is_empty() {
-                    messages.push(serde_json::json!({"role":role,"content":content}));
+                let has_breakpoint = message.content.iter().any(|part| {
+                    matches!(part, oven_sdk::SystemPart::Text(text) if prompt_cache_breakpoint(&text.metadata).unwrap_or(false))
+                });
+                if has_breakpoint {
+                    let content = message
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            oven_sdk::SystemPart::Text(text) if !text.text.is_empty() => {
+                                Some(attach_prompt_cache_breakpoint(
+                                    serde_json::json!({"type":"text","text":text.text}),
+                                    &text.metadata,
+                                ))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if !content.is_empty() {
+                        messages.push(serde_json::json!({"role":role,"content":content}));
+                    }
+                } else {
+                    let content = message
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            oven_sdk::SystemPart::Text(text) => Some(text.text.as_str()),
+                            oven_sdk::SystemPart::Custom(_) => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !content.is_empty() {
+                        messages.push(serde_json::json!({"role":role,"content":content}));
+                    }
                 }
             }
             HistoryTurn::User(message) => {
@@ -262,6 +285,10 @@ pub(crate) fn encode_request(
         body["prompt_cache_retention"] =
             serde_json::to_value(retention).expect("prompt-cache retention is serializable");
     }
+    if let Some(cache_options) = &official_options.prompt_cache_options {
+        body["prompt_cache_options"] =
+            serde_json::to_value(cache_options).expect("prompt-cache options are serializable");
+    }
     if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {
         body["tools"] = JsonValue::Array(
             request
@@ -322,7 +349,11 @@ pub(crate) fn encode_request(
 }
 
 fn user_content(parts: &[InputPart], profile: &ChatWireProfile) -> Result<JsonValue, ModelError> {
-    if parts.iter().all(|part| matches!(part, InputPart::Text(_))) {
+    if parts.iter().all(|part| matches!(part, InputPart::Text(_)))
+        && !parts.iter().any(|part| {
+            matches!(part, InputPart::Text(text) if prompt_cache_breakpoint(&text.metadata).unwrap_or(false))
+        })
+    {
         return Ok(JsonValue::String(
             parts
                 .iter()
@@ -337,7 +368,10 @@ fn user_content(parts: &[InputPart], profile: &ChatWireProfile) -> Result<JsonVa
     parts
         .iter()
         .filter_map(|part| match part {
-            InputPart::Text(text) => Some(Ok(serde_json::json!({"type":"text","text":text.text}))),
+            InputPart::Text(text) => Some(attach_prompt_cache_breakpoint(
+                serde_json::json!({"type":"text","text":text.text}),
+                &text.metadata,
+            )),
             InputPart::File(file) => Some(file_content(file, profile)),
             InputPart::Custom(_) => None,
         })
@@ -359,16 +393,110 @@ fn file_content(file: &FilePart, _profile: &ChatWireProfile) -> Result<JsonValue
                 .with_stage(ErrorStage::RequestEncoding));
         }
     };
-    if file.media_type.starts_with("image/") {
-        Ok(serde_json::json!({"type":"image_url","image_url":{"url":data}}))
+    let value = if file.media_type.starts_with("image/") {
+        serde_json::json!({"type":"image_url","image_url":{"url":data}})
     } else if file.media_type == "application/pdf" {
-        Ok(
-            serde_json::json!({"type":"file","file":{"filename":file.filename.clone().unwrap_or_else(|| "document.pdf".into()),"file_data":data}}),
-        )
+        serde_json::json!({"type":"file","file":{"filename":file.filename.clone().unwrap_or_else(|| "document.pdf".into()),"file_data":data}})
     } else {
-        Err(ModelError::unsupported("unsupported Chat media type")
-            .with_stage(ErrorStage::RequestEncoding))
+        return Err(ModelError::unsupported("unsupported Chat media type")
+            .with_stage(ErrorStage::RequestEncoding));
+    };
+    attach_prompt_cache_breakpoint(value, &file.metadata)
+}
+
+fn validate_prompt_cache_breakpoints(
+    request: &Request,
+    profile: &ChatWireProfile,
+) -> Result<(), ModelError> {
+    let mut count = 0_usize;
+    for turn in &request.history {
+        match turn {
+            HistoryTurn::System(message) => {
+                for part in &message.content {
+                    if let oven_sdk::SystemPart::Text(text) = part
+                        && prompt_cache_breakpoint(&text.metadata)?
+                    {
+                        if text.text.is_empty() || profile.system_role == SystemMessageRole::Omit {
+                            return Err(ModelError::invalid_request(
+                                "OpenAI prompt-cache breakpoint has no encodable Chat text block",
+                            ));
+                        }
+                        count += 1;
+                    }
+                }
+            }
+            HistoryTurn::User(message) => {
+                for part in &message.content {
+                    match part {
+                        InputPart::Text(text) if prompt_cache_breakpoint(&text.metadata)? => {
+                            if text.text.is_empty() {
+                                return Err(ModelError::invalid_request(
+                                    "OpenAI prompt-cache breakpoint has no encodable Chat text block",
+                                ));
+                            }
+                            count += 1;
+                        }
+                        InputPart::File(file) if prompt_cache_breakpoint(&file.metadata)? => {
+                            count += 1
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            HistoryTurn::Assistant(turn) => {
+                for part in &turn.message.content {
+                    let marked = match part {
+                        AssistantPart::Text(text) => prompt_cache_breakpoint(&text.metadata)?,
+                        AssistantPart::File(file) => prompt_cache_breakpoint(&file.metadata)?,
+                        AssistantPart::ToolResult(result) => {
+                            tool_content_has_prompt_cache_breakpoint(&result.content)?
+                        }
+                        _ => false,
+                    };
+                    if marked {
+                        return Err(ModelError::invalid_request(
+                            "OpenAI Chat prompt-cache breakpoints are valid only on system or user content",
+                        ));
+                    }
+                }
+            }
+            HistoryTurn::Tool(message) => {
+                for result in &message.results {
+                    if tool_content_has_prompt_cache_breakpoint(&result.content)? {
+                        return Err(ModelError::invalid_request(
+                            "OpenAI Chat prompt-cache breakpoints are not valid on tool results",
+                        ));
+                    }
+                }
+            }
+        }
     }
+    if count > 4 {
+        return Err(ModelError::invalid_request(
+            "OpenAI allows at most four prompt-cache breakpoints per request",
+        ));
+    }
+    Ok(())
+}
+
+fn tool_content_has_prompt_cache_breakpoint(content: &ToolContent) -> Result<bool, ModelError> {
+    match content {
+        ToolContent::Mixed(values) => values.iter().try_fold(false, |marked, value| {
+            Ok(marked
+                || matches!(value, ContentValue::File(file) if prompt_cache_breakpoint(&file.metadata)?))
+        }),
+        _ => Ok(false),
+    }
+}
+
+fn attach_prompt_cache_breakpoint(
+    mut block: JsonValue,
+    metadata: &oven_sdk::PartMetadata,
+) -> Result<JsonValue, ModelError> {
+    if prompt_cache_breakpoint(metadata)? {
+        block["prompt_cache_breakpoint"] = serde_json::json!({"mode":"explicit"});
+    }
+    Ok(block)
 }
 
 pub(crate) fn assistant_message(

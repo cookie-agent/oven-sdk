@@ -9,8 +9,8 @@ use oven_sdk_conformance::{
     assert_native_context_window,
 };
 use oven_sdk_openai::{
-    OpenAiChatModel, OpenAiCompatibleChatModel, OpenAiPromptCacheOptions,
-    OpenAiResponsesCompaction, OpenAiResponsesCompactionOptions,
+    OpenAiChatModel, OpenAiCompatibleChatModel, OpenAiPromptCacheMode, OpenAiPromptCacheOptions,
+    OpenAiPromptCacheTtl, OpenAiResponsesCompaction, OpenAiResponsesCompactionOptions,
     OpenAiResponsesCompactionRequestExt, OpenAiResponsesModel,
 };
 use wiremock::MockServer;
@@ -119,8 +119,8 @@ async fn native_compaction_preserves_canonical_output_options_usage_and_metadata
             instructions: Some("preserve the working context\nnext\tcolumn\rline".into()),
             prompt_cache_key: Some("cache-route".into()),
             prompt_cache_options: Some(OpenAiPromptCacheOptions {
-                mode: "explicit".into(),
-                ttl: "30m".into(),
+                mode: OpenAiPromptCacheMode::Explicit,
+                ttl: OpenAiPromptCacheTtl::ThirtyMinutes,
             }),
             prompt_cache_retention: Some("future-retention".into()),
             service_tier: Some("future-burst".into()),
@@ -369,14 +369,11 @@ async fn tampered_native_context_fingerprint_is_rejected_before_io() {
 async fn invalid_compaction_options_are_rejected_before_io() {
     let server = MockServer::start().await;
     let model = common::official_responses_native(&server, "gpt-5-mini");
-    let request = CompactionRequest::new(Request::new(vec![user("compact")]))
-        .with_openai_responses_compaction_options(OpenAiResponsesCompactionOptions {
-            prompt_cache_options: Some(OpenAiPromptCacheOptions {
-                mode: "future-mode".into(),
-                ttl: "forever".into(),
-            }),
-            ..Default::default()
-        });
+    let mut request = CompactionRequest::new(Request::new(vec![user("compact")]));
+    request.request.provider_options.insert(
+        "openai".into(),
+        serde_json::json!({"compaction":{"prompt_cache_options":{"mode":"future-mode","ttl":"forever"}}}),
+    );
     let error = model
         .compact(request, AbortSignal::default())
         .await

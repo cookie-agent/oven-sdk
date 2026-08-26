@@ -56,13 +56,6 @@ pub(crate) fn validate_options(
         64,
     )?;
     validate_optional_text("service_tier", options.service_tier.as_deref(), 64)?;
-    if let Some(cache) = &options.prompt_cache_options
-        && (!matches!(cache.mode.as_str(), "implicit" | "explicit") || cache.ttl != "30m")
-    {
-        return Err(ModelError::invalid_request(
-            "OpenAI compaction prompt-cache options require implicit/explicit mode and 30m TTL",
-        ));
-    }
     Ok(())
 }
 
