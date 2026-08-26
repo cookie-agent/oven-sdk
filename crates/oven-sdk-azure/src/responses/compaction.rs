@@ -325,6 +325,9 @@ fn validate_user_content(part: &JsonValue) -> Option<()> {
     let object = part.as_object()?;
     match object.get("type")?.as_str()? {
         "input_text" => {
+            // Azure native windows intentionally cannot retain prompt-cache
+            // breakpoints. If the codec adds that field later, continuation
+            // validation must aggregate retained and new writes before dispatch.
             exact_keys(object, &["text", "type"])?;
             object.get("text")?.as_str()?;
         }

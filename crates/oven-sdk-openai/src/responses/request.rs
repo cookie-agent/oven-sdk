@@ -30,9 +30,17 @@ pub(crate) fn validate_request(
     scope: &NativeContextScope,
 ) -> Result<(), ModelError> {
     validate_prompt_cache_key(options.prompt_cache_key.as_deref())?;
-    validate_prompt_cache_breakpoints(request)?;
+    let new_breakpoints = validate_prompt_cache_breakpoints(request)?;
     request.validate_for(capabilities)?;
-    validate_native_context(request, descriptor, scope)?;
+    let retained_breakpoints = validate_native_context(request, descriptor, scope)?;
+    // Native windows are authoritative retained state. Fail closed instead of
+    // silently deleting their oldest markers when the aggregate wire request
+    // would exceed OpenAI's four-write limit.
+    if retained_breakpoints.saturating_add(new_breakpoints) > 4 {
+        return Err(ModelError::invalid_request(
+            "OpenAI allows at most four aggregate prompt-cache breakpoints per request",
+        ));
+    }
     if (request.inference.reasoning_effort.is_some()
         || options.reasoning_summary.is_some()
         || options.reasoning_mode.is_some())
@@ -374,9 +382,9 @@ fn validate_native_context(
     request: &Request,
     descriptor: &LanguageModelDescriptor,
     scope: &NativeContextScope,
-) -> Result<(), ModelError> {
+) -> Result<usize, ModelError> {
     let Some(window) = &request.native_context else {
-        return Ok(());
+        return Ok(0);
     };
     if window.adapter_id() != &descriptor.adapter_id {
         return Err(ModelError::native_context(
@@ -390,7 +398,22 @@ fn validate_native_context(
         )
         .with_stage(ErrorStage::NativeContextDecode));
     }
-    compaction::native_input(window).map(|_| ())
+    let input = compaction::native_input(window)?;
+    Ok(input.iter().map(count_wire_prompt_cache_breakpoints).sum())
+}
+
+fn count_wire_prompt_cache_breakpoints(value: &JsonValue) -> usize {
+    match value {
+        JsonValue::Array(values) => values.iter().map(count_wire_prompt_cache_breakpoints).sum(),
+        JsonValue::Object(object) => {
+            usize::from(object.contains_key("prompt_cache_breakpoint"))
+                + object
+                    .values()
+                    .map(count_wire_prompt_cache_breakpoints)
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
 }
 
 fn input_file(file: &FilePart) -> Result<JsonValue, ModelError> {
@@ -432,7 +455,7 @@ fn input_file(file: &FilePart) -> Result<JsonValue, ModelError> {
     attach_prompt_cache_breakpoint(value, &file.metadata)
 }
 
-fn validate_prompt_cache_breakpoints(request: &Request) -> Result<(), ModelError> {
+fn validate_prompt_cache_breakpoints(request: &Request) -> Result<usize, ModelError> {
     let mut count = 0_usize;
     for turn in &request.history {
         match turn {
@@ -496,12 +519,7 @@ fn validate_prompt_cache_breakpoints(request: &Request) -> Result<(), ModelError
             }
         }
     }
-    if count > 4 {
-        return Err(ModelError::invalid_request(
-            "OpenAI allows at most four prompt-cache breakpoints per request",
-        ));
-    }
-    Ok(())
+    Ok(count)
 }
 
 fn tool_content_has_prompt_cache_breakpoint(content: &ToolContent) -> Result<bool, ModelError> {

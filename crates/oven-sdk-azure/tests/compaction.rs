@@ -142,6 +142,28 @@ async fn responses_v1_compaction_returns_and_reuses_the_canonical_window() {
 }
 
 #[tokio::test]
+async fn compaction_codec_rejects_retained_prompt_cache_breakpoints() {
+    let server = MockServer::start().await;
+    let mut response = compact_document();
+    response["output"][0]["content"][0]["prompt_cache_breakpoint"] =
+        serde_json::json!({"mode":"explicit"});
+    mount_compaction(&server, response).await;
+    let model = common::provider(&server, AzureApiRoute::V1)
+        .responses("deployment", common::gpt5_compaction())
+        .unwrap();
+
+    let error = model
+        .compact(
+            CompactionRequest::new(user_request("compact this")),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ModelErrorKind::InvalidResponse);
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn future_service_tier_label_is_passed_through_unchanged() {
     let server = MockServer::start().await;
     mount_compaction(&server, compact_document()).await;

@@ -9,8 +9,9 @@ use oven_sdk_conformance::{
     assert_native_context_window,
 };
 use oven_sdk_openai::{
-    OpenAiChatModel, OpenAiCompatibleChatModel, OpenAiPromptCacheMode, OpenAiPromptCacheOptions,
-    OpenAiPromptCacheTtl, OpenAiResponsesCompaction, OpenAiResponsesCompactionOptions,
+    OpenAiChatModel, OpenAiCompatibleChatModel, OpenAiPromptCacheBreakpointExt,
+    OpenAiPromptCacheMode, OpenAiPromptCacheOptions, OpenAiPromptCacheTtl,
+    OpenAiResponsesCompaction, OpenAiResponsesCompactionOptions,
     OpenAiResponsesCompactionRequestExt, OpenAiResponsesModel,
 };
 use wiremock::MockServer;
@@ -31,8 +32,7 @@ fn large_compact_document() -> serde_json::Value {
                     .map(|content_index| {
                         serde_json::json!({
                             "type": "input_text",
-                            "text": format!("retained-{content_index}"),
-                            "prompt_cache_breakpoint": {"mode": "explicit"}
+                            "text": format!("retained-{content_index}")
                         })
                     })
                     .collect::<Vec<_>>()
@@ -212,6 +212,32 @@ async fn native_context_continuation_prepends_the_exact_compacted_window() {
             serde_json::json!({"mode":"explicit"})
         );
     }
+}
+
+#[tokio::test]
+async fn continuation_rejects_aggregate_breakpoint_overflow_before_dispatch() {
+    let server = MockServer::start().await;
+    common::mount_compaction(&server).await;
+    let model = common::official_responses_native(&server, "gpt-5-mini");
+    let compacted = model
+        .compact(
+            CompactionRequest::new(Request::new(vec![user("old context")])),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    let request = Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
+        InputPart::Text(TextPart::new("new stable one").with_openai_prompt_cache_breakpoint()),
+        InputPart::Text(TextPart::new("new stable two").with_openai_prompt_cache_breakpoint()),
+    ]))])
+    .with_native_context(compacted.native_context);
+
+    let error = model
+        .stream(request, AbortSignal::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ModelErrorKind::InvalidRequest);
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
