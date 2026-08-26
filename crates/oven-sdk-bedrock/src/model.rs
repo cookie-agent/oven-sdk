@@ -524,6 +524,7 @@ fn validate_adapter_declaration(capabilities: &ModelCapabilities) -> Result<(), 
         | Capability::TEMPERATURE
         | Capability::TOP_P
         | Capability::MAX_OUTPUT_TOKENS
+        | Capability::PROMPT_CACHING
         | Capability::USAGE
         | Capability::SOURCES;
     if capabilities.features.bits() & !supported_features.bits() != 0 {

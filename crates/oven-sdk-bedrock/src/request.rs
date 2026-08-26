@@ -12,7 +12,7 @@ use oven_sdk::{
 
 use crate::{
     BedrockReasoningWireFormat, BedrockStructuredOutput, REPLAY_FORMAT,
-    options::BedrockRequestOptions,
+    options::{BedrockCachePoint, BedrockCacheStrategy, BedrockCacheTtl, BedrockRequestOptions},
 };
 
 pub(crate) struct Encoded {
@@ -37,6 +37,7 @@ pub(crate) fn validate_request(
     structured_output: BedrockStructuredOutput,
 ) -> Result<(), ModelError> {
     request.validate_for(capabilities)?;
+    validate_cache_strategy(request, options.cache.as_ref(), capabilities)?;
     validate_bucket_owner(options)?;
     if request.inference.max_output_tokens == Some(0) {
         return Err(ModelError::invalid_request(
@@ -229,6 +230,7 @@ pub(crate) fn encode_request(
                         _ => {}
                     }
                 }
+                append_message_cache_point(&mut content, options.cache.as_ref(), history_index);
                 push_message(&mut messages, "user", content);
             }
             HistoryTurn::Assistant(turn) => {
@@ -292,7 +294,7 @@ pub(crate) fn encode_request(
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                let content = match native {
+                let mut content = match native {
                     Some(content) => content,
                     None => {
                         if replay_policy != ReplayPolicy::Never {
@@ -327,6 +329,7 @@ pub(crate) fn encode_request(
                             .collect()
                     }
                 };
+                append_message_cache_point(&mut content, options.cache.as_ref(), history_index);
                 push_message(&mut messages, "assistant", content);
                 if !inline_results.is_empty() {
                     let content = inline_results
@@ -337,11 +340,12 @@ pub(crate) fn encode_request(
                 }
             }
             HistoryTurn::Tool(message) => {
-                let content = message
+                let mut content = message
                     .results
                     .iter()
                     .map(|result| tool_result(result, options, &mut document_counter))
                     .collect::<Result<Vec<_>, _>>()?;
+                append_message_cache_point(&mut content, options.cache.as_ref(), history_index);
                 push_message(&mut messages, "user", content);
             }
         }
@@ -349,6 +353,13 @@ pub(crate) fn encode_request(
 
     let mut root = serde_json::json!({"messages":messages});
     if !system.is_empty() {
+        if let Some(point) = options
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.system.as_ref())
+        {
+            system.push(cache_point(point));
+        }
         root["system"] = JsonValue::Array(system);
     }
     let mut inference = serde_json::json!({});
@@ -377,6 +388,16 @@ pub(crate) fn encode_request(
                 "toolSpec":{"name":tool.name,"description":tool.description,"inputSchema":{"json":tool.input_schema.as_value()}}
             })).collect::<Vec<_>>()
         });
+        if let Some(point) = options
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.tools.as_ref())
+        {
+            root["toolConfig"]["tools"]
+                .as_array_mut()
+                .expect("tools are an array")
+                .push(cache_point(point));
+        }
         root["toolConfig"]["toolChoice"] = match &request.tool_choice {
             ToolChoice::Auto => serde_json::json!({"auto":{}}),
             ToolChoice::Required => serde_json::json!({"any":{}}),
@@ -464,6 +485,105 @@ pub(crate) fn encode_request(
         replay,
         warnings,
     })
+}
+
+fn validate_cache_strategy(
+    request: &Request,
+    cache: Option<&BedrockCacheStrategy>,
+    capabilities: &ModelCapabilities,
+) -> Result<(), ModelError> {
+    let Some(cache) = cache else {
+        return Ok(());
+    };
+    let count = usize::from(cache.tools.is_some())
+        + usize::from(cache.system.is_some())
+        + cache.messages.len();
+    if count == 0 {
+        return Ok(());
+    }
+    if !capabilities.features.contains(Capability::PROMPT_CACHING) {
+        return Err(ModelError::unsupported(
+            "prompt caching is not enabled by this Bedrock declaration",
+        ));
+    }
+    if count > 4 {
+        return Err(ModelError::invalid_request(
+            "Bedrock Converse allows at most four cache points per request",
+        ));
+    }
+    if cache.system.is_some()
+        && !request.history.iter().any(|turn| {
+            matches!(turn, HistoryTurn::System(message) if message.content.iter().any(|part| matches!(part, SystemPart::Text(text) if !text.text.is_empty())))
+        })
+    {
+        return Err(ModelError::invalid_request(
+            "Bedrock system cache points require non-empty system content",
+        ));
+    }
+    if cache.tools.is_some() && request.tools.is_empty() {
+        return Err(ModelError::invalid_request(
+            "Bedrock tools cache points require declared tools",
+        ));
+    }
+    let mut indices = BTreeSet::new();
+    for point in &cache.messages {
+        if !indices.insert(point.history_index) {
+            return Err(ModelError::invalid_request(
+                "Bedrock message cache-point history indices must be unique",
+            ));
+        }
+        let turn = request.history.get(point.history_index).ok_or_else(|| {
+            ModelError::invalid_request("Bedrock message cache-point history index is out of range")
+        })?;
+        if matches!(turn, HistoryTurn::System(_)) {
+            return Err(ModelError::invalid_request(
+                "Bedrock system history must use the top-level system cache point",
+            ));
+        }
+    }
+    let mut message_points = cache.messages.iter().collect::<Vec<_>>();
+    message_points.sort_by_key(|point| point.history_index);
+    let points = cache
+        .tools
+        .iter()
+        .chain(cache.system.iter())
+        .chain(message_points.into_iter().map(|point| &point.cache_point));
+    let mut saw_short_ttl = false;
+    for point in points {
+        match point.ttl.unwrap_or(BedrockCacheTtl::FiveMinutes) {
+            BedrockCacheTtl::FiveMinutes => saw_short_ttl = true,
+            BedrockCacheTtl::OneHour if saw_short_ttl => {
+                return Err(ModelError::invalid_request(
+                    "one-hour Bedrock cache points must precede five-minute cache points",
+                ));
+            }
+            BedrockCacheTtl::OneHour => {}
+        }
+    }
+    Ok(())
+}
+
+fn append_message_cache_point(
+    content: &mut Vec<JsonValue>,
+    cache: Option<&BedrockCacheStrategy>,
+    history_index: usize,
+) {
+    if let Some(point) = cache.and_then(|cache| {
+        cache
+            .messages
+            .iter()
+            .find(|point| point.history_index == history_index)
+    }) {
+        content.push(cache_point(&point.cache_point));
+    }
+}
+
+fn cache_point(point: &BedrockCachePoint) -> JsonValue {
+    let mut value = serde_json::json!({"type":"default"});
+    if let Some(ttl) = point.ttl {
+        value["ttl"] = serde_json::to_value(ttl).expect("cache TTL is serializable");
+    }
+    serde_json::json!({"cachePoint":value})
 }
 
 pub(crate) fn validate_serialized_body(request: &Request, bytes: usize) -> Result<(), ModelError> {

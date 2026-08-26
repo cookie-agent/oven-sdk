@@ -165,16 +165,14 @@ async fn bedrock_model_ids_do_not_select_behavior() {
 #[test]
 fn bedrock_constructor_enforces_adapter_declaration_and_media_ceilings() {
     let endpoint = "https://bedrock-runtime.us-east-1.amazonaws.com";
-    for feature in [Capability::PROMPT_CACHING, Capability::PROVIDER_TOOLS] {
-        let mut config = support::config(
-            endpoint,
-            "opaque",
-            support::FixtureKind::Text,
-            BedrockAuth::Static(support::credentials()),
-        );
-        config.model.capabilities.features |= feature;
-        assert!(BedrockModel::new(config).is_err());
-    }
+    let mut config = support::config(
+        endpoint,
+        "opaque",
+        support::FixtureKind::Text,
+        BedrockAuth::Static(support::credentials()),
+    );
+    config.model.capabilities.features |= Capability::PROVIDER_TOOLS;
+    assert!(BedrockModel::new(config).is_err());
 
     let mut native_compaction = support::config(
         endpoint,

@@ -25,7 +25,8 @@ pub use configuration::{
 pub use error::classify_error;
 pub use model::BedrockModel;
 pub use options::{
-    BedrockGuardrailConfig, BedrockRequestExt, BedrockRequestOptions, BedrockS3LocationOptions,
+    BedrockCachePoint, BedrockCacheStrategy, BedrockCacheTtl, BedrockGuardrailConfig,
+    BedrockMessageCachePoint, BedrockRequestExt, BedrockRequestOptions, BedrockS3LocationOptions,
 };
 pub use transport::BedrockTimeouts;
 

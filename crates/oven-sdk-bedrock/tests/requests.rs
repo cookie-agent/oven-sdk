@@ -1,18 +1,148 @@
 mod support;
 
 use oven_sdk::{
-    AbortSignal, FilePart, FileSource, HistoryTurn, InputPart, JsonSchema, LanguageModel, Request,
-    ResponseFormat, TextPart, ToolChoice, ToolDefinition, UserMessage,
+    AbortSignal, Capability, FilePart, FileSource, HistoryTurn, InputPart, JsonSchema,
+    LanguageModel, Request, ResponseFormat, SystemMessage, SystemPart, TextPart, ToolChoice,
+    ToolDefinition, UserMessage,
 };
 use oven_sdk_bedrock::{
-    BedrockAuth, BedrockGuardrailConfig, BedrockModel, BedrockReasoningWireFormat,
-    BedrockRequestExt, BedrockRequestOptions,
+    BedrockAuth, BedrockCachePoint, BedrockCacheStrategy, BedrockCacheTtl, BedrockGuardrailConfig,
+    BedrockMessageCachePoint, BedrockModel, BedrockReasoningWireFormat, BedrockRequestExt,
+    BedrockRequestOptions,
 };
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{body_json, body_partial_json, header_regex, method, path},
 };
+
+#[tokio::test]
+async fn converse_encodes_system_tools_and_message_cache_points() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({
+            "system":[
+                {"text":"stable system"},
+                {"cachePoint":{"type":"default","ttl":"1h"}}
+            ],
+            "toolConfig":{"tools":[
+                {"toolSpec":{"name":"lookup"}},
+                {"cachePoint":{"type":"default","ttl":"1h"}}
+            ]},
+            "messages":[{"role":"user","content":[
+                {"text":"variable question"},
+                {"cachePoint":{"type":"default"}}
+            ]}]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},
+            "stopReason":"end_turn",
+            "usage":{"inputTokens":2,"outputTokens":1,"totalTokens":3},
+            "metrics":{"latencyMs":1}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut config = support::config(
+        &server.uri(),
+        "anthropic.claude-sonnet-4-6",
+        support::FixtureKind::MediaTools,
+        BedrockAuth::Static(support::credentials()),
+    );
+    config.model.capabilities.features |= Capability::PROMPT_CACHING;
+    let model = BedrockModel::new(config).unwrap();
+    let one_hour = BedrockCachePoint {
+        ttl: Some(BedrockCacheTtl::OneHour),
+    };
+    let request = Request::new(vec![
+        HistoryTurn::system(SystemMessage::new(vec![SystemPart::Text(TextPart::new(
+            "stable system",
+        ))])),
+        HistoryTurn::user(UserMessage::new(vec![InputPart::Text(TextPart::new(
+            "variable question",
+        ))])),
+    ])
+    .with_tools(vec![ToolDefinition::new(
+        "lookup",
+        "lookup",
+        JsonSchema::new(json!({"type":"object"})).unwrap(),
+    )])
+    .with_bedrock_options(BedrockRequestOptions {
+        cache: Some(BedrockCacheStrategy {
+            system: Some(one_hour.clone()),
+            tools: Some(one_hour),
+            messages: vec![BedrockMessageCachePoint {
+                history_index: 1,
+                cache_point: BedrockCachePoint::default(),
+            }],
+        }),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        model
+            .converse(request, AbortSignal::default())
+            .await
+            .unwrap()
+            .turn
+            .text(),
+        "ok"
+    );
+}
+
+#[tokio::test]
+async fn invalid_cache_strategies_are_rejected_before_network() {
+    let server = MockServer::start().await;
+    let request = Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
+        InputPart::Text(TextPart::new("prompt")),
+    ]))])
+    .with_bedrock_options(BedrockRequestOptions {
+        cache: Some(BedrockCacheStrategy {
+            messages: vec![BedrockMessageCachePoint {
+                history_index: 0,
+                cache_point: BedrockCachePoint::default(),
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let unsupported = support::model(&server.uri(), "opaque", support::FixtureKind::MediaTools);
+    assert!(unsupported.validate_request(&request).is_err());
+
+    let mut config = support::config(
+        &server.uri(),
+        "opaque",
+        support::FixtureKind::MediaTools,
+        BedrockAuth::Static(support::credentials()),
+    );
+    config.model.capabilities.features |= Capability::PROMPT_CACHING;
+    let caching = BedrockModel::new(config).unwrap();
+    let five_points = Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
+        InputPart::Text(TextPart::new("prompt")),
+    ]))])
+    .with_bedrock_options(BedrockRequestOptions {
+        cache: Some(BedrockCacheStrategy {
+            messages: (0..5)
+                .map(|_| BedrockMessageCachePoint {
+                    history_index: 0,
+                    cache_point: BedrockCachePoint::default(),
+                })
+                .collect(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let missing_tools = Request::new(Vec::new()).with_bedrock_options(BedrockRequestOptions {
+        cache: Some(BedrockCacheStrategy {
+            tools: Some(BedrockCachePoint::default()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    assert!(caching.validate_request(&five_points).is_err());
+    assert!(caching.validate_request(&missing_tools).is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
 
 #[tokio::test]
 async fn converse_signs_exact_resource_and_encodes_media_tools_and_open_labels() {

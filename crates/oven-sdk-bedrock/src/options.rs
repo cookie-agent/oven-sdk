@@ -27,6 +27,57 @@ pub struct BedrockS3LocationOptions {
     pub bucket_owner: Option<String>,
 }
 
+/// TTL for one Bedrock Converse cache point.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum BedrockCacheTtl {
+    /// Use the standard five-minute cache lifetime.
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    /// Request the extended one-hour cache lifetime on models that support it.
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+/// One Bedrock Converse cache point.
+///
+/// Bedrock's minimum cacheable prefix varies by model, currently from 512 to
+/// 4,096 tokens. This adapter does not estimate token counts or reject short
+/// prefixes; Bedrock accepts those requests but does not write a cache entry.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockCachePoint {
+    /// Optional cache TTL. Omission uses Bedrock's default five-minute lifetime.
+    pub ttl: Option<BedrockCacheTtl>,
+}
+
+/// Cache point appended to the message produced by one normalized history turn.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockMessageCachePoint {
+    /// Zero-based index in [`oven_sdk::Request::history`].
+    pub history_index: usize,
+    /// Cache point settings.
+    #[serde(flatten)]
+    pub cache_point: BedrockCachePoint,
+}
+
+/// Explicit Bedrock Converse cache-point placement strategy.
+///
+/// Current Converse models with manual cache points allow at most four points
+/// per request. The adapter enforces that shared request ceiling without
+/// inferring behavior from the model ID.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockCacheStrategy {
+    /// Cache point appended after top-level system content.
+    pub system: Option<BedrockCachePoint>,
+    /// Cache point appended after tool specifications.
+    pub tools: Option<BedrockCachePoint>,
+    /// Cache points appended after selected normalized history turns.
+    #[serde(default)]
+    pub messages: Vec<BedrockMessageCachePoint>,
+}
+
 /// Typed options stored under `provider_options["bedrock"]`.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +100,8 @@ pub struct BedrockRequestOptions {
     pub guardrail: Option<BedrockGuardrailConfig>,
     /// S3 location options.
     pub s3: Option<BedrockS3LocationOptions>,
+    /// Explicit cache-point placement strategy.
+    pub cache: Option<BedrockCacheStrategy>,
     /// Additional stop sequences.
     #[serde(default)]
     pub stop_sequences: Vec<String>,
