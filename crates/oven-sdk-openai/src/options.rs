@@ -16,6 +16,10 @@ pub struct OpenAiChatOptions {
     pub verbosity: Option<String>,
     /// Requests parallel tool calls when tools are present.
     pub parallel_tool_calls: Option<bool>,
+    /// Optional prompt-cache routing key, limited to 64 characters by OpenAI.
+    pub prompt_cache_key: Option<String>,
+    /// Optional prompt-cache retention policy.
+    pub prompt_cache_retention: Option<OpenAiPromptCacheRetention>,
 }
 
 /// Official Responses request options.
@@ -41,6 +45,21 @@ pub struct OpenAiResponsesOptions {
     pub truncation: Option<String>,
     /// Requests parallel tool calls when tools are present.
     pub parallel_tool_calls: Option<bool>,
+    /// Optional prompt-cache routing key, limited to 64 characters by OpenAI.
+    pub prompt_cache_key: Option<String>,
+    /// Optional prompt-cache retention policy.
+    pub prompt_cache_retention: Option<OpenAiPromptCacheRetention>,
+}
+
+/// OpenAI prompt-cache retention policy.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiPromptCacheRetention {
+    /// Keep cache entries in memory for the standard short-lived retention window.
+    InMemory,
+    /// Enable extended retention for up to 24 hours.
+    #[serde(rename = "24h")]
+    TwentyFourHours,
 }
 
 /// Official standalone Responses compaction options.
@@ -205,6 +224,8 @@ pub(crate) fn compatible_options(
         "service_tier",
         "verbosity",
         "parallel_tool_calls",
+        "prompt_cache_key",
+        "prompt_cache_retention",
         "tools",
         "tool_choice",
         "response_format",
@@ -219,6 +240,15 @@ pub(crate) fn compatible_options(
         )));
     }
     Ok(options)
+}
+
+pub(crate) fn validate_prompt_cache_key(key: Option<&str>) -> Result<(), oven_sdk::ModelError> {
+    if key.is_some_and(|key| key.chars().count() > 64) {
+        return Err(oven_sdk::ModelError::invalid_request(
+            "OpenAI prompt_cache_key must not exceed 64 characters",
+        ));
+    }
+    Ok(())
 }
 
 fn decode<T: serde::de::DeserializeOwned + Default>(

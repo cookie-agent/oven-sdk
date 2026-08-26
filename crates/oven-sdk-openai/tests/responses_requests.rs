@@ -7,7 +7,9 @@ use oven_sdk::{
     ResponseFormat, SystemMessage, SystemPart, TextPart, ToolCallPart, ToolChoice, ToolContent,
     ToolDefinition, ToolMessage, ToolResultPart, UserMessage,
 };
-use oven_sdk_openai::{OpenAiResponsesOptions, OpenAiResponsesRequestExt};
+use oven_sdk_openai::{
+    OpenAiPromptCacheRetention, OpenAiResponsesOptions, OpenAiResponsesRequestExt,
+};
 use wiremock::MockServer;
 
 #[tokio::test]
@@ -20,6 +22,8 @@ async fn responses_always_sends_store_false_and_encrypted_include() {
             "file_search_call.results".into(),
             "reasoning.encrypted_content".into(),
         ],
+        prompt_cache_key: Some("shared-responses-prefix".into()),
+        prompt_cache_retention: Some(OpenAiPromptCacheRetention::InMemory),
         ..Default::default()
     });
     model
@@ -29,6 +33,8 @@ async fn responses_always_sends_store_false_and_encrypted_include() {
     let body: serde_json::Value =
         serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
     assert_eq!(body["store"], false);
+    assert_eq!(body["prompt_cache_key"], "shared-responses-prefix");
+    assert_eq!(body["prompt_cache_retention"], "in_memory");
     assert_eq!(
         body["include"]
             .as_array()
@@ -38,6 +44,17 @@ async fn responses_always_sends_store_false_and_encrypted_include() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn responses_rejects_oversized_prompt_cache_keys() {
+    let server = MockServer::start().await;
+    let model = common::official_responses(&server, "future-responses-id");
+    let request = Request::new(Vec::new()).with_openai_responses_options(OpenAiResponsesOptions {
+        prompt_cache_key: Some("x".repeat(65)),
+        ..Default::default()
+    });
+    assert!(model.validate_request(&request).is_err());
 }
 
 #[tokio::test]

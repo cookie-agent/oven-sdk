@@ -21,7 +21,7 @@ pub use configuration::{
 };
 pub use options::{
     CompatibleChatOptions, OpenAiChatOptions, OpenAiChatRequestExt, OpenAiOptions,
-    OpenAiPromptCacheOptions, OpenAiResponsesCompactionOptions,
+    OpenAiPromptCacheOptions, OpenAiPromptCacheRetention, OpenAiResponsesCompactionOptions,
     OpenAiResponsesCompactionRequestExt, OpenAiResponsesOptions, OpenAiResponsesRequestExt,
 };
 pub use responses::model::OpenAiResponsesModel;

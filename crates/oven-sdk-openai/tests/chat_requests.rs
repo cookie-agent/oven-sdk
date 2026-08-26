@@ -7,7 +7,8 @@ use oven_sdk::{
     ResponseFormat, SystemMessage, SystemPart, TextPart, ToolChoice, ToolDefinition, UserMessage,
 };
 use oven_sdk_openai::{
-    OpenAiChatOptions, OpenAiChatRequestExt, OpenAiResponsesOptions, OpenAiResponsesRequestExt,
+    OpenAiChatOptions, OpenAiChatRequestExt, OpenAiPromptCacheRetention, OpenAiResponsesOptions,
+    OpenAiResponsesRequestExt,
 };
 use wiremock::MockServer;
 
@@ -182,6 +183,8 @@ async fn official_chat_provider_labels_are_forwarded_unchanged() {
     let request = Request::new(Vec::new()).with_openai_chat_options(OpenAiChatOptions {
         service_tier: Some("future-hyperscale".into()),
         verbosity: Some("future-exhaustive".into()),
+        prompt_cache_key: Some("shared-chat-prefix".into()),
+        prompt_cache_retention: Some(OpenAiPromptCacheRetention::TwentyFourHours),
         ..Default::default()
     });
     model
@@ -192,6 +195,19 @@ async fn official_chat_provider_labels_are_forwarded_unchanged() {
         serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
     assert_eq!(body["service_tier"], "future-hyperscale");
     assert_eq!(body["verbosity"], "future-exhaustive");
+    assert_eq!(body["prompt_cache_key"], "shared-chat-prefix");
+    assert_eq!(body["prompt_cache_retention"], "24h");
+}
+
+#[tokio::test]
+async fn chat_rejects_oversized_prompt_cache_keys() {
+    let server = MockServer::start().await;
+    let model = common::official_chat(&server, "future-chat-id");
+    let request = Request::new(Vec::new()).with_openai_chat_options(OpenAiChatOptions {
+        prompt_cache_key: Some("x".repeat(65)),
+        ..Default::default()
+    });
+    assert!(model.validate_request(&request).is_err());
 }
 
 #[tokio::test]

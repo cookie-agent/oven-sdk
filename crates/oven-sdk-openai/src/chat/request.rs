@@ -11,7 +11,10 @@ use oven_sdk::{
 use crate::{
     chat::replay,
     configuration::{MaxTokensField, ReasoningField, StructuredOutputSupport, SystemMessageRole},
-    options::{CompatibleChatOptions, OpenAiChatOptions, chat_options, compatible_options},
+    options::{
+        CompatibleChatOptions, OpenAiChatOptions, chat_options, compatible_options,
+        validate_prompt_cache_key,
+    },
 };
 
 pub(crate) struct ChatWireProfile {
@@ -43,10 +46,11 @@ pub(crate) fn parse_options(request: &Request) -> Result<ParsedOptions, ModelErr
 
 pub(crate) fn validate_request(
     request: &Request,
-    _options: &ParsedOptions,
+    options: &ParsedOptions,
     capabilities: &ModelCapabilities,
     _profile: &ChatWireProfile,
 ) -> Result<(), ModelError> {
+    validate_prompt_cache_key(options.official.prompt_cache_key.as_deref())?;
     request.validate_for(capabilities)?;
     validate_media(request)?;
     Ok(())
@@ -250,6 +254,13 @@ pub(crate) fn encode_request(
     }
     if let Some(parallel) = official_options.parallel_tool_calls {
         body["parallel_tool_calls"] = parallel.into();
+    }
+    if let Some(key) = &official_options.prompt_cache_key {
+        body["prompt_cache_key"] = key.clone().into();
+    }
+    if let Some(retention) = official_options.prompt_cache_retention {
+        body["prompt_cache_retention"] =
+            serde_json::to_value(retention).expect("prompt-cache retention is serializable");
     }
     if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {
         body["tools"] = JsonValue::Array(

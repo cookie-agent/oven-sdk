@@ -9,7 +9,9 @@ use oven_sdk::{
 };
 
 use crate::{
-    options::{OpenAiResponsesCompactionOptions, OpenAiResponsesOptions},
+    options::{
+        OpenAiResponsesCompactionOptions, OpenAiResponsesOptions, validate_prompt_cache_key,
+    },
     responses::{compaction, replay},
 };
 
@@ -26,6 +28,7 @@ pub(crate) fn validate_request(
     descriptor: &LanguageModelDescriptor,
     scope: &NativeContextScope,
 ) -> Result<(), ModelError> {
+    validate_prompt_cache_key(options.prompt_cache_key.as_deref())?;
     request.validate_for(capabilities)?;
     validate_native_context(request, descriptor, scope)?;
     if (request.inference.reasoning_effort.is_some()
@@ -140,6 +143,13 @@ pub(crate) fn encode_request(
     }
     if let Some(parallel) = options.parallel_tool_calls {
         body["parallel_tool_calls"] = parallel.into();
+    }
+    if let Some(key) = &options.prompt_cache_key {
+        body["prompt_cache_key"] = key.clone().into();
+    }
+    if let Some(retention) = options.prompt_cache_retention {
+        body["prompt_cache_retention"] =
+            serde_json::to_value(retention).expect("prompt-cache retention is serializable");
     }
     add_tools_and_output(request, verbosity.as_deref(), &mut body);
     Ok(Encoded {
