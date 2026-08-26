@@ -17,6 +17,10 @@ pub struct AzureOpenAiChatOptions {
     pub verbosity: Option<String>,
     /// Requests parallel tool calls when tools are present.
     pub parallel_tool_calls: Option<bool>,
+    /// Optional prompt-cache routing key, limited to 64 characters.
+    pub prompt_cache_key: Option<String>,
+    /// Optional prompt-cache retention policy.
+    pub prompt_cache_retention: Option<AzureOpenAiPromptCacheRetention>,
 }
 
 /// Azure OpenAI Responses options.
@@ -40,6 +44,21 @@ pub struct AzureOpenAiResponsesOptions {
     pub truncation: Option<String>,
     /// Requests parallel tool calls when tools are present.
     pub parallel_tool_calls: Option<bool>,
+    /// Optional prompt-cache routing key, limited to 64 characters.
+    pub prompt_cache_key: Option<String>,
+    /// Optional prompt-cache retention policy.
+    pub prompt_cache_retention: Option<AzureOpenAiPromptCacheRetention>,
+}
+
+/// Azure OpenAI prompt-cache retention policy.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AzureOpenAiPromptCacheRetention {
+    /// Keep cache entries in memory for the standard short-lived retention window.
+    InMemory,
+    /// Enable extended retention for up to 24 hours.
+    #[serde(rename = "24h")]
+    TwentyFourHours,
 }
 
 /// Azure Responses V1 standalone compaction options.
@@ -139,6 +158,15 @@ pub(crate) fn response_pipeline_options(
             options.compaction.unwrap_or_default(),
         )
     })
+}
+
+pub(crate) fn validate_prompt_cache_key(key: Option<&str>) -> Result<(), oven_sdk::ModelError> {
+    if key.is_some_and(|key| key.chars().count() > 64) {
+        return Err(oven_sdk::ModelError::invalid_request(
+            "Azure OpenAI prompt_cache_key must not exceed 64 characters",
+        ));
+    }
+    Ok(())
 }
 
 fn current_options(request: &Request) -> AzureOpenAiOptions {

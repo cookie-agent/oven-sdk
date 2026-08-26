@@ -7,8 +7,8 @@ use oven_sdk::{
     UserMessage,
 };
 use oven_sdk_azure::{
-    AzureApiRoute, AzureOpenAiChatOptions, AzureOpenAiChatRequestExt, AzureOpenAiResponsesOptions,
-    AzureOpenAiResponsesRequestExt,
+    AzureApiRoute, AzureOpenAiChatOptions, AzureOpenAiChatRequestExt,
+    AzureOpenAiPromptCacheRetention, AzureOpenAiResponsesOptions, AzureOpenAiResponsesRequestExt,
 };
 use wiremock::MockServer;
 
@@ -48,6 +48,8 @@ async fn chat_encodes_tools_structured_output_media_usage_and_open_labels() {
         service_tier: Some("future-tier".into()),
         verbosity: Some("future-verbosity".into()),
         parallel_tool_calls: Some(false),
+        prompt_cache_key: Some("shared-chat-prefix".into()),
+        prompt_cache_retention: Some(AzureOpenAiPromptCacheRetention::TwentyFourHours),
         ..Default::default()
     });
     let result = model
@@ -63,6 +65,8 @@ async fn chat_encodes_tools_structured_output_media_usage_and_open_labels() {
     assert_eq!(body["response_format"]["type"], "json_schema");
     assert_eq!(body["service_tier"], "future-tier");
     assert_eq!(body["verbosity"], "future-verbosity");
+    assert_eq!(body["prompt_cache_key"], "shared-chat-prefix");
+    assert_eq!(body["prompt_cache_retention"], "24h");
     assert_eq!(body["messages"][0]["content"][1]["type"], "image_url");
 }
 
@@ -123,6 +127,8 @@ async fn responses_encodes_reasoning_structured_output_and_emits_filter_events()
         .with_azure_openai_responses_options(AzureOpenAiResponsesOptions {
             reasoning_summary: Some("future-summary".into()),
             service_tier: Some("future-tier".into()),
+            prompt_cache_key: Some("shared-responses-prefix".into()),
+            prompt_cache_retention: Some(AzureOpenAiPromptCacheRetention::InMemory),
             ..Default::default()
         });
     let mut response = model.stream(request, AbortSignal::default()).await.unwrap();
@@ -146,6 +152,30 @@ async fn responses_encodes_reasoning_structured_output_and_emits_filter_events()
     assert_eq!(body["reasoning"]["summary"], "future-summary");
     assert_eq!(body["text"]["format"]["type"], "json_schema");
     assert_eq!(body["store"], false);
+    assert_eq!(body["prompt_cache_key"], "shared-responses-prefix");
+    assert_eq!(body["prompt_cache_retention"], "in_memory");
+}
+
+#[tokio::test]
+async fn cache_keys_over_64_characters_are_rejected_before_network() {
+    let server = MockServer::start().await;
+    let provider = common::provider(&server, AzureApiRoute::V1);
+    let chat = provider.chat("chat", common::gpt4o()).unwrap();
+    let responses = provider.responses("responses", common::gpt5()).unwrap();
+    let chat_request =
+        Request::new(Vec::new()).with_azure_openai_chat_options(AzureOpenAiChatOptions {
+            prompt_cache_key: Some("x".repeat(65)),
+            ..Default::default()
+        });
+    let responses_request =
+        Request::new(Vec::new()).with_azure_openai_responses_options(AzureOpenAiResponsesOptions {
+            prompt_cache_key: Some("x".repeat(65)),
+            ..Default::default()
+        });
+
+    assert!(chat.validate_request(&chat_request).is_err());
+    assert!(responses.validate_request(&responses_request).is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

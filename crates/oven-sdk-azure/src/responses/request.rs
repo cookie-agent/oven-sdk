@@ -8,7 +8,12 @@ use oven_sdk::{
     ToolContent, ToolResultPart,
 };
 
-use crate::{media, options::AzureOpenAiResponsesOptions, responses::replay, schema};
+use crate::{
+    media,
+    options::{AzureOpenAiResponsesOptions, validate_prompt_cache_key},
+    responses::replay,
+    schema,
+};
 
 pub(crate) struct Encoded {
     pub(crate) body: JsonValue,
@@ -29,6 +34,7 @@ pub(crate) fn validate_request(
     descriptor: &LanguageModelDescriptor,
     native_scope: Option<&NativeContextScope>,
 ) -> Result<(), ModelError> {
+    validate_prompt_cache_key(options.prompt_cache_key.as_deref())?;
     request.validate_for(capabilities)?;
     if !request.tools.is_empty() && !capabilities.features.contains(Capability::TOOL_CALLING) {
         return Err(ModelError::unsupported(
@@ -270,6 +276,13 @@ pub(crate) fn encode_request(
     }
     if let Some(parallel) = options.parallel_tool_calls {
         body["parallel_tool_calls"] = parallel.into();
+    }
+    if let Some(key) = &options.prompt_cache_key {
+        body["prompt_cache_key"] = key.clone().into();
+    }
+    if let Some(retention) = options.prompt_cache_retention {
+        body["prompt_cache_retention"] =
+            serde_json::to_value(retention).expect("prompt-cache retention is serializable");
     }
     if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {
         body["tools"] = JsonValue::Array(
