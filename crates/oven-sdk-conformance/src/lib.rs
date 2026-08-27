@@ -33,15 +33,16 @@ use std::{
 
 use futures_core::Stream;
 use oven_sdk::{
-    AbortSignal, AdapterId, AssistantPart, BoxFuture, BoxStream, CancellationCapability,
-    Capability, CompactionCapability, CompactionRequest, CompactionResult, CompleteResult,
-    CompletedTurn, FilePart, FileSource, Finish, FinishReason, HistoryTurn, InferenceOptions,
-    InputPart, LanguageModel, LanguageModelDescriptor, MediaSourceSupport, Modality,
-    ModelCapabilities, ModelError, ModelErrorKind, ModelId, ModelIdentity, NativeContextScope,
-    NativeContextWindow, NativeReplayArtifact, ProviderId, ReplayCapability, ReplayDecision,
-    ReplayDeclaration, ReplayDisposition, ReplayOutcome, ReplayPolicy, Request, RequestMetadata,
-    ResourceId, ResponseFormat, ResponseHead, StreamItem, StreamPart, StreamResponse, TextPart,
-    ToolDefinition, UserMessage,
+    AbortSignal, AdapterId, AssistantMessage, AssistantPart, BoxFuture, BoxStream,
+    CancellationCapability, Capability, CompactionCapability, CompactionRequest, CompactionResult,
+    CompleteResult, CompletedTurn, ContentValue, ErrorStage, FilePart, FileSource, Finish,
+    FinishReason, HistoryTurn, InferenceOptions, InputPart, LanguageModel, LanguageModelDescriptor,
+    MediaSourceSupport, Modality, ModelCapabilities, ModelError, ModelErrorKind, ModelId,
+    ModelIdentity, NativeContextScope, NativeContextWindow, NativeReplayArtifact, ProviderId,
+    ReplayCapability, ReplayDecision, ReplayDeclaration, ReplayDisposition, ReplayOutcome,
+    ReplayPolicy, Request, RequestMetadata, ResourceId, ResponseFormat, ResponseHead, StreamItem,
+    StreamPart, StreamResponse, TextPart, ToolCallPart, ToolContent, ToolDefinition, ToolMessage,
+    ToolResultPart, Usage, UserMessage,
 };
 
 /// A structured conformance failure with a diagnostic suitable for test output.
@@ -1138,6 +1139,78 @@ pub fn assert_validate_for_consistency(
         )),
         (Err(error), Ok(())) => Err(ConformanceError::new(format!(
             "core validation rejected request ({error}) but adapter accepted it"
+        ))),
+    }
+}
+
+/// Declared adapter policy for files carried in normalized tool results.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolResultFilePolicy {
+    /// The adapter accepts the file for provider-native tool-result encoding.
+    Encode,
+    /// The adapter rejects the file before request encoding or dispatch.
+    Reject,
+}
+
+/// File kind exercised by a tool-result conformance probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolResultFileKind {
+    /// An inline PNG image.
+    Image,
+    /// An inline PDF document.
+    Pdf,
+}
+
+/// Verifies that adapter validation consistently implements its declared
+/// policy for a core-valid inline file in a normalized tool result.
+pub fn assert_tool_result_file_policy(
+    model: &dyn LanguageModel,
+    kind: ToolResultFileKind,
+    policy: ToolResultFilePolicy,
+) -> Result<(), ConformanceError> {
+    let assistant = CompletedTurn::new(
+        AssistantMessage::new(vec![AssistantPart::ToolCall(ToolCallPart::new(
+            "conformance-call",
+            "inspect",
+            serde_json::json!({}),
+        ))]),
+        Finish::new(Usage::default(), FinishReason::ToolCalls),
+    );
+    let file = match kind {
+        ToolResultFileKind::Image => {
+            FilePart::image("image/png", FileSource::Bytes(b"png".to_vec().into()))
+        }
+        ToolResultFileKind::Pdf => {
+            FilePart::document("application/pdf", FileSource::Bytes(b"pdf".to_vec().into()))
+        }
+    };
+    let result = ToolResultPart::new(
+        "conformance-call",
+        ToolContent::Mixed(vec![ContentValue::File(file)]),
+    );
+    let request = Request::new(vec![
+        HistoryTurn::assistant(assistant),
+        HistoryTurn::tool(ToolMessage::new(vec![result])),
+    ]);
+    request
+        .validate_for(model.capabilities())
+        .map_err(|error| {
+            ConformanceError::new(format!(
+                "tool-result {kind:?} policy probe is not core-valid for this declaration: {error}"
+            ))
+        })?;
+
+    let validation = model.validate_request(&request);
+    match (policy, validation, model.supports_request(&request)) {
+        (ToolResultFilePolicy::Encode, Ok(()), true) => Ok(()),
+        (ToolResultFilePolicy::Reject, Err(error), false)
+            if error.kind == ModelErrorKind::Unsupported
+                && error.diagnostics.stage == ErrorStage::RequestValidation =>
+        {
+            Ok(())
+        }
+        (policy, validation, supports) => Err(ConformanceError::new(format!(
+            "tool-result {kind:?} policy {policy:?} disagreed with validate_request={validation:?} and supports_request={supports}"
         ))),
     }
 }

@@ -562,7 +562,7 @@ fn validate_adapter_declaration(capabilities: &ModelCapabilities) -> Result<(), 
         ));
     }
     for modality in &capabilities.modalities.input {
-        if !matches!(modality.as_str(), "text" | "image" | "video") {
+        if !matches!(modality.as_str(), "text" | "image" | "video" | "pdf") {
             return Err(ModelError::invalid_request(format!(
                 "Bedrock input modality `{}` is unsupported",
                 modality.as_str()
@@ -604,6 +604,7 @@ fn validate_adapter_declaration(capabilities: &ModelCapabilities) -> Result<(), 
 
 fn media_ceiling(modality: &str) -> Option<(&'static [&'static str], MediaSourceSupport)> {
     const IMAGE: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
+    const PDF: &[&str] = &["application/pdf"];
     const VIDEO: &[&str] = &[
         "video/x-matroska",
         "video/quicktime",
@@ -617,6 +618,7 @@ fn media_ceiling(modality: &str) -> Option<(&'static [&'static str], MediaSource
     ];
     match modality {
         "image" => Some((IMAGE, MediaSourceSupport::INLINE_BYTES)),
+        "pdf" => Some((PDF, MediaSourceSupport::INLINE_BYTES)),
         "video" => Some((VIDEO, MediaSourceSupport::INLINE_BYTES)),
         _ => None,
     }

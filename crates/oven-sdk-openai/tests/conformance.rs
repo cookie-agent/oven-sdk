@@ -8,9 +8,11 @@ use oven_sdk::{
     Finish, FinishReason, HistoryTurn, LanguageModel, NativeReplayArtifact, Request, TextPart,
 };
 use oven_sdk_conformance::{
-    assert_capability_honesty, assert_compaction_unsupported_before_io, assert_complete_drain,
+    ToolResultFileKind, ToolResultFilePolicy, assert_capability_honesty,
+    assert_compaction_unsupported_before_io, assert_complete_drain,
     assert_foreign_replay_is_reported, assert_invalid_replay_reconstructs, assert_replay_artifact,
     assert_replay_round_trip, assert_stream_contract, assert_stream_lifecycle,
+    assert_tool_result_file_policy,
 };
 use wiremock::MockServer;
 
@@ -29,6 +31,9 @@ async fn official_chat_passes_lifecycle_complete_capability_and_replay_suites() 
     common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
     let model = common::official_chat(&server, "gpt-4o-mini");
     assert_capability_honesty(&model).unwrap();
+    for kind in [ToolResultFileKind::Image, ToolResultFileKind::Pdf] {
+        assert_tool_result_file_policy(&model, kind, ToolResultFilePolicy::Reject).unwrap();
+    }
     assert_stream_lifecycle(&model, Request::new(Vec::new()))
         .await
         .unwrap();
@@ -59,6 +64,18 @@ async fn official_responses_passes_lifecycle_complete_capability_and_replay_suit
     common::mount(&server, "/responses", common::responses_document("ok")).await;
     let model = common::official_responses(&server, "gpt-5-mini");
     assert_capability_honesty(&model).unwrap();
+    assert_tool_result_file_policy(
+        &model,
+        ToolResultFileKind::Image,
+        ToolResultFilePolicy::Encode,
+    )
+    .unwrap();
+    assert_tool_result_file_policy(
+        &model,
+        ToolResultFileKind::Pdf,
+        ToolResultFilePolicy::Reject,
+    )
+    .unwrap();
     let response = model
         .stream(Request::new(Vec::new()), AbortSignal::default())
         .await
@@ -91,6 +108,9 @@ async fn explicitly_configured_compatible_chat_passes_capability_honesty() {
     common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
     let model = common::compatible(&server);
     assert_capability_honesty(&model).unwrap();
+    for kind in [ToolResultFileKind::Image, ToolResultFileKind::Pdf] {
+        assert_tool_result_file_policy(&model, kind, ToolResultFilePolicy::Reject).unwrap();
+    }
     assert_complete_drain(&model, Request::new(Vec::new()))
         .await
         .unwrap();

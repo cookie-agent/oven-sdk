@@ -2,8 +2,9 @@ mod support;
 
 use oven_sdk::{AbortSignal, CompactionRequest, LanguageModel, Request, StreamPart};
 use oven_sdk_conformance::{
-    assert_capability_honesty, assert_compaction_unsupported_before_io, assert_complete_drain,
-    assert_replay_round_trip, assert_stream_lifecycle,
+    ToolResultFileKind, ToolResultFilePolicy, assert_capability_honesty,
+    assert_compaction_unsupported_before_io, assert_complete_drain, assert_replay_round_trip,
+    assert_stream_lifecycle, assert_tool_result_file_policy,
 };
 use oven_sdk_google_vertex::GoogleVertexResource;
 use serde_json::json;
@@ -45,6 +46,9 @@ async fn explicit_model_passes_lifecycle_complete_capability_and_replay_conforma
         .await
         .unwrap();
     assert_capability_honesty(&model).unwrap();
+    for kind in [ToolResultFileKind::Image, ToolResultFileKind::Pdf] {
+        assert_tool_result_file_policy(&model, kind, ToolResultFilePolicy::Reject).unwrap();
+    }
     assert_compaction_unsupported_before_io(
         &model,
         CompactionRequest::new(Request::new(Vec::new())),

@@ -138,12 +138,18 @@ pub(crate) fn validate_request(
                 )
                 .with_stage(ErrorStage::RequestEncoding));
             }
-            HistoryTurn::Tool(message) if protocol.is_first_party() => {
+            HistoryTurn::Tool(message) => {
                 for result in &message.results {
                     if let ToolContent::Mixed(values) = &result.content {
                         for value in values {
                             if let ContentValue::File(file) = value {
-                                validate_file(file, protocol, None)?;
+                                if protocol.is_first_party() {
+                                    validate_file(file, protocol, None)?;
+                                } else {
+                                    return Err(ModelError::unsupported(
+                                        "files in tool results are not deliverable via minimax-messages",
+                                    ));
+                                }
                             }
                         }
                     }

@@ -5,10 +5,11 @@ use oven_sdk::{
     LanguageModel, ModelErrorKind, NativeReplayArtifact, Request,
 };
 use oven_sdk_conformance::{
-    CapabilityProbe, ModelIdIndependenceProbe, assert_capability_honesty_with,
-    assert_compaction_unsupported_before_io, assert_complete_drain, assert_declaration_honesty,
-    assert_invalid_replay_reconstructs, assert_media_honesty, assert_model_id_independence_with,
-    assert_replay_artifact, assert_replay_round_trip,
+    CapabilityProbe, ModelIdIndependenceProbe, ToolResultFileKind, ToolResultFilePolicy,
+    assert_capability_honesty_with, assert_compaction_unsupported_before_io, assert_complete_drain,
+    assert_declaration_honesty, assert_invalid_replay_reconstructs, assert_media_honesty,
+    assert_model_id_independence_with, assert_replay_artifact, assert_replay_round_trip,
+    assert_tool_result_file_policy,
 };
 use oven_sdk_open_responses::OpenResponsesModel;
 use wiremock::MockServer;
@@ -21,6 +22,9 @@ async fn generic_and_hugging_face_profiles_pass_core_04_conformance() {
     let second = common::generic_model(&server, "opaque-b");
     let hugging_face = common::hugging_face_model(&server, "org/model:provider");
     assert_declaration_honesty(&first).unwrap();
+    for kind in [ToolResultFileKind::Image, ToolResultFileKind::Pdf] {
+        assert_tool_result_file_policy(&first, kind, ToolResultFilePolicy::Encode).unwrap();
+    }
     let mut output = InferenceOptions::new();
     output.max_output_tokens = Some(16);
     assert_capability_honesty_with(
@@ -47,6 +51,12 @@ async fn generic_and_hugging_face_profiles_pass_core_04_conformance() {
     .unwrap();
     assert_declaration_honesty(&hugging_face).unwrap();
     assert_media_honesty(&hugging_face).unwrap();
+    assert_tool_result_file_policy(
+        &hugging_face,
+        ToolResultFileKind::Image,
+        ToolResultFilePolicy::Encode,
+    )
+    .unwrap();
     let completed = assert_complete_drain(&first, Request::new(Vec::new()))
         .await
         .unwrap();

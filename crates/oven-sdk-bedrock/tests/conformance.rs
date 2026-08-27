@@ -7,11 +7,11 @@ use oven_sdk::{
 };
 use oven_sdk_bedrock::{BedrockAuth, BedrockModel};
 use oven_sdk_conformance::{
-    assert_capability_honesty, assert_compaction_unsupported_before_io, assert_complete_drain,
-    assert_declaration_honesty, assert_foreign_replay_is_reported,
-    assert_foreign_replay_scope_is_reported, assert_invalid_replay_reconstructs,
-    assert_media_honesty, assert_model_id_independence, assert_replay_round_trip,
-    assert_stream_lifecycle,
+    ToolResultFileKind, ToolResultFilePolicy, assert_capability_honesty,
+    assert_compaction_unsupported_before_io, assert_complete_drain, assert_declaration_honesty,
+    assert_foreign_replay_is_reported, assert_foreign_replay_scope_is_reported,
+    assert_invalid_replay_reconstructs, assert_media_honesty, assert_model_id_independence,
+    assert_replay_round_trip, assert_stream_lifecycle, assert_tool_result_file_policy,
 };
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
@@ -31,6 +31,40 @@ async fn bedrock_passes_lifecycle_complete_and_capability_conformance() {
     assert_declaration_honesty(&model).unwrap();
     assert_capability_honesty(&model).unwrap();
     assert_media_honesty(&model).unwrap();
+    assert_tool_result_file_policy(
+        &model,
+        ToolResultFileKind::Image,
+        ToolResultFilePolicy::Encode,
+    )
+    .unwrap();
+
+    let mut pdf_config = support::config(
+        &server.uri(),
+        "anthropic.claude-sonnet-4-6",
+        support::FixtureKind::SignedReasoning,
+        BedrockAuth::Static(support::credentials()),
+    );
+    pdf_config
+        .model
+        .capabilities
+        .modalities
+        .input
+        .insert(Modality::pdf());
+    pdf_config.model.capabilities.media.input.insert(
+        Modality::pdf(),
+        MediaInputSupport::new(
+            ["application/pdf".to_owned()],
+            MediaSourceSupport::INLINE_BYTES,
+        )
+        .unwrap(),
+    );
+    let pdf_model = BedrockModel::new(pdf_config).unwrap();
+    assert_tool_result_file_policy(
+        &pdf_model,
+        ToolResultFileKind::Pdf,
+        ToolResultFilePolicy::Encode,
+    )
+    .unwrap();
     assert_stream_lifecycle(&model, Request::new(Vec::new()))
         .await
         .unwrap();
@@ -296,7 +330,7 @@ fn bedrock_constructor_enforces_adapter_declaration_and_media_ceilings() {
         MediaInputSupport::new(["application/pdf".into()], MediaSourceSupport::INLINE_BYTES)
             .unwrap(),
     );
-    assert!(BedrockModel::new(document).is_err());
+    assert!(BedrockModel::new(document).is_ok());
 
     let mut image_output = support::config(
         endpoint,

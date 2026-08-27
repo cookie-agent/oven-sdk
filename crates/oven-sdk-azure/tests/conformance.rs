@@ -6,9 +6,11 @@ use oven_sdk::{
 };
 use oven_sdk_azure::AzureApiRoute;
 use oven_sdk_conformance::{
-    assert_capability_honesty, assert_compaction_cancellation, assert_compaction_round_trip,
+    ToolResultFileKind, ToolResultFilePolicy, assert_capability_honesty,
+    assert_compaction_cancellation, assert_compaction_round_trip,
     assert_compaction_unsupported_before_io, assert_complete_drain, assert_native_compaction,
     assert_replay_artifact, assert_replay_round_trip, assert_stream_lifecycle,
+    assert_tool_result_file_policy,
 };
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -28,6 +30,12 @@ async fn chat_and_responses_pass_applicable_core_04_conformance() {
         .chat("deployment", common::gpt4o())
         .unwrap();
     assert_capability_honesty(&chat).unwrap();
+    assert_tool_result_file_policy(
+        &chat,
+        ToolResultFileKind::Image,
+        ToolResultFilePolicy::Reject,
+    )
+    .unwrap();
     assert_stream_lifecycle(&chat, Request::new(Vec::new()))
         .await
         .unwrap();
@@ -74,6 +82,18 @@ async fn chat_and_responses_pass_applicable_core_04_conformance() {
         .responses("deployment", common::gpt5())
         .unwrap();
     assert_capability_honesty(&responses).unwrap();
+    assert_tool_result_file_policy(
+        &responses,
+        ToolResultFileKind::Image,
+        ToolResultFilePolicy::Encode,
+    )
+    .unwrap();
+    assert_tool_result_file_policy(
+        &responses,
+        ToolResultFileKind::Pdf,
+        ToolResultFilePolicy::Reject,
+    )
+    .unwrap();
     let completed = assert_complete_drain(&responses, Request::new(Vec::new()))
         .await
         .unwrap();

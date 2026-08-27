@@ -5,10 +5,11 @@ use oven_sdk::{
     ResourceId,
 };
 use oven_sdk_conformance::{
-    assert_compaction_unsupported_before_io, assert_complete_drain, assert_declaration_honesty,
-    assert_foreign_replay_is_reported, assert_foreign_replay_scope_is_reported,
-    assert_invalid_replay_reconstructs, assert_media_honesty, assert_model_id_independence,
-    assert_replay_artifact, assert_replay_round_trip,
+    ToolResultFileKind, ToolResultFilePolicy, assert_compaction_unsupported_before_io,
+    assert_complete_drain, assert_declaration_honesty, assert_foreign_replay_is_reported,
+    assert_foreign_replay_scope_is_reported, assert_invalid_replay_reconstructs,
+    assert_media_honesty, assert_model_id_independence, assert_replay_artifact,
+    assert_replay_round_trip, assert_tool_result_file_policy,
 };
 use wiremock::MockServer;
 
@@ -20,6 +21,12 @@ async fn core_04_declaration_media_lifecycle_compaction_and_replay_conformance()
     let second = common::model(&server, "opaque-b");
     assert_declaration_honesty(&first).unwrap();
     assert_media_honesty(&first).unwrap();
+    assert_tool_result_file_policy(
+        &first,
+        ToolResultFileKind::Image,
+        ToolResultFilePolicy::Reject,
+    )
+    .unwrap();
     assert_compaction_unsupported_before_io(
         &first,
         CompactionRequest::new(Request::new(Vec::new())),

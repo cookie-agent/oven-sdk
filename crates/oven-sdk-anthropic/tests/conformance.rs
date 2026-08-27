@@ -22,12 +22,13 @@ use oven_sdk_anthropic::{
     AnthropicRequestOptions, AnthropicThinking,
 };
 use oven_sdk_conformance::{
-    CapabilityProbe, assert_capability_honesty, assert_capability_honesty_with,
-    assert_compaction_unsupported_before_io, assert_complete_drain, assert_declaration_honesty,
-    assert_error_taxonomy, assert_foreign_replay_is_reported, assert_history_round_trip,
-    assert_invalid_replay_reconstructs, assert_malformed_payload_returns_error,
-    assert_replay_artifact, assert_replay_round_trip, assert_stream_contract,
-    assert_stream_lifecycle, assert_validate_for_consistency,
+    CapabilityProbe, ToolResultFileKind, ToolResultFilePolicy, assert_capability_honesty,
+    assert_capability_honesty_with, assert_compaction_unsupported_before_io, assert_complete_drain,
+    assert_declaration_honesty, assert_error_taxonomy, assert_foreign_replay_is_reported,
+    assert_history_round_trip, assert_invalid_replay_reconstructs,
+    assert_malformed_payload_returns_error, assert_replay_artifact, assert_replay_round_trip,
+    assert_stream_contract, assert_stream_lifecycle, assert_tool_result_file_policy,
+    assert_validate_for_consistency,
     sse::{ChunkPattern, chunk_bytes},
 };
 use tokio::{
@@ -320,6 +321,9 @@ async fn full_anthropic_conformance_suite() {
         .unwrap();
     assert_capability_honesty(&model).unwrap();
     assert_declaration_honesty(&model).unwrap();
+    for kind in [ToolResultFileKind::Image, ToolResultFileKind::Pdf] {
+        assert_tool_result_file_policy(&model, kind, ToolResultFilePolicy::Encode).unwrap();
+    }
     let cache = Request::new(Vec::new()).with_anthropic_options(AnthropicRequestOptions {
         cache_control: Some(AnthropicCacheControl {
             ttl: AnthropicCacheTtl::FiveMinutes,
@@ -410,6 +414,12 @@ async fn compatible_minimax_and_anthropic_aws_baseline_conformance() {
         .unwrap();
     assert_capability_honesty(&minimax).unwrap();
     assert_declaration_honesty(&minimax).unwrap();
+    assert_tool_result_file_policy(
+        &minimax,
+        ToolResultFileKind::Image,
+        ToolResultFilePolicy::Reject,
+    )
+    .unwrap();
 
     let compatible = try_compatible_model(
         &server.uri(),
@@ -426,6 +436,9 @@ async fn compatible_minimax_and_anthropic_aws_baseline_conformance() {
         .unwrap();
     assert_capability_honesty(&compatible).unwrap();
     assert_declaration_honesty(&compatible).unwrap();
+    for kind in [ToolResultFileKind::Image, ToolResultFileKind::Pdf] {
+        assert_tool_result_file_policy(&compatible, kind, ToolResultFilePolicy::Encode).unwrap();
+    }
 
     let aws = AnthropicAws::builder("us-west-2", "wrkspc_test")
         .bearer_key("test")
@@ -438,6 +451,9 @@ async fn compatible_minimax_and_anthropic_aws_baseline_conformance() {
         .unwrap();
     assert_capability_honesty(&aws).unwrap();
     assert_declaration_honesty(&aws).unwrap();
+    for kind in [ToolResultFileKind::Image, ToolResultFileKind::Pdf] {
+        assert_tool_result_file_policy(&aws, kind, ToolResultFilePolicy::Encode).unwrap();
+    }
 }
 
 #[tokio::test]
