@@ -2,10 +2,10 @@ pub mod common;
 
 use futures_util::StreamExt;
 use oven_sdk::{
-    AbortSignal, AssistantMessage, AssistantPart, CompletedTurn, FilePart, FileSource, Finish,
-    FinishReason, HistoryTurn, InferenceOptions, InputPart, JsonSchema, LanguageModel, Request,
-    ResponseFormat, SystemMessage, SystemPart, TextPart, ToolCallPart, ToolChoice, ToolContent,
-    ToolDefinition, ToolMessage, ToolResultPart, UserMessage,
+    AbortSignal, AssistantMessage, AssistantPart, CompletedTurn, ContentValue, FilePart,
+    FileSource, Finish, FinishReason, HistoryTurn, InferenceOptions, InputPart, JsonSchema,
+    LanguageModel, Request, ResponseFormat, SystemMessage, SystemPart, TextPart, ToolCallPart,
+    ToolChoice, ToolContent, ToolDefinition, ToolMessage, ToolResultPart, UserMessage,
 };
 use oven_sdk_openai::{
     OpenAiPromptCacheBreakpointExt, OpenAiPromptCacheMode, OpenAiPromptCacheOptions,
@@ -13,6 +13,75 @@ use oven_sdk_openai::{
     OpenAiResponsesRequestExt,
 };
 use wiremock::MockServer;
+
+fn tool_result_request(file: FilePart) -> Request {
+    let assistant = CompletedTurn::new(
+        AssistantMessage::new(vec![AssistantPart::ToolCall(ToolCallPart::new(
+            "call-1",
+            "inspect",
+            serde_json::json!({}),
+        ))]),
+        Finish::new(Default::default(), FinishReason::ToolCalls),
+    );
+    let result = ToolResultPart::new(
+        "call-1",
+        ToolContent::Mixed(vec![
+            ContentValue::Text("caption".into()),
+            ContentValue::File(file),
+        ]),
+    );
+    Request::new(vec![
+        HistoryTurn::assistant(assistant),
+        HistoryTurn::tool(ToolMessage::new(vec![result])),
+    ])
+}
+
+#[tokio::test]
+async fn responses_tool_result_images_encode_as_input_items_and_other_files_reject() {
+    let server = MockServer::start().await;
+    common::mount(&server, "/responses", common::responses_document("ok")).await;
+    let model = common::official_responses(&server, "gpt-5-mini");
+    model
+        .complete(
+            tool_result_request(FilePart::image(
+                "image/png",
+                FileSource::Bytes(bytes::Bytes::from_static(b"png")),
+            )),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let output = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .unwrap();
+    assert_eq!(output["output"][0]["type"], "input_text");
+    assert_eq!(output["output"][1]["type"], "input_image");
+    assert!(
+        output["output"][1]["image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,")
+    );
+    assert!(!String::from_utf8_lossy(&requests[0].body).contains("[112,110,103]"));
+
+    let error = model
+        .validate_request(&tool_result_request(FilePart::document(
+            "application/pdf",
+            FileSource::Bytes(bytes::Bytes::from_static(b"pdf")),
+        )))
+        .unwrap_err();
+    assert_eq!(error.kind(), oven_sdk::ModelErrorKind::Unsupported);
+    assert_eq!(
+        error.diagnostics.stage,
+        oven_sdk::ErrorStage::RequestValidation
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
 
 #[tokio::test]
 async fn responses_always_sends_store_false_and_encrypted_include() {

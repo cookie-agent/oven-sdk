@@ -2,9 +2,10 @@ pub mod common;
 
 use futures_util::StreamExt;
 use oven_sdk::{
-    AbortSignal, AssistantMessage, AssistantPart, CompletedTurn, FilePart, FileSource, Finish,
-    FinishReason, HistoryTurn, InferenceOptions, InputPart, JsonSchema, LanguageModel, Request,
-    ResponseFormat, SystemMessage, SystemPart, TextPart, ToolChoice, ToolDefinition, UserMessage,
+    AbortSignal, AssistantMessage, AssistantPart, CompletedTurn, ContentValue, FilePart,
+    FileSource, Finish, FinishReason, HistoryTurn, InferenceOptions, InputPart, JsonSchema,
+    LanguageModel, Request, ResponseFormat, SystemMessage, SystemPart, TextPart, ToolCallPart,
+    ToolChoice, ToolContent, ToolDefinition, ToolMessage, ToolResultPart, UserMessage,
 };
 use oven_sdk_openai::{
     OpenAiChatOptions, OpenAiChatRequestExt, OpenAiPromptCacheBreakpointExt, OpenAiPromptCacheMode,
@@ -12,6 +13,43 @@ use oven_sdk_openai::{
     OpenAiResponsesOptions, OpenAiResponsesRequestExt,
 };
 use wiremock::MockServer;
+
+#[tokio::test]
+async fn chat_rejects_tool_result_files_before_dispatch() {
+    let server = MockServer::start().await;
+    let model = common::official_chat(&server, "gpt-4o-mini");
+    let assistant = CompletedTurn::new(
+        AssistantMessage::new(vec![AssistantPart::ToolCall(ToolCallPart::new(
+            "call-1",
+            "inspect",
+            serde_json::json!({}),
+        ))]),
+        Finish::new(Default::default(), FinishReason::ToolCalls),
+    );
+    let result = ToolResultPart::new(
+        "call-1",
+        ToolContent::Mixed(vec![ContentValue::File(FilePart::image(
+            "image/png",
+            FileSource::Bytes(bytes::Bytes::from_static(b"png")),
+        ))]),
+    );
+    let request = Request::new(vec![
+        HistoryTurn::assistant(assistant),
+        HistoryTurn::tool(ToolMessage::new(vec![result])),
+    ]);
+
+    let error = model.validate_request(&request).unwrap_err();
+    assert_eq!(error.kind(), oven_sdk::ModelErrorKind::Unsupported);
+    assert_eq!(
+        error.diagnostics.stage,
+        oven_sdk::ErrorStage::RequestValidation
+    );
+    assert_eq!(
+        error.message,
+        "files in tool results are not deliverable via openai-chat"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
 
 #[tokio::test]
 async fn official_chat_encodes_headers_stream_usage_and_single_post() {

@@ -76,17 +76,28 @@ pub(crate) fn validate_request(
                     }
                 }
             }
-            HistoryTurn::Assistant(turn)
+            HistoryTurn::Tool(message) => {
+                for result in &message.results {
+                    validate_tool_result_files(result)?;
+                }
+            }
+            HistoryTurn::Assistant(turn) => {
+                for part in &turn.message.content {
+                    if let AssistantPart::ToolResult(result) = part {
+                        validate_tool_result_files(result)?;
+                    }
+                }
                 if turn
                     .message
                     .content
                     .iter()
-                    .any(|part| matches!(part, AssistantPart::File(_))) =>
-            {
-                return Err(ModelError::unsupported(
-                    "Responses assistant-history media is not supported",
-                )
-                .with_stage(ErrorStage::RequestEncoding));
+                    .any(|part| matches!(part, AssistantPart::File(_)))
+                {
+                    return Err(ModelError::unsupported(
+                        "Responses assistant-history media is not supported",
+                    )
+                    .with_stage(ErrorStage::RequestEncoding));
+                }
             }
             _ => {}
         }
@@ -282,7 +293,13 @@ fn encode_input(
                 }
             }
             HistoryTurn::Tool(message) => {
-                input.extend(message.results.iter().map(function_output));
+                input.extend(
+                    message
+                        .results
+                        .iter()
+                        .map(function_output)
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
             }
             HistoryTurn::Assistant(turn) => {
                 let mut replayed = None;
@@ -542,14 +559,47 @@ fn attach_prompt_cache_breakpoint(
     Ok(block)
 }
 
-fn function_output(result: &ToolResultPart) -> JsonValue {
+fn function_output(result: &ToolResultPart) -> Result<JsonValue, ModelError> {
     let output = match &result.content {
-        ToolContent::Text(value) => value.clone(),
-        ToolContent::Json(value) => value.to_string(),
-        ToolContent::Mixed(value) => serde_json::to_string(value).unwrap_or_default(),
-        ToolContent::Denied { reason } => reason.clone().unwrap_or_default(),
+        ToolContent::Text(value) => JsonValue::String(value.clone()),
+        ToolContent::Json(value) => JsonValue::String(value.to_string()),
+        ToolContent::Mixed(values) => JsonValue::Array(
+            values
+                .iter()
+                .map(|value| match value {
+                    ContentValue::Text(value) => {
+                        Ok(serde_json::json!({"type":"input_text","text":value}))
+                    }
+                    ContentValue::Json(value) => {
+                        Ok(serde_json::json!({"type":"input_text","text":value.to_string()}))
+                    }
+                    ContentValue::File(file) if file.media_type.starts_with("image/") => {
+                        input_file(file)
+                    }
+                    ContentValue::File(_) => Err(ModelError::unsupported(
+                        "non-image files in tool results are not deliverable via openai-responses",
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        ToolContent::Denied { reason } => JsonValue::String(reason.clone().unwrap_or_default()),
     };
-    serde_json::json!({"type":"function_call_output","call_id":result.tool_call_id,"output":output})
+    Ok(
+        serde_json::json!({"type":"function_call_output","call_id":result.tool_call_id,"output":output}),
+    )
+}
+
+fn validate_tool_result_files(result: &ToolResultPart) -> Result<(), ModelError> {
+    if let ToolContent::Mixed(values) = &result.content
+        && values.iter().any(
+            |value| matches!(value, ContentValue::File(file) if !file.media_type.starts_with("image/")),
+        )
+    {
+        return Err(ModelError::unsupported(
+            "non-image files in tool results are not deliverable via openai-responses",
+        ));
+    }
+    Ok(())
 }
 
 fn normalized_assistant(
@@ -581,7 +631,7 @@ fn normalized_assistant(
                 }
                 output.push(item);
             }
-            AssistantPart::ToolResult(result) => output.push(function_output(result)),
+            AssistantPart::ToolResult(result) => output.push(function_output(result)?),
             AssistantPart::Reasoning(_) => warnings.push(
                 "Responses normalized fallback omitted reasoning without encrypted replay state"
                     .into(),
