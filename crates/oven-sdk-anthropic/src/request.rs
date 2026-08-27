@@ -1307,19 +1307,24 @@ fn tool_result_block(
     let content = match &result.content {
         ToolContent::Text(v) => JsonValue::String(v.clone()),
         ToolContent::Json(v) => JsonValue::String(v.to_string()),
-        ToolContent::Mixed(v) if protocol.is_first_party() => JsonValue::Array(
-            v.iter()
-                .map(|value| match value {
-                    ContentValue::Text(value) => {
-                        Ok(serde_json::json!({"type":"text","text":value}))
-                    }
-                    ContentValue::Json(value) => {
-                        Ok(serde_json::json!({"type":"text","text":value.to_string()}))
-                    }
-                    ContentValue::File(file) => file_block(file, protocol, None),
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
+        ToolContent::Mixed(v)
+            if protocol.is_first_party()
+                && v.iter().any(|value| matches!(value, ContentValue::File(_))) =>
+        {
+            JsonValue::Array(
+                v.iter()
+                    .map(|value| match value {
+                        ContentValue::Text(value) => {
+                            Ok(serde_json::json!({"type":"text","text":value}))
+                        }
+                        ContentValue::Json(value) => {
+                            Ok(serde_json::json!({"type":"text","text":value.to_string()}))
+                        }
+                        ContentValue::File(file) => file_block(file, protocol, None),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
         ToolContent::Mixed(v) => JsonValue::String(serde_json::to_string(v).unwrap_or_default()),
         ToolContent::Denied { reason } => JsonValue::String(reason.clone().unwrap_or_default()),
     };

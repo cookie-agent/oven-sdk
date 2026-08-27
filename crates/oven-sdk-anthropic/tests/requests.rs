@@ -74,19 +74,69 @@ async fn tool_result_files_encode_as_blocks_and_keep_cache_marker() {
     let requests = server.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
     let tool_result = &body["messages"][1]["content"][0];
-    assert_eq!(tool_result["content"][0]["type"], "text");
-    assert_eq!(tool_result["content"][0]["text"], "caption");
-    assert_eq!(tool_result["content"][1]["type"], "image");
     assert_eq!(
-        tool_result["content"][1]["source"]["media_type"],
-        "image/png"
-    );
-    assert_eq!(tool_result["content"][2]["type"], "document");
-    assert_eq!(
-        tool_result["content"][2]["source"]["media_type"],
-        "application/pdf"
+        tool_result["content"],
+        serde_json::json!([
+            {"type":"text","text":"caption"},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5n"}},
+            {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"cGRm"}}
+        ])
     );
     assert_eq!(tool_result["cache_control"]["ttl"], "5m");
+}
+
+#[tokio::test]
+async fn attachment_free_mixed_tool_result_keeps_legacy_wire_string() {
+    const LEGACY: &str =
+        r#"[{"type":"text","value":"caption"},{"type":"json","value":{"answer":42}}]"#;
+
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(response()))
+        .mount(&server)
+        .await;
+    let model = Anthropic::builder()
+        .base_url(server.uri())
+        .build()
+        .unwrap()
+        .model("claude-sonnet-4-5");
+    let assistant = CompletedTurn::new(
+        AssistantMessage::new(vec![AssistantPart::ToolCall(ToolCallPart::new(
+            "call-legacy",
+            "inspect",
+            serde_json::json!({}),
+        ))]),
+        Finish::new(Default::default(), FinishReason::ToolCalls),
+    );
+    let result = ToolResultPart::new(
+        "call-legacy",
+        ToolContent::Mixed(vec![
+            ContentValue::Text("caption".into()),
+            ContentValue::Json(serde_json::json!({"answer":42})),
+        ]),
+    );
+
+    model
+        .complete(
+            Request::new(vec![
+                HistoryTurn::assistant(assistant),
+                HistoryTurn::tool(ToolMessage::new(vec![result])),
+            ]),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        body["messages"][1]["content"][0],
+        serde_json::json!({
+            "type":"tool_result",
+            "tool_use_id":"call-legacy",
+            "content":LEGACY,
+            "is_error":false
+        })
+    );
 }
 
 #[tokio::test]

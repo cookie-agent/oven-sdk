@@ -52,6 +52,52 @@ async fn chat_rejects_tool_result_files_before_dispatch() {
 }
 
 #[tokio::test]
+async fn chat_attachment_free_mixed_tool_result_keeps_legacy_wire_string() {
+    const LEGACY: &str =
+        r#"[{"type":"text","value":"caption"},{"type":"json","value":{"answer":42}}]"#;
+
+    let server = MockServer::start().await;
+    common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+    let model = common::official_chat(&server, "gpt-4o-mini");
+    let assistant = CompletedTurn::new(
+        AssistantMessage::new(vec![AssistantPart::ToolCall(ToolCallPart::new(
+            "call-legacy",
+            "inspect",
+            serde_json::json!({}),
+        ))]),
+        Finish::new(Default::default(), FinishReason::ToolCalls),
+    );
+    let result = ToolResultPart::new(
+        "call-legacy",
+        ToolContent::Mixed(vec![
+            ContentValue::Text("caption".into()),
+            ContentValue::Json(serde_json::json!({"answer":42})),
+        ]),
+    );
+
+    model
+        .complete(
+            Request::new(vec![
+                HistoryTurn::assistant(assistant),
+                HistoryTurn::tool(ToolMessage::new(vec![result])),
+            ]),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        body["messages"][1],
+        serde_json::json!({
+            "role":"tool",
+            "tool_call_id":"call-legacy",
+            "content":LEGACY
+        })
+    );
+}
+
+#[tokio::test]
 async fn official_chat_encodes_headers_stream_usage_and_single_post() {
     let server = MockServer::start().await;
     common::mount(&server, "/chat/completions", common::chat_document("ok")).await;

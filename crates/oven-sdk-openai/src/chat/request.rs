@@ -562,17 +562,16 @@ fn tool_result_message(result: &ToolResultPart) -> Result<JsonValue, ModelError>
     let content = match &result.content {
         ToolContent::Text(value) => value.clone(),
         ToolContent::Json(value) => value.to_string(),
-        ToolContent::Mixed(values) => values
-            .iter()
-            .map(|value| match value {
-                ContentValue::Text(value) => Ok(value.clone()),
-                ContentValue::Json(value) => Ok(value.to_string()),
-                ContentValue::File(_) => Err(ModelError::unsupported(
-                    "files in tool results are not deliverable via openai-chat",
-                )),
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .join("\n"),
+        ToolContent::Mixed(values)
+            if values
+                .iter()
+                .any(|value| matches!(value, ContentValue::File(_))) =>
+        {
+            return Err(ModelError::unsupported(
+                "files in tool results are not deliverable via openai-chat",
+            ));
+        }
+        ToolContent::Mixed(values) => serde_json::to_string(values).unwrap_or_default(),
         ToolContent::Denied { reason } => reason.clone().unwrap_or_default(),
     };
     Ok(serde_json::json!({"role":"tool","tool_call_id":result.tool_call_id,"content":content}))

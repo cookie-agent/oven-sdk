@@ -15,6 +15,13 @@ use oven_sdk_openai::{
 use wiremock::MockServer;
 
 fn tool_result_request(file: FilePart) -> Request {
+    tool_result_request_with_content(ToolContent::Mixed(vec![
+        ContentValue::Text("caption".into()),
+        ContentValue::File(file),
+    ]))
+}
+
+fn tool_result_request_with_content(content: ToolContent) -> Request {
     let assistant = CompletedTurn::new(
         AssistantMessage::new(vec![AssistantPart::ToolCall(ToolCallPart::new(
             "call-1",
@@ -23,13 +30,7 @@ fn tool_result_request(file: FilePart) -> Request {
         ))]),
         Finish::new(Default::default(), FinishReason::ToolCalls),
     );
-    let result = ToolResultPart::new(
-        "call-1",
-        ToolContent::Mixed(vec![
-            ContentValue::Text("caption".into()),
-            ContentValue::File(file),
-        ]),
-    );
+    let result = ToolResultPart::new("call-1", content);
     Request::new(vec![
         HistoryTurn::assistant(assistant),
         HistoryTurn::tool(ToolMessage::new(vec![result])),
@@ -59,13 +60,12 @@ async fn responses_tool_result_images_encode_as_input_items_and_other_files_reje
         .iter()
         .find(|item| item["type"] == "function_call_output")
         .unwrap();
-    assert_eq!(output["output"][0]["type"], "input_text");
-    assert_eq!(output["output"][1]["type"], "input_image");
-    assert!(
-        output["output"][1]["image_url"]
-            .as_str()
-            .unwrap()
-            .starts_with("data:image/png;base64,")
+    assert_eq!(
+        output["output"],
+        serde_json::json!([
+            {"type":"input_text","text":"caption"},
+            {"type":"input_image","image_url":"data:image/png;base64,cG5n"}
+        ])
     );
     assert!(!String::from_utf8_lossy(&requests[0].body).contains("[112,110,103]"));
 
@@ -81,6 +81,42 @@ async fn responses_tool_result_images_encode_as_input_items_and_other_files_reje
         oven_sdk::ErrorStage::RequestValidation
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn responses_attachment_free_mixed_tool_result_keeps_legacy_wire_string() {
+    const LEGACY: &str =
+        r#"[{"type":"text","value":"caption"},{"type":"json","value":{"answer":42}}]"#;
+
+    let server = MockServer::start().await;
+    common::mount(&server, "/responses", common::responses_document("ok")).await;
+    let model = common::official_responses(&server, "gpt-5-mini");
+    model
+        .complete(
+            tool_result_request_with_content(ToolContent::Mixed(vec![
+                ContentValue::Text("caption".into()),
+                ContentValue::Json(serde_json::json!({"answer":42})),
+            ])),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let output = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .unwrap();
+    assert_eq!(
+        output,
+        &serde_json::json!({
+            "type":"function_call_output",
+            "call_id":"call-1",
+            "output":LEGACY
+        })
+    );
 }
 
 #[tokio::test]

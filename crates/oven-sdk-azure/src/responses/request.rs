@@ -495,7 +495,12 @@ fn function_output(result: &ToolResultPart) -> Result<JsonValue, ModelError> {
     let output = match &result.content {
         ToolContent::Text(value) => JsonValue::String(value.clone()),
         ToolContent::Json(value) => JsonValue::String(value.to_string()),
-        ToolContent::Mixed(values) => JsonValue::Array(
+        ToolContent::Mixed(values)
+            if values
+                .iter()
+                .any(|value| matches!(value, ContentValue::File(_))) =>
+        {
+            JsonValue::Array(
             values
                 .iter()
                 .map(|value| match value {
@@ -513,7 +518,11 @@ fn function_output(result: &ToolResultPart) -> Result<JsonValue, ModelError> {
                     )),
                 })
                 .collect::<Result<Vec<_>, _>>()?,
-        ),
+            )
+        }
+        ToolContent::Mixed(values) => {
+            JsonValue::String(serde_json::to_string(values).unwrap_or_default())
+        }
         ToolContent::Denied { reason } => JsonValue::String(reason.clone().unwrap_or_default()),
     };
     Ok(
