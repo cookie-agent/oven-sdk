@@ -4,10 +4,10 @@ use std::collections::BTreeSet;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use oven_sdk::{
-    AssistantPart, Capability, ErrorStage, FileSource, HistoryTurn, InputPart, JsonValue,
-    LanguageModelDescriptor, ModelCapabilities, ModelError, NativeContextScope, ReplayDecision,
-    ReplayDisposition, ReplayOutcome, ReplayPolicy, Request, ResponseFormat, ToolChoice,
-    ToolContent, ToolResultPart,
+    AssistantPart, Capability, ContentValue, ErrorStage, FileSource, HistoryTurn, InputPart,
+    JsonValue, LanguageModelDescriptor, ModelCapabilities, ModelError, NativeContextScope,
+    ReplayDecision, ReplayDisposition, ReplayOutcome, ReplayPolicy, Request, ResponseFormat,
+    ToolChoice, ToolContent, ToolResultPart,
 };
 
 use crate::{
@@ -137,6 +137,17 @@ pub(crate) fn validate_request(
                     "Messages media input is supported only in user turns",
                 )
                 .with_stage(ErrorStage::RequestEncoding));
+            }
+            HistoryTurn::Tool(message) if protocol.is_first_party() => {
+                for result in &message.results {
+                    if let ToolContent::Mixed(values) = &result.content {
+                        for value in values {
+                            if let ContentValue::File(file) = value {
+                                validate_file(file, protocol, None)?;
+                            }
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -934,9 +945,13 @@ pub(crate) fn encode_request(
                     .iter()
                     .enumerate()
                     .map(|(part_index, result)| {
-                        tool_result_block(result, cache_plan.history[index].marker_for(part_index))
+                        tool_result_block(
+                            result,
+                            cache_plan.history[index].marker_for(part_index),
+                            protocol,
+                        )
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<Result<Vec<_>, _>>()?;
                 if !content.is_empty() {
                     if previous_was_tool {
                         messages
@@ -1278,17 +1293,34 @@ fn minimax_media_options(
         })
         .transpose()
 }
-fn tool_result_block(result: &ToolResultPart, cache: Option<AnthropicCacheControl>) -> JsonValue {
+fn tool_result_block(
+    result: &ToolResultPart,
+    cache: Option<AnthropicCacheControl>,
+    protocol: Protocol,
+) -> Result<JsonValue, ModelError> {
     let content = match &result.content {
         ToolContent::Text(v) => JsonValue::String(v.clone()),
         ToolContent::Json(v) => JsonValue::String(v.to_string()),
+        ToolContent::Mixed(v) if protocol.is_first_party() => JsonValue::Array(
+            v.iter()
+                .map(|value| match value {
+                    ContentValue::Text(value) => {
+                        Ok(serde_json::json!({"type":"text","text":value}))
+                    }
+                    ContentValue::Json(value) => {
+                        Ok(serde_json::json!({"type":"text","text":value.to_string()}))
+                    }
+                    ContentValue::File(file) => file_block(file, protocol, None),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
         ToolContent::Mixed(v) => JsonValue::String(serde_json::to_string(v).unwrap_or_default()),
         ToolContent::Denied { reason } => JsonValue::String(reason.clone().unwrap_or_default()),
     };
-    attach_cache(
+    Ok(attach_cache(
         serde_json::json!({"type":"tool_result","tool_use_id":result.tool_call_id,"content":content,"is_error":result.is_error}),
         cache,
-    )
+    ))
 }
 pub(crate) fn assistant_block(part: &AssistantPart) -> Option<JsonValue> {
     match part {

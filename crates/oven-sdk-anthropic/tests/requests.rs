@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use oven_sdk::{
-    AbortSignal, AssistantMessage, AssistantPart, Capability, CompletedTurn, FilePart, FileSource,
-    Finish, FinishReason, HistoryTurn, InputPart, JsonSchema, LanguageModel, Request,
-    ResponseFormat, SystemMessage, SystemPart, TextPart, ToolCallPart, ToolChoice, ToolContent,
-    ToolDefinition, ToolMessage, ToolResultPart, UserMessage,
+    AbortSignal, AssistantMessage, AssistantPart, Capability, CompletedTurn, ContentValue,
+    FilePart, FileSource, Finish, FinishReason, HistoryTurn, InputPart, JsonSchema, LanguageModel,
+    Request, ResponseFormat, SystemMessage, SystemPart, TextPart, ToolCallPart, ToolChoice,
+    ToolContent, ToolDefinition, ToolMessage, ToolResultPart, UserMessage,
 };
 use oven_sdk_anthropic::{
     AnthropicAwsCredentials, AnthropicCacheControl, AnthropicCacheTtl, AnthropicRequestExt,
@@ -16,6 +16,77 @@ use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 
 fn response() -> &'static str {
     "event: message_start\ndata: {\"message\":{}}\n\nevent: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\nevent: message_stop\ndata: {}\n\n"
+}
+
+#[tokio::test]
+async fn tool_result_files_encode_as_blocks_and_keep_cache_marker() {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(response()))
+        .mount(&server)
+        .await;
+    let model = Anthropic::builder()
+        .base_url(server.uri())
+        .build()
+        .unwrap()
+        .model("claude-sonnet-4-5");
+    let assistant = CompletedTurn::new(
+        AssistantMessage::new(vec![AssistantPart::ToolCall(ToolCallPart::new(
+            "call-1",
+            "inspect",
+            serde_json::json!({}),
+        ))]),
+        Finish::new(Default::default(), FinishReason::ToolCalls),
+    );
+    let mut result = ToolResultPart::new(
+        "call-1",
+        ToolContent::Mixed(vec![
+            ContentValue::Text("caption".into()),
+            ContentValue::File(FilePart::image(
+                "image/png",
+                FileSource::Bytes(bytes::Bytes::from_static(b"png")),
+            )),
+            ContentValue::File(FilePart::document(
+                "application/pdf",
+                FileSource::Bytes(bytes::Bytes::from_static(b"pdf")),
+            )),
+        ]),
+    );
+    result.metadata = Some(BTreeMap::from([(
+        "anthropic".into(),
+        serde_json::to_value(AnthropicRequestOptions {
+            cache_control: Some(AnthropicCacheControl {
+                ttl: AnthropicCacheTtl::FiveMinutes,
+            }),
+            ..Default::default()
+        })
+        .unwrap(),
+    )]));
+    let request = Request::new(vec![
+        HistoryTurn::assistant(assistant),
+        HistoryTurn::tool(ToolMessage::new(vec![result])),
+    ]);
+
+    model
+        .complete(request, AbortSignal::default())
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let tool_result = &body["messages"][1]["content"][0];
+    assert_eq!(tool_result["content"][0]["type"], "text");
+    assert_eq!(tool_result["content"][0]["text"], "caption");
+    assert_eq!(tool_result["content"][1]["type"], "image");
+    assert_eq!(
+        tool_result["content"][1]["source"]["media_type"],
+        "image/png"
+    );
+    assert_eq!(tool_result["content"][2]["type"], "document");
+    assert_eq!(
+        tool_result["content"][2]["source"]["media_type"],
+        "application/pdf"
+    );
+    assert_eq!(tool_result["cache_control"]["ttl"], "5m");
 }
 
 #[tokio::test]

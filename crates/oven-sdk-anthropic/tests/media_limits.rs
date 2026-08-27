@@ -1,6 +1,8 @@
 use oven_sdk::{
-    AbortSignal, FilePart, FileSource, HistoryTurn, InputPart, LanguageModel, ModelErrorKind,
-    ProviderId, Request, TextPart, UserMessage,
+    AbortSignal, AssistantMessage, AssistantPart, CompletedTurn, ContentValue, FilePart,
+    FileSource, Finish, FinishReason, HistoryTurn, InputPart, LanguageModel, ModelErrorKind,
+    ProviderId, Request, TextPart, ToolCallPart, ToolContent, ToolMessage, ToolResultPart,
+    UserMessage,
 };
 use oven_sdk_anthropic::{MiniMaxMediaExt, MiniMaxMediaOptions};
 use wiremock::MockServer;
@@ -9,6 +11,22 @@ fn request_with(file: FilePart) -> Request {
     Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
         InputPart::File(file),
     ]))])
+}
+
+fn tool_result_request_with(file: FilePart) -> Request {
+    let assistant = CompletedTurn::new(
+        AssistantMessage::new(vec![AssistantPart::ToolCall(ToolCallPart::new(
+            "call-1",
+            "inspect",
+            serde_json::json!({}),
+        ))]),
+        Finish::new(Default::default(), FinishReason::ToolCalls),
+    );
+    let result = ToolResultPart::new("call-1", ToolContent::Mixed(vec![ContentValue::File(file)]));
+    Request::new(vec![
+        HistoryTurn::assistant(assistant),
+        HistoryTurn::tool(ToolMessage::new(vec![result])),
+    ])
 }
 
 #[test]
@@ -45,6 +63,13 @@ fn anthropic_media_mime_source_capability_and_image_boundaries_are_exact() {
             )))
             .is_err()
     );
+    let error = known
+        .validate_request(&tool_result_request_with(FilePart::image(
+            "image/png",
+            FileSource::Bytes(vec![0; encoded_limit_raw_bytes + 1].into()),
+        )))
+        .unwrap_err();
+    assert_eq!(error.kind(), ModelErrorKind::InvalidRequest);
     for file in [
         FilePart::image("image/svg+xml", FileSource::Bytes(Vec::new().into())),
         FilePart::image("image/png", FileSource::Text("not binary".into())),
