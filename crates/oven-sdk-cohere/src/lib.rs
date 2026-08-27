@@ -500,7 +500,7 @@ fn validate_request(
                                 if values.iter().any(|value| matches!(value, ContentValue::File(_)))
                         ) => {}
                     AssistantPart::File(_) | AssistantPart::ToolResult(_) => {
-                        return Err(ModelError::invalid_request(
+                        return Err(ModelError::unsupported(
                             "Cohere does not support files in assistant or tool-result history",
                         ));
                     }
@@ -527,7 +527,7 @@ fn validate_request(
                 )
             })
         {
-            return Err(ModelError::invalid_request(
+            return Err(ModelError::unsupported(
                 "Cohere does not support files in assistant or tool-result history",
             ));
         }

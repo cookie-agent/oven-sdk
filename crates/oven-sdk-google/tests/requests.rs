@@ -1,10 +1,10 @@
 use oven_sdk::{
     AbortSignal, AdapterId, AssistantMessage, AssistantPart, CompactionCapability, CompletedTurn,
-    CustomPart, FilePart, FileSource, Finish, FinishReason, HeaderOverrides, HeaderProvider,
-    HistoryTurn, InferenceOptions, InputPart, JsonSchema, LanguageModel, ModelError,
-    NativeReplayArtifact, ReplayDisposition, Request, ResponseFormat, SystemMessage, SystemPart,
-    TextPart, ToolCallPart, ToolChoice, ToolContent, ToolDefinition, ToolMessage, ToolResultPart,
-    UserMessage,
+    ContentValue, CustomPart, FilePart, FileSource, Finish, FinishReason, HeaderOverrides,
+    HeaderProvider, HistoryTurn, InferenceOptions, InputPart, JsonSchema, LanguageModel,
+    ModelError, NativeReplayArtifact, ReplayDisposition, Request, ResponseFormat, SystemMessage,
+    SystemPart, TextPart, ToolCallPart, ToolChoice, ToolContent, ToolDefinition, ToolMessage,
+    ToolResultPart, UserMessage,
 };
 use oven_sdk_google::{
     GoogleModel, GoogleProviderTool, GoogleRequestExt, GoogleRequestOptions, GoogleThinkingConfig,
@@ -22,6 +22,39 @@ mod common;
 use common::{
     budget_model, config_with, default_tools, full_capabilities, level_thinking, model, model_with,
 };
+
+#[tokio::test]
+async fn tool_result_files_reject_during_request_validation() {
+    let server = MockServer::start().await;
+    let model = common::model(format!("{}/v1beta", server.uri()), "gemini-2.5-flash");
+    let assistant = CompletedTurn::new(
+        AssistantMessage::new(vec![AssistantPart::ToolCall(ToolCallPart::new(
+            "call-1",
+            "inspect",
+            json!({}),
+        ))]),
+        Finish::new(Default::default(), FinishReason::ToolCalls),
+    );
+    let result = ToolResultPart::new(
+        "call-1",
+        ToolContent::Mixed(vec![ContentValue::File(FilePart::image(
+            "image/png",
+            FileSource::Bytes(bytes::Bytes::from_static(b"png")),
+        ))]),
+    );
+    let request = Request::new(vec![
+        HistoryTurn::assistant(assistant),
+        HistoryTurn::tool(ToolMessage::new(vec![result])),
+    ]);
+
+    let error = model.validate_request(&request).unwrap_err();
+    assert_eq!(error.kind(), oven_sdk::ModelErrorKind::Unsupported);
+    assert_eq!(
+        error.diagnostics.stage,
+        oven_sdk::ErrorStage::RequestValidation
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
 
 fn terminal_sse(text: &str) -> String {
     format!(

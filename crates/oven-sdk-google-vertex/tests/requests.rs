@@ -1,10 +1,11 @@
 mod support;
 
 use oven_sdk::{
-    AbortSignal, AdapterId, AssistantPart, Capability, CompactionCapability, FilePart, FileSource,
-    HeaderConfig, HeaderOverrides, HeaderProvider, HistoryTurn, InputPart, JsonSchema,
-    LanguageModel, ModelConfig, ModelError, NativeContextScope, NativeReplayArtifact,
-    ReplayDisposition, Request, ResourceId, SecretString, ToolContent, ToolDefinition, ToolMessage,
+    AbortSignal, AdapterId, AssistantMessage, AssistantPart, Capability, CompactionCapability,
+    CompletedTurn, ContentValue, FilePart, FileSource, Finish, FinishReason, HeaderConfig,
+    HeaderOverrides, HeaderProvider, HistoryTurn, InputPart, JsonSchema, LanguageModel,
+    ModelConfig, ModelError, NativeContextScope, NativeReplayArtifact, ReplayDisposition, Request,
+    ResourceId, SecretString, ToolCallPart, ToolContent, ToolDefinition, ToolMessage,
     ToolResultPart, UserMessage,
 };
 use oven_sdk_google_vertex::{
@@ -25,6 +26,39 @@ fn publisher_resource() -> GoogleVertexResource {
         publisher: "google".into(),
         model: "resource-model-v1".into(),
     }
+}
+
+#[tokio::test]
+async fn tool_result_files_reject_during_request_validation() {
+    let server = MockServer::start().await;
+    let model = support::full_model(&server.uri(), "gemini-future", publisher_resource(), true);
+    let assistant = CompletedTurn::new(
+        AssistantMessage::new(vec![AssistantPart::ToolCall(ToolCallPart::new(
+            "call-1",
+            "inspect",
+            json!({}),
+        ))]),
+        Finish::new(Default::default(), FinishReason::ToolCalls),
+    );
+    let result = ToolResultPart::new(
+        "call-1",
+        ToolContent::Mixed(vec![ContentValue::File(FilePart::image(
+            "image/png",
+            FileSource::Bytes(bytes::Bytes::from_static(b"png")),
+        ))]),
+    );
+    let request = Request::new(vec![
+        HistoryTurn::assistant(assistant),
+        HistoryTurn::tool(ToolMessage::new(vec![result])),
+    ]);
+
+    let error = model.validate_request(&request).unwrap_err();
+    assert_eq!(error.kind(), oven_sdk::ModelErrorKind::Unsupported);
+    assert_eq!(
+        error.diagnostics.stage,
+        oven_sdk::ErrorStage::RequestValidation
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 struct DynamicHeaders(HeaderMap);

@@ -4,10 +4,11 @@ use std::{collections::BTreeMap, time::Duration};
 
 use futures_util::StreamExt;
 use oven_sdk::{
-    AbortSignal, AssistantMessage, AssistantPart, CompletedTurn, CustomPart, Finish, FinishReason,
-    HistoryTurn, InferenceOptions, JsonSchema, LanguageModel, ModelErrorKind, NativeReplayArtifact,
-    ReplayCapability, ReplayDisposition, ReplayPolicy, Request, ResponseFormat, StreamPart,
-    ToolContent, ToolDefinition, ToolResultPart, Usage,
+    AbortSignal, AssistantMessage, AssistantPart, CompletedTurn, ContentValue, CustomPart,
+    FilePart, FileSource, Finish, FinishReason, HistoryTurn, InferenceOptions, JsonSchema,
+    LanguageModel, ModelErrorKind, NativeReplayArtifact, ReplayCapability, ReplayDisposition,
+    ReplayPolicy, Request, ResponseFormat, StreamPart, ToolCallPart, ToolContent, ToolDefinition,
+    ToolResultPart, Usage,
 };
 use oven_sdk_cohere::{CohereSettings, CohereThinking, CohereTimeouts};
 use serde_json::{Map, Value, json};
@@ -240,6 +241,25 @@ async fn inline_tool_results_are_encoded_and_unsupported_assistant_parts_are_rej
     assert_eq!(body["messages"][1]["role"], "tool");
     assert_eq!(body["messages"][1]["tool_call_id"], "call_1");
     assert_eq!(body["messages"][1]["content"][1]["text"], "{\"ok\":true}");
+
+    let file_result = completed(vec![
+        AssistantPart::ToolCall(ToolCallPart::new("call_1", "lookup", json!({}))),
+        AssistantPart::ToolResult(ToolResultPart::new(
+            "call_1",
+            ToolContent::Mixed(vec![ContentValue::File(FilePart::image(
+                "image/png",
+                FileSource::Bytes(bytes::Bytes::from_static(b"png")),
+            ))]),
+        )),
+    ]);
+    let error = model
+        .validate_request(&Request::new(vec![HistoryTurn::assistant(file_result)]))
+        .unwrap_err();
+    assert_eq!(error.kind(), ModelErrorKind::Unsupported);
+    assert_eq!(
+        error.diagnostics.stage,
+        oven_sdk::ErrorStage::RequestValidation
+    );
 
     let unsupported = completed(vec![AssistantPart::Custom(CustomPart::new(
         "caller.custom",

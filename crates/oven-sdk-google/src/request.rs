@@ -168,14 +168,16 @@ pub(crate) fn validate_request(
             }
             HistoryTurn::Tool(message) => {
                 for result in &message.results {
-                    if matches!(result.content, ToolContent::Mixed(_)) {
-                        return Err(ModelError::unsupported(
-                            "multimodal Gemini function results are not enabled",
-                        ));
+                    validate_tool_result_files(result)?;
+                }
+            }
+            HistoryTurn::Assistant(turn) => {
+                for part in &turn.message.content {
+                    if let AssistantPart::ToolResult(result) = part {
+                        validate_tool_result_files(result)?;
                     }
                 }
             }
-            HistoryTurn::Assistant(_) => {}
         }
     }
     Ok(())
@@ -692,6 +694,19 @@ fn tool_content(content: &ToolContent) -> Result<JsonValue, ModelError> {
             Ok(JsonValue::Array(output))
         }
     }
+}
+
+fn validate_tool_result_files(result: &ToolResultPart) -> Result<(), ModelError> {
+    if let ToolContent::Mixed(values) = &result.content
+        && values
+            .iter()
+            .any(|value| matches!(value, ContentValue::File(_)))
+    {
+        return Err(ModelError::unsupported(
+            "files in tool results are not deliverable via google-gemini",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_file(file: &FilePart, provider_id: &ProviderId) -> Result<(), ModelError> {

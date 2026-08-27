@@ -158,17 +158,17 @@ pub(crate) fn validate_request(
                 }
             }
             HistoryTurn::Tool(message) => {
-                if message
-                    .results
-                    .iter()
-                    .any(|result| matches!(result.content, ToolContent::Mixed(_)))
-                {
-                    return Err(ModelError::unsupported(
-                        "multimodal Vertex function results are not enabled",
-                    ));
+                for result in &message.results {
+                    validate_tool_result_files(result)?;
                 }
             }
-            HistoryTurn::Assistant(_) => {}
+            HistoryTurn::Assistant(turn) => {
+                for part in &turn.message.content {
+                    if let AssistantPart::ToolResult(result) = part {
+                        validate_tool_result_files(result)?;
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -561,11 +561,18 @@ fn function_response(
                 .clone()
                 .unwrap_or_else(|| "Tool call execution denied.".into()),
         ),
-        ToolContent::Mixed(_) => {
-            return Err(ModelError::unsupported(
-                "multimodal Vertex function results are not enabled",
-            ));
-        }
+        ToolContent::Mixed(values) => JsonValue::Array(
+            values
+                .iter()
+                .map(|value| match value {
+                    oven_sdk::ContentValue::Text(value) => Ok(JsonValue::String(value.clone())),
+                    oven_sdk::ContentValue::Json(value) => Ok(value.clone()),
+                    oven_sdk::ContentValue::File(_) => Err(ModelError::unsupported(
+                        "files in tool results are not deliverable via google-vertex",
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
     };
     let response = if result.is_error {
         serde_json::json!({"error":output})
@@ -577,6 +584,19 @@ fn function_response(
         function_response["id"] = JsonValue::String(id.clone());
     }
     Ok(serde_json::json!({"functionResponse":function_response}))
+}
+
+fn validate_tool_result_files(result: &ToolResultPart) -> Result<(), ModelError> {
+    if let ToolContent::Mixed(values) = &result.content
+        && values
+            .iter()
+            .any(|value| matches!(value, oven_sdk::ContentValue::File(_)))
+    {
+        return Err(ModelError::unsupported(
+            "files in tool results are not deliverable via google-vertex",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_media(
