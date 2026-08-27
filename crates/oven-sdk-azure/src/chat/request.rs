@@ -50,6 +50,7 @@ pub(crate) fn validate_request(
     }
     schema::validate_request_schemas(request, options.parallel_tool_calls)?;
     media::validate_request_media(request, media::Surface::Chat)?;
+    validate_tool_result_files(request)?;
     Ok(())
 }
 
@@ -120,7 +121,13 @@ pub(crate) fn encode_request(
                 }
             }
             HistoryTurn::Tool(message) => {
-                messages.extend(message.results.iter().map(tool_result_message));
+                messages.extend(
+                    message
+                        .results
+                        .iter()
+                        .map(tool_result_message)
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
             }
             HistoryTurn::Assistant(turn) => {
                 let mut replayed = None;
@@ -493,12 +500,56 @@ pub(crate) fn assistant_message(
     message
 }
 
-fn tool_result_message(result: &ToolResultPart) -> JsonValue {
+fn tool_result_message(result: &ToolResultPart) -> Result<JsonValue, ModelError> {
     let content = match &result.content {
         ToolContent::Text(value) => value.clone(),
         ToolContent::Json(value) => value.to_string(),
-        ToolContent::Mixed(value) => serde_json::to_string(value).unwrap_or_default(),
+        ToolContent::Mixed(values) => values
+            .iter()
+            .map(|value| match value {
+                ContentValue::Text(value) => Ok(value.clone()),
+                ContentValue::Json(value) => Ok(value.to_string()),
+                ContentValue::File(_) => Err(ModelError::unsupported(
+                    "files in tool results are not deliverable via azure-openai-chat",
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n"),
         ToolContent::Denied { reason } => reason.clone().unwrap_or_default(),
     };
-    serde_json::json!({"role":"tool","tool_call_id":result.tool_call_id,"content":content})
+    Ok(serde_json::json!({"role":"tool","tool_call_id":result.tool_call_id,"content":content}))
+}
+
+fn validate_tool_result_files(request: &Request) -> Result<(), ModelError> {
+    for turn in &request.history {
+        match turn {
+            HistoryTurn::Tool(message) => {
+                for result in &message.results {
+                    reject_tool_result_files(result)?;
+                }
+            }
+            HistoryTurn::Assistant(turn) => {
+                for part in &turn.message.content {
+                    if let AssistantPart::ToolResult(result) = part {
+                        reject_tool_result_files(result)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn reject_tool_result_files(result: &ToolResultPart) -> Result<(), ModelError> {
+    if let ToolContent::Mixed(values) = &result.content
+        && values
+            .iter()
+            .any(|value| matches!(value, ContentValue::File(_)))
+    {
+        return Err(ModelError::unsupported(
+            "files in tool results are not deliverable via azure-openai-chat",
+        ));
+    }
+    Ok(())
 }
