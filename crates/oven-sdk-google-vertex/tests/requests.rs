@@ -312,6 +312,10 @@ async fn reviewed_media_sources_use_inline_https_and_gcs_shapes() {
         )),
         InputPart::File(FilePart::video(
             "video/mp4",
+            FileSource::Bytes(bytes::Bytes::from_static(b"video")),
+        )),
+        InputPart::File(FilePart::video(
+            "video/mp4",
             FileSource::Url("gs://bucket/video.mp4".parse().unwrap()),
         )),
     ]))]);
@@ -331,7 +335,13 @@ async fn reviewed_media_sources_use_inline_https_and_gcs_shapes() {
         Some("https://example.com/audio.mp3")
     );
     assert_eq!(
-        body.pointer("/contents/0/parts/3/fileData/fileUri")
+        body.pointer("/contents/0/parts/3"),
+        Some(&serde_json::json!({
+            "inlineData":{"mimeType":"video/mp4","data":"dmlkZW8="}
+        }))
+    );
+    assert_eq!(
+        body.pointer("/contents/0/parts/4/fileData/fileUri")
             .and_then(serde_json::Value::as_str),
         Some("gs://bucket/video.mp4")
     );

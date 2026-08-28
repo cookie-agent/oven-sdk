@@ -473,6 +473,10 @@ async fn supported_media_sources_use_distinct_current_wire_shapes() {
         )),
         InputPart::File(FilePart::video(
             "video/mp4",
+            FileSource::Bytes(bytes::Bytes::from_static(b"video")),
+        )),
+        InputPart::File(FilePart::video(
+            "video/mp4",
             FileSource::Url("https://example.com/video.mp4".parse().unwrap()),
         )),
         InputPart::File(FilePart::image(
@@ -498,10 +502,16 @@ async fn supported_media_sources_use_distinct_current_wire_shapes() {
     assert_eq!(parts[1]["inlineData"]["data"], "aGVsbG8=");
     assert_eq!(parts[2]["inlineData"]["mimeType"], "audio/mp3");
     assert_eq!(
-        parts[3]["fileData"]["fileUri"],
+        parts[3],
+        serde_json::json!({
+            "inlineData":{"mimeType":"video/mp4","data":"dmlkZW8="}
+        })
+    );
+    assert_eq!(
+        parts[4]["fileData"]["fileUri"],
         "https://example.com/video.mp4"
     );
-    assert_eq!(parts[4]["fileData"]["fileUri"], "files/existing");
+    assert_eq!(parts[5]["fileData"]["fileUri"], "files/existing");
 }
 
 #[tokio::test]
