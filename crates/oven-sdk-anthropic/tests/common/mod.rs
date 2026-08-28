@@ -83,6 +83,27 @@ pub fn anthropic_capabilities(policy: ReplayPolicy) -> ModelCapabilities {
     }
 }
 
+pub fn anthropic_compatible_capabilities(policy: ReplayPolicy) -> ModelCapabilities {
+    let mut capabilities = anthropic_capabilities(policy);
+    capabilities.modalities.input.insert(Modality::video());
+    capabilities.media.input.insert(
+        Modality::video(),
+        MediaInputSupport::new(
+            [
+                "video/mp4".to_owned(),
+                "video/avi".to_owned(),
+                "video/x-msvideo".to_owned(),
+                "video/quicktime".to_owned(),
+                "video/mov".to_owned(),
+                "video/x-matroska".to_owned(),
+            ],
+            MediaSourceSupport::INLINE_BYTES | MediaSourceSupport::URL,
+        )
+        .unwrap(),
+    );
+    capabilities
+}
+
 pub fn minimax_capabilities(policy: ReplayPolicy, media_enabled: bool) -> ModelCapabilities {
     let mut media = MediaCapabilities::default();
     let mut input = vec![Modality::text()];

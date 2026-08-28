@@ -40,6 +40,7 @@ pub(crate) enum ProtocolSettings {
 #[derive(Clone)]
 struct Config {
     protocol: Protocol,
+    compatible: bool,
     auth: Auth,
     endpoint: oven_sdk::ApiEndpoint,
     headers: HeaderConfig,
@@ -60,13 +61,15 @@ struct InnerModel {
 
 impl InnerModel {
     fn validate_request(&self, request: &Request) -> Result<(), ModelError> {
-        let options = crate::request::parse_options(request, self.config.protocol)?;
+        let options =
+            crate::request::parse_options(request, self.config.protocol, self.config.compatible)?;
         crate::request::validate_request(
             request,
             &options,
             &self.descriptor.capabilities,
             self.config.protocol,
             &self.config.protocol_settings,
+            self.config.compatible,
         )
     }
 
@@ -76,13 +79,18 @@ impl InnerModel {
         abort: AbortSignal,
     ) -> BoxFuture<'a, Result<oven_sdk::StreamResponse, ModelError>> {
         Box::pin(async move {
-            let options = crate::request::parse_options(&request, self.config.protocol)?;
+            let options = crate::request::parse_options(
+                &request,
+                self.config.protocol,
+                self.config.compatible,
+            )?;
             crate::request::validate_request(
                 &request,
                 &options,
                 &self.descriptor.capabilities,
                 self.config.protocol,
                 &self.config.protocol_settings,
+                self.config.compatible,
             )?;
             if abort.is_aborted() {
                 return Err(ModelError::abort("request was aborted before dispatch")
@@ -102,6 +110,7 @@ impl InnerModel {
                 &self.config.native_context_scope,
                 replay_policy,
                 self.config.protocol,
+                self.config.compatible,
             )?;
             let body = serde_json::to_vec(&encoded.body).map_err(|_| {
                 ModelError::invalid_request("could not serialize Messages request")
@@ -415,6 +424,7 @@ fn derive_native_context_resource(
 fn validate_capability_ceiling(
     protocol: Protocol,
     capabilities: &ModelCapabilities,
+    compatible: bool,
 ) -> Result<(), ModelError> {
     let allowed_features = match protocol {
         Protocol::Anthropic | Protocol::AnthropicAws => {
@@ -458,6 +468,14 @@ fn validate_capability_ceiling(
         )));
     }
     let allowed_input = match protocol {
+        Protocol::Anthropic if compatible => [
+            Modality::text(),
+            Modality::image(),
+            Modality::pdf(),
+            Modality::video(),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>(),
         Protocol::Anthropic | Protocol::AnthropicAws => {
             [Modality::text(), Modality::image(), Modality::pdf()]
                 .into_iter()
@@ -488,6 +506,17 @@ fn validate_capability_ceiling(
             Protocol::Anthropic | Protocol::AnthropicAws if modality == &Modality::text() => {
                 (&["text/plain"], MediaSourceSupport::INLINE_TEXT)
             }
+            Protocol::Anthropic if compatible && modality == &Modality::video() => (
+                &[
+                    "video/mp4",
+                    "video/avi",
+                    "video/x-msvideo",
+                    "video/quicktime",
+                    "video/mov",
+                    "video/x-matroska",
+                ],
+                MediaSourceSupport::INLINE_BYTES | MediaSourceSupport::URL,
+            ),
             Protocol::MiniMax if modality == &Modality::image() => (
                 &["image/jpeg", "image/png", "image/gif", "image/webp"],
                 MediaSourceSupport::INLINE_BYTES | MediaSourceSupport::URL,
@@ -644,7 +673,7 @@ impl AnthropicModel {
     pub fn new(config: ModelConfig<AnthropicAuth, AnthropicSettings>) -> Result<Self, ModelError> {
         config.validate()?;
         validate_endpoint(&config.provider.api)?;
-        validate_capability_ceiling(Protocol::Anthropic, &config.model.capabilities)?;
+        validate_capability_ceiling(Protocol::Anthropic, &config.model.capabilities, false)?;
         validate_anthropic_protocol(
             &config.settings.protocol,
             config.model.capabilities.features,
@@ -676,6 +705,7 @@ impl AnthropicModel {
             descriptor,
             config: Arc::new(Config {
                 protocol: Protocol::Anthropic,
+                compatible: false,
                 auth: Auth::Anthropic(config.provider.auth),
                 endpoint: config.provider.api,
                 headers: config.provider.headers,
@@ -713,7 +743,7 @@ impl AnthropicCompatibleModel {
                 "official Anthropic and MiniMax adapter IDs are reserved",
             ));
         }
-        validate_capability_ceiling(Protocol::Anthropic, &config.model.capabilities)?;
+        validate_capability_ceiling(Protocol::Anthropic, &config.model.capabilities, true)?;
         validate_anthropic_protocol(
             &config.settings.protocol,
             config.model.capabilities.features,
@@ -740,6 +770,7 @@ impl AnthropicCompatibleModel {
             descriptor,
             config: Arc::new(Config {
                 protocol: Protocol::Anthropic,
+                compatible: true,
                 auth: Auth::Compatible(config.provider.auth),
                 endpoint: config.provider.api,
                 headers: config.provider.headers,
@@ -766,7 +797,7 @@ impl MiniMaxModel {
     pub fn new(config: ModelConfig<MiniMaxAuth, MiniMaxSettings>) -> Result<Self, ModelError> {
         config.validate()?;
         validate_endpoint(&config.provider.api)?;
-        validate_capability_ceiling(Protocol::MiniMax, &config.model.capabilities)?;
+        validate_capability_ceiling(Protocol::MiniMax, &config.model.capabilities, false)?;
         validate_minimax_protocol(
             &config.settings.protocol,
             config.model.capabilities.features,
@@ -798,6 +829,7 @@ impl MiniMaxModel {
             descriptor,
             config: Arc::new(Config {
                 protocol: Protocol::MiniMax,
+                compatible: false,
                 auth: Auth::MiniMax(config.provider.auth),
                 endpoint: config.provider.api,
                 headers: config.provider.headers,
@@ -826,7 +858,7 @@ impl AnthropicAwsModel {
     ) -> Result<Self, ModelError> {
         config.validate()?;
         validate_endpoint(&config.provider.api)?;
-        validate_capability_ceiling(Protocol::AnthropicAws, &config.model.capabilities)?;
+        validate_capability_ceiling(Protocol::AnthropicAws, &config.model.capabilities, false)?;
         validate_anthropic_protocol(
             &config.settings.protocol,
             config.model.capabilities.features,
@@ -866,6 +898,7 @@ impl AnthropicAwsModel {
             descriptor,
             config: Arc::new(Config {
                 protocol: Protocol::AnthropicAws,
+                compatible: false,
                 auth: Auth::AnthropicAws(config.provider.auth),
                 endpoint: config.provider.api,
                 headers: config.provider.headers,

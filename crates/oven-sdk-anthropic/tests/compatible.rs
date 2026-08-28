@@ -2,16 +2,20 @@ mod common;
 
 use futures_util::StreamExt;
 use oven_sdk::{
-    AbortSignal, AdapterId, HistoryTurn, LanguageModel, ReplayDisposition, ReplayPolicy, Request,
-    SecretString, StreamPart, ToolContent, ToolMessage, ToolResultPart,
+    AbortSignal, AdapterId, FilePart, FileSource, HistoryTurn, InputPart, LanguageModel,
+    ReplayDisposition, ReplayPolicy, Request, SecretString, StreamPart, ToolContent, ToolMessage,
+    ToolResultPart, UserMessage,
 };
 use oven_sdk_anthropic::{
     ANTHROPIC_MESSAGES_ADAPTER_ID, AnthropicCompatibleAuth, AnthropicRequestExt,
-    AnthropicRequestOptions, MINIMAX_MESSAGES_ADAPTER_ID,
+    AnthropicRequestOptions, MINIMAX_MESSAGES_ADAPTER_ID, MiniMaxMediaExt, MiniMaxMediaOptions,
 };
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
-use common::{anthropic_capabilities, anthropic_protocol, try_compatible_model};
+use common::{
+    anthropic_capabilities, anthropic_compatible_capabilities, anthropic_protocol,
+    try_compatible_model,
+};
 
 fn response() -> &'static str {
     "event: message_start\ndata: {\"message\":{}}\n\nevent: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\nevent: message_stop\ndata: {}\n\n"
@@ -24,6 +28,64 @@ async fn server() -> MockServer {
         .mount(&server)
         .await;
     server
+}
+
+#[tokio::test]
+async fn compatible_encodes_minimax_style_video_blocks() {
+    let server = server().await;
+    let model = try_compatible_model(
+        &server.uri(),
+        "minimax-compatible",
+        "opaque-video-model",
+        "app.minimax-compatible.messages",
+        AnthropicCompatibleAuth::None,
+        anthropic_compatible_capabilities(ReplayPolicy::IfValid),
+        anthropic_protocol(),
+    )
+    .unwrap();
+    let inline = FilePart::video(
+        "video/mp4",
+        FileSource::Bytes(bytes::Bytes::from_static(b"video")),
+    )
+    .with_minimax_media_options(MiniMaxMediaOptions {
+        fps: Some(2.5),
+        ..Default::default()
+    });
+    let remote = FilePart::video(
+        "video/mp4",
+        FileSource::Url("https://example.com/video.mp4".parse().unwrap()),
+    );
+
+    model
+        .complete(
+            Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
+                InputPart::File(inline),
+                InputPart::File(remote),
+            ]))]),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        body["messages"][0]["content"],
+        serde_json::json!([
+            {
+                "type":"video",
+                "source":{
+                    "type":"base64",
+                    "media_type":"video/mp4",
+                    "data":"dmlkZW8=",
+                    "fps":2.5
+                }
+            },
+            {
+                "type":"video",
+                "source":{"type":"url","url":"https://example.com/video.mp4"}
+            }
+        ])
+    );
 }
 
 #[tokio::test]

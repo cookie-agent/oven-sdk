@@ -55,6 +55,7 @@ pub(crate) fn validate_request(
     capabilities: &ModelCapabilities,
     protocol: Protocol,
     protocol_settings: &ProtocolSettings,
+    compatible: bool,
 ) -> Result<(), ModelError> {
     request.validate_for(capabilities)?;
     if protocol.is_first_party()
@@ -122,6 +123,7 @@ pub(crate) fn validate_request(
                             file,
                             protocol,
                             parsed.minimax_media[history_index][part_index].as_ref(),
+                            compatible,
                         )?;
                     }
                 }
@@ -144,7 +146,7 @@ pub(crate) fn validate_request(
                         for value in values {
                             if let ContentValue::File(file) = value {
                                 if protocol.is_first_party() {
-                                    validate_file(file, protocol, None)?;
+                                    validate_file(file, protocol, None, false)?;
                                 } else {
                                     return Err(ModelError::unsupported(
                                         "files in tool results are not deliverable via minimax-messages",
@@ -345,8 +347,9 @@ fn validate_file(
     file: &oven_sdk::FilePart,
     protocol: Protocol,
     minimax_options: Option<&MiniMaxMediaOptions>,
+    compatible: bool,
 ) -> Result<(), ModelError> {
-    if protocol.is_first_party() {
+    if protocol.is_first_party() && !(compatible && file.media_type.starts_with("video/")) {
         let image = matches!(
             file.media_type.as_str(),
             "image/jpeg" | "image/png" | "image/gif" | "image/webp"
@@ -795,6 +798,7 @@ pub(crate) struct ParsedOptions {
 pub(crate) fn parse_options(
     request: &Request,
     protocol: Protocol,
+    compatible: bool,
 ) -> Result<ParsedOptions, ModelError> {
     let anthropic = if protocol.is_first_party() {
         options(request)?
@@ -834,7 +838,7 @@ pub(crate) fn parse_options(
         .history
         .iter()
         .map(|turn| match turn {
-            HistoryTurn::User(message) if protocol == Protocol::MiniMax => message
+            HistoryTurn::User(message) if protocol == Protocol::MiniMax || compatible => message
                 .content
                 .iter()
                 .map(|part| match part {
@@ -899,6 +903,7 @@ pub(crate) fn encode_request(
     native_context_scope: &NativeContextScope,
     policy: ReplayPolicy,
     protocol: Protocol,
+    compatible: bool,
 ) -> Result<Encoded, ModelError> {
     let opts = &parsed.anthropic;
     let minimax_opts = &parsed.minimax;
@@ -937,6 +942,7 @@ pub(crate) fn encode_request(
                             cache_plan.history[index].marker_for(part_index),
                             protocol,
                             parsed.minimax_media[index][part_index].as_ref(),
+                            compatible,
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1204,12 +1210,13 @@ fn input_block(
     cache: Option<AnthropicCacheControl>,
     protocol: Protocol,
     minimax_options: Option<&MiniMaxMediaOptions>,
+    compatible: bool,
 ) -> Result<Option<JsonValue>, ModelError> {
     Ok(match part {
         InputPart::Text(t) => (!t.text.is_empty())
             .then(|| attach_cache(serde_json::json!({"type":"text","text":t.text}), cache)),
         InputPart::File(f) => Some(attach_cache(
-            file_block(f, protocol, minimax_options)?,
+            file_block(f, protocol, minimax_options, compatible)?,
             cache,
         )),
         InputPart::Custom(_) => None,
@@ -1219,8 +1226,9 @@ fn file_block(
     file: &oven_sdk::FilePart,
     protocol: Protocol,
     minimax_options: Option<&MiniMaxMediaOptions>,
+    compatible: bool,
 ) -> Result<JsonValue, ModelError> {
-    if protocol == Protocol::MiniMax {
+    if protocol == Protocol::MiniMax || (compatible && file.media_type.starts_with("video/")) {
         return minimax_file_block(file, minimax_options);
     }
     if file.media_type == "text/plain"
@@ -1320,7 +1328,7 @@ fn tool_result_block(
                         ContentValue::Json(value) => {
                             Ok(serde_json::json!({"type":"text","text":value.to_string()}))
                         }
-                        ContentValue::File(file) => file_block(file, protocol, None),
+                        ContentValue::File(file) => file_block(file, protocol, None, false),
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             )
