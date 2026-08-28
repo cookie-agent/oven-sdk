@@ -8,11 +8,11 @@ use oven_sdk::{
     Finish, FinishReason, HistoryTurn, LanguageModel, NativeReplayArtifact, Request, TextPart,
 };
 use oven_sdk_conformance::{
-    ToolResultFileKind, ToolResultFilePolicy, assert_capability_honesty,
+    ToolResultFileKind, ToolResultFilePolicy, UserTurnVideoPolicy, assert_capability_honesty,
     assert_compaction_unsupported_before_io, assert_complete_drain,
     assert_foreign_replay_is_reported, assert_invalid_replay_reconstructs, assert_replay_artifact,
     assert_replay_round_trip, assert_stream_contract, assert_stream_lifecycle,
-    assert_tool_result_file_policy,
+    assert_tool_result_file_policy, assert_user_turn_video_policy,
 };
 use wiremock::MockServer;
 
@@ -34,6 +34,9 @@ async fn official_chat_passes_lifecycle_complete_capability_and_replay_suites() 
     for kind in [ToolResultFileKind::Image, ToolResultFileKind::Pdf] {
         assert_tool_result_file_policy(&model, kind, ToolResultFilePolicy::Reject).unwrap();
     }
+    assert_user_turn_video_policy(&model, UserTurnVideoPolicy::Reject)
+        .await
+        .unwrap();
     assert_stream_lifecycle(&model, Request::new(Vec::new()))
         .await
         .unwrap();
@@ -70,6 +73,9 @@ async fn official_responses_passes_lifecycle_complete_capability_and_replay_suit
         ToolResultFilePolicy::Encode,
     )
     .unwrap();
+    assert_user_turn_video_policy(&model, UserTurnVideoPolicy::Reject)
+        .await
+        .unwrap();
     assert_tool_result_file_policy(
         &model,
         ToolResultFileKind::Pdf,
@@ -111,6 +117,9 @@ async fn explicitly_configured_compatible_chat_passes_capability_honesty() {
     for kind in [ToolResultFileKind::Image, ToolResultFileKind::Pdf] {
         assert_tool_result_file_policy(&model, kind, ToolResultFilePolicy::Reject).unwrap();
     }
+    assert_user_turn_video_policy(&model, UserTurnVideoPolicy::Encode)
+        .await
+        .unwrap();
     assert_complete_drain(&model, Request::new(Vec::new()))
         .await
         .unwrap();

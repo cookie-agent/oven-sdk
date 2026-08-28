@@ -5,11 +5,12 @@ use oven_sdk::{
     ResourceId,
 };
 use oven_sdk_conformance::{
-    ToolResultFileKind, ToolResultFilePolicy, assert_compaction_unsupported_before_io,
-    assert_complete_drain, assert_declaration_honesty, assert_foreign_replay_is_reported,
-    assert_foreign_replay_scope_is_reported, assert_invalid_replay_reconstructs,
-    assert_media_honesty, assert_model_id_independence, assert_replay_artifact,
-    assert_replay_round_trip, assert_tool_result_file_policy,
+    ToolResultFileKind, ToolResultFilePolicy, UserTurnVideoPolicy,
+    assert_compaction_unsupported_before_io, assert_complete_drain, assert_declaration_honesty,
+    assert_foreign_replay_is_reported, assert_foreign_replay_scope_is_reported,
+    assert_invalid_replay_reconstructs, assert_media_honesty, assert_model_id_independence,
+    assert_replay_artifact, assert_replay_round_trip, assert_tool_result_file_policy,
+    assert_user_turn_video_policy,
 };
 use wiremock::MockServer;
 
@@ -27,6 +28,9 @@ async fn core_04_declaration_media_lifecycle_compaction_and_replay_conformance()
         ToolResultFilePolicy::Reject,
     )
     .unwrap();
+    assert_user_turn_video_policy(&first, UserTurnVideoPolicy::Reject)
+        .await
+        .unwrap();
     assert_compaction_unsupported_before_io(
         &first,
         CompactionRequest::new(Request::new(Vec::new())),

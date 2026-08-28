@@ -4,8 +4,8 @@
 mod common;
 
 use common::{
-    Anthropic, AnthropicAws, MiniMax, anthropic_capabilities, anthropic_protocol,
-    try_compatible_model,
+    Anthropic, AnthropicAws, MiniMax, anthropic_capabilities, anthropic_compatible_capabilities,
+    anthropic_protocol, try_compatible_model,
 };
 
 use std::time::Duration;
@@ -22,12 +22,13 @@ use oven_sdk_anthropic::{
     AnthropicRequestOptions, AnthropicThinking,
 };
 use oven_sdk_conformance::{
-    CapabilityProbe, ToolResultFileKind, ToolResultFilePolicy, assert_capability_honesty,
-    assert_capability_honesty_with, assert_compaction_unsupported_before_io, assert_complete_drain,
-    assert_declaration_honesty, assert_error_taxonomy, assert_foreign_replay_is_reported,
-    assert_history_round_trip, assert_invalid_replay_reconstructs,
-    assert_malformed_payload_returns_error, assert_replay_artifact, assert_replay_round_trip,
-    assert_stream_contract, assert_stream_lifecycle, assert_tool_result_file_policy,
+    CapabilityProbe, ToolResultFileKind, ToolResultFilePolicy, UserTurnVideoPolicy,
+    assert_capability_honesty, assert_capability_honesty_with,
+    assert_compaction_unsupported_before_io, assert_complete_drain, assert_declaration_honesty,
+    assert_error_taxonomy, assert_foreign_replay_is_reported, assert_history_round_trip,
+    assert_invalid_replay_reconstructs, assert_malformed_payload_returns_error,
+    assert_replay_artifact, assert_replay_round_trip, assert_stream_contract,
+    assert_stream_lifecycle, assert_tool_result_file_policy, assert_user_turn_video_policy,
     assert_validate_for_consistency,
     sse::{ChunkPattern, chunk_bytes},
 };
@@ -324,6 +325,9 @@ async fn full_anthropic_conformance_suite() {
     for kind in [ToolResultFileKind::Image, ToolResultFileKind::Pdf] {
         assert_tool_result_file_policy(&model, kind, ToolResultFilePolicy::Encode).unwrap();
     }
+    assert_user_turn_video_policy(&model, UserTurnVideoPolicy::Reject)
+        .await
+        .unwrap();
     let cache = Request::new(Vec::new()).with_anthropic_options(AnthropicRequestOptions {
         cache_control: Some(AnthropicCacheControl {
             ttl: AnthropicCacheTtl::FiveMinutes,
@@ -420,6 +424,9 @@ async fn compatible_minimax_and_anthropic_aws_baseline_conformance() {
         ToolResultFilePolicy::Reject,
     )
     .unwrap();
+    assert_user_turn_video_policy(&minimax, UserTurnVideoPolicy::Encode)
+        .await
+        .unwrap();
 
     let compatible = try_compatible_model(
         &server.uri(),
@@ -427,7 +434,7 @@ async fn compatible_minimax_and_anthropic_aws_baseline_conformance() {
         "future-model",
         "app.future.messages",
         AnthropicCompatibleAuth::None,
-        anthropic_capabilities(oven_sdk::ReplayPolicy::IfValid),
+        anthropic_compatible_capabilities(oven_sdk::ReplayPolicy::IfValid),
         anthropic_protocol(),
     )
     .unwrap();
@@ -439,6 +446,9 @@ async fn compatible_minimax_and_anthropic_aws_baseline_conformance() {
     for kind in [ToolResultFileKind::Image, ToolResultFileKind::Pdf] {
         assert_tool_result_file_policy(&compatible, kind, ToolResultFilePolicy::Encode).unwrap();
     }
+    assert_user_turn_video_policy(&compatible, UserTurnVideoPolicy::Encode)
+        .await
+        .unwrap();
 
     let aws = AnthropicAws::builder("us-west-2", "wrkspc_test")
         .bearer_key("test")
@@ -454,6 +464,9 @@ async fn compatible_minimax_and_anthropic_aws_baseline_conformance() {
     for kind in [ToolResultFileKind::Image, ToolResultFileKind::Pdf] {
         assert_tool_result_file_policy(&aws, kind, ToolResultFilePolicy::Encode).unwrap();
     }
+    assert_user_turn_video_policy(&aws, UserTurnVideoPolicy::Reject)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

@@ -7,11 +7,12 @@ use oven_sdk::{
 };
 use oven_sdk_bedrock::{BedrockAuth, BedrockModel};
 use oven_sdk_conformance::{
-    ToolResultFileKind, ToolResultFilePolicy, assert_capability_honesty,
+    ToolResultFileKind, ToolResultFilePolicy, UserTurnVideoPolicy, assert_capability_honesty,
     assert_compaction_unsupported_before_io, assert_complete_drain, assert_declaration_honesty,
     assert_foreign_replay_is_reported, assert_foreign_replay_scope_is_reported,
     assert_invalid_replay_reconstructs, assert_media_honesty, assert_model_id_independence,
     assert_replay_round_trip, assert_stream_lifecycle, assert_tool_result_file_policy,
+    assert_user_turn_video_policy,
 };
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
@@ -20,7 +21,7 @@ async fn bedrock_passes_lifecycle_complete_and_capability_conformance() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(support::text_stream("ok")))
-        .expect(4)
+        .expect(5)
         .mount(&server)
         .await;
     let model = support::model(
@@ -37,6 +38,9 @@ async fn bedrock_passes_lifecycle_complete_and_capability_conformance() {
         ToolResultFilePolicy::Encode,
     )
     .unwrap();
+    assert_user_turn_video_policy(&model, UserTurnVideoPolicy::Encode)
+        .await
+        .unwrap();
 
     let mut pdf_config = support::config(
         &server.uri(),

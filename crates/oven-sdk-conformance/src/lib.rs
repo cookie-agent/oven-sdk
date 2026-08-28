@@ -1161,6 +1161,74 @@ pub enum ToolResultFileKind {
     Pdf,
 }
 
+/// Declared adapter policy for inline video in normalized user turns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UserTurnVideoPolicy {
+    /// The adapter accepts and encodes inline video.
+    Encode,
+    /// The adapter rejects inline video during request validation.
+    Reject,
+}
+
+/// Verifies validation and end-to-end encoding behavior for a declared
+/// inline user-turn video policy.
+pub async fn assert_user_turn_video_policy(
+    model: &dyn LanguageModel,
+    policy: UserTurnVideoPolicy,
+) -> Result<(), ConformanceError> {
+    let request = Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
+        InputPart::File(FilePart::video(
+            "video/mp4",
+            FileSource::Bytes(b"video".to_vec().into()),
+        )),
+    ]))]);
+    let core = request.validate_for(model.capabilities());
+    let validation = model.validate_request(&request);
+    let supports = model.supports_request(&request);
+
+    match policy {
+        UserTurnVideoPolicy::Encode => {
+            core.map_err(|error| {
+                ConformanceError::new(format!(
+                    "user-turn video encode policy is not core-valid: {error}"
+                ))
+            })?;
+            validation.map_err(|error| {
+                ConformanceError::new(format!(
+                    "user-turn video encode policy failed adapter validation: {error}"
+                ))
+            })?;
+            if !supports {
+                return Err(ConformanceError::new(
+                    "user-turn video encode policy disagreed with supports_request=false",
+                ));
+            }
+            model
+                .complete(request, AbortSignal::default())
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    ConformanceError::model_error(format!(
+                        "user-turn video encode policy failed adapter completion: {error}"
+                    ))
+                })
+        }
+        UserTurnVideoPolicy::Reject => match (core, validation, supports) {
+            (Err(core), Err(adapter), false)
+                if core.kind == ModelErrorKind::Unsupported
+                    && core.diagnostics.stage == ErrorStage::RequestValidation
+                    && adapter.kind == ModelErrorKind::Unsupported
+                    && adapter.diagnostics.stage == ErrorStage::RequestValidation =>
+            {
+                Ok(())
+            }
+            (core, validation, supports) => Err(ConformanceError::new(format!(
+                "user-turn video reject policy disagreed with core={core:?}, validate_request={validation:?}, and supports_request={supports}"
+            ))),
+        },
+    }
+}
+
 /// Verifies that adapter validation consistently implements its declared
 /// policy for a core-valid inline file in a normalized tool result.
 pub fn assert_tool_result_file_policy(

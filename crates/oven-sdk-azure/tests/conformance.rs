@@ -6,11 +6,11 @@ use oven_sdk::{
 };
 use oven_sdk_azure::AzureApiRoute;
 use oven_sdk_conformance::{
-    ToolResultFileKind, ToolResultFilePolicy, assert_capability_honesty,
+    ToolResultFileKind, ToolResultFilePolicy, UserTurnVideoPolicy, assert_capability_honesty,
     assert_compaction_cancellation, assert_compaction_round_trip,
     assert_compaction_unsupported_before_io, assert_complete_drain, assert_native_compaction,
     assert_replay_artifact, assert_replay_round_trip, assert_stream_lifecycle,
-    assert_tool_result_file_policy,
+    assert_tool_result_file_policy, assert_user_turn_video_policy,
 };
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -36,6 +36,9 @@ async fn chat_and_responses_pass_applicable_core_04_conformance() {
         ToolResultFilePolicy::Reject,
     )
     .unwrap();
+    assert_user_turn_video_policy(&chat, UserTurnVideoPolicy::Reject)
+        .await
+        .unwrap();
     assert_stream_lifecycle(&chat, Request::new(Vec::new()))
         .await
         .unwrap();
@@ -88,6 +91,9 @@ async fn chat_and_responses_pass_applicable_core_04_conformance() {
         ToolResultFilePolicy::Encode,
     )
     .unwrap();
+    assert_user_turn_video_policy(&responses, UserTurnVideoPolicy::Reject)
+        .await
+        .unwrap();
     assert_tool_result_file_policy(
         &responses,
         ToolResultFileKind::Pdf,

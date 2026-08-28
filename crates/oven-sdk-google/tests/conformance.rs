@@ -1,9 +1,9 @@
 use oven_sdk::{AbortSignal, CompactionRequest, LanguageModel, Modality, Request, StreamPart};
 use oven_sdk_conformance::{
-    ToolResultFileKind, ToolResultFilePolicy, assert_capability_honesty,
+    ToolResultFileKind, ToolResultFilePolicy, UserTurnVideoPolicy, assert_capability_honesty,
     assert_compaction_unsupported_before_io, assert_complete_drain, assert_declaration_honesty,
     assert_replay_artifact, assert_replay_round_trip, assert_stream_lifecycle,
-    assert_tool_result_file_policy,
+    assert_tool_result_file_policy, assert_user_turn_video_policy,
 };
 use serde_json::json;
 use tokio::{
@@ -52,6 +52,9 @@ async fn lifecycle_complete_and_capabilities_conform() {
     for kind in [ToolResultFileKind::Image, ToolResultFileKind::Pdf] {
         assert_tool_result_file_policy(&model, kind, ToolResultFilePolicy::Reject).unwrap();
     }
+    assert_user_turn_video_policy(&model, UserTurnVideoPolicy::Encode)
+        .await
+        .unwrap();
     assert_compaction_unsupported_before_io(
         &model,
         CompactionRequest::new(Request::new(Vec::new())),
