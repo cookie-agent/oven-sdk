@@ -45,6 +45,7 @@ impl OpenAiChatModel {
             config.settings.structured_output,
             config.settings.reasoning_field,
             config.settings.stream_usage,
+            false,
         )?;
         validate_routing_discriminator(
             config.provider.headers.dynamic_headers.is_some(),
@@ -127,6 +128,7 @@ impl OpenAiCompatibleChatModel {
             config.settings.structured_output,
             config.settings.reasoning_field,
             config.settings.stream_usage,
+            true,
         )?;
         validate_routing_discriminator(
             config.provider.headers.dynamic_headers.is_some()

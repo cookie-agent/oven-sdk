@@ -179,6 +179,28 @@ async fn chat_rejects_tool_result_files_before_dispatch() {
 }
 
 #[tokio::test]
+async fn azure_chat_rejects_video_before_dispatch() {
+    let server = MockServer::start().await;
+    let model = common::provider(&server, AzureApiRoute::V1)
+        .chat("deployment", common::gpt4o())
+        .unwrap();
+    let request = Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
+        InputPart::File(FilePart::video(
+            "video/mp4",
+            FileSource::Bytes(bytes::Bytes::from_static(b"video")),
+        )),
+    ]))]);
+
+    let error = model.validate_request(&request).unwrap_err();
+    assert_eq!(error.kind, oven_sdk::ModelErrorKind::Unsupported);
+    assert_eq!(
+        error.diagnostics.stage,
+        oven_sdk::ErrorStage::RequestValidation
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn chat_encodes_tools_structured_output_media_usage_and_open_labels() {
     let server = MockServer::start().await;
     common::mount(

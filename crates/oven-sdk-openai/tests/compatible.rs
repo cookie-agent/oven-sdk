@@ -3,14 +3,41 @@ pub mod common;
 use std::sync::Arc;
 
 use oven_sdk::{
-    AbortSignal, AdapterId, HeaderOverrides, HeaderProvider, JsonSchema, LanguageModel, ModelError,
-    Request, ResponseFormat,
+    AbortSignal, AdapterId, FilePart, FileSource, HeaderOverrides, HeaderProvider, HistoryTurn,
+    InputPart, JsonSchema, LanguageModel, ModelError, Request, ResponseFormat, UserMessage,
 };
 use oven_sdk_openai::{
     CompatibleChatOptions, OpenAiChatOptions, OpenAiChatRequestExt, OpenAiCompatibleAuth,
     OpenAiCompatibleChatModel, ReasoningField, StructuredOutputSupport,
 };
 use wiremock::MockServer;
+
+#[tokio::test]
+async fn compatible_chat_encodes_inline_video_as_video_url() {
+    let server = MockServer::start().await;
+    common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+    let model = common::compatible(&server);
+    let request = Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
+        InputPart::File(FilePart::video(
+            "video/mp4",
+            FileSource::Bytes(bytes::Bytes::from_static(b"video")),
+        )),
+    ]))]);
+
+    model
+        .complete(request, AbortSignal::default())
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        body["messages"][0]["content"][0],
+        serde_json::json!({
+            "type":"video_url",
+            "video_url":{"url":"data:video/mp4;base64,dmlkZW8="}
+        })
+    );
+}
 
 #[tokio::test]
 async fn explicit_settings_control_usage_reasoning_and_structured_downgrade() {

@@ -263,6 +263,26 @@ async fn unsupported_audio_is_rejected_before_dispatch() {
 }
 
 #[tokio::test]
+async fn official_chat_rejects_video_before_dispatch() {
+    let server = MockServer::start().await;
+    let model = common::official_chat(&server, "gpt-4o-mini");
+    let request = Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
+        InputPart::File(FilePart::video(
+            "video/mp4",
+            FileSource::Bytes(bytes::Bytes::from_static(b"video")),
+        )),
+    ]))]);
+
+    let error = model.validate_request(&request).unwrap_err();
+    assert_eq!(error.kind, oven_sdk::ModelErrorKind::Unsupported);
+    assert_eq!(
+        error.diagnostics.stage,
+        oven_sdk::ErrorStage::RequestValidation
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn assistant_history_media_is_rejected_instead_of_silently_dropped() {
     let server = MockServer::start().await;
     let model = common::official_chat(&server, "future-chat-id");

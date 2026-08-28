@@ -229,7 +229,7 @@ pub fn compatible_config_at(
             HeaderConfig::empty(),
         )
         .unwrap(),
-        ModelDeclaration::new(ModelId::new(model_id), chat_capabilities()).unwrap(),
+        ModelDeclaration::new(ModelId::new(model_id), compatible_chat_capabilities()).unwrap(),
         {
             let mut settings = OpenAiCompatibleChatSettings::new(
                 oven_sdk::AdapterId::new("fixture.chat"),
@@ -246,6 +246,16 @@ pub fn compatible_config_at(
 
 pub fn chat_capabilities() -> ModelCapabilities {
     capabilities(false)
+}
+
+pub fn compatible_chat_capabilities() -> ModelCapabilities {
+    let mut capabilities = capabilities(false);
+    capabilities.modalities.input.insert(Modality::video());
+    capabilities.media.input.insert(
+        Modality::video(),
+        MediaInputSupport::new(["video/mp4".to_owned()], MediaSourceSupport::INLINE_BYTES).unwrap(),
+    );
+    capabilities
 }
 
 pub fn responses_capabilities() -> ModelCapabilities {

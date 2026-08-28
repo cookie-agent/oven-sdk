@@ -414,6 +414,7 @@ pub(crate) fn validate_chat_declaration(
     structured_output: StructuredOutputSupport,
     reasoning_field: ReasoningField,
     stream_usage: bool,
+    compatible: bool,
 ) -> Result<(), ModelError> {
     validate_features(capabilities)?;
     validate_cancellation(capabilities)?;
@@ -452,7 +453,7 @@ pub(crate) fn validate_chat_declaration(
             "Chat reasoning wire fields require reasoning capability",
         ));
     }
-    validate_media(capabilities, false)
+    validate_media(capabilities, false, compatible)
 }
 
 pub(crate) fn validate_responses_declaration(
@@ -483,7 +484,7 @@ pub(crate) fn validate_responses_declaration(
             ));
         }
     }
-    validate_media(capabilities, true)
+    validate_media(capabilities, true, false)
 }
 
 fn validate_cancellation(capabilities: &ModelCapabilities) -> Result<(), ModelError> {
@@ -505,7 +506,11 @@ fn validate_features(capabilities: &ModelCapabilities) -> Result<(), ModelError>
     Ok(())
 }
 
-fn validate_media(capabilities: &ModelCapabilities, responses: bool) -> Result<(), ModelError> {
+fn validate_media(
+    capabilities: &ModelCapabilities,
+    responses: bool,
+    compatible: bool,
+) -> Result<(), ModelError> {
     for (modality, support) in &capabilities.media.input {
         let allowed_sources = if modality == &Modality::image() {
             MediaSourceSupport::INLINE_BYTES
@@ -518,9 +523,11 @@ fn validate_media(capabilities: &ModelCapabilities, responses: bool) -> Result<(
             } else {
                 inline
             }
+        } else if compatible && modality == &Modality::video() {
+            MediaSourceSupport::INLINE_BYTES
         } else {
             return Err(ModelError::invalid_request(
-                "OpenAI adapters implement media wire encoding only for image and PDF input",
+                "this OpenAI adapter does not implement the declared media modality",
             ));
         };
         if !allowed_sources.contains(support.sources) {
@@ -531,8 +538,10 @@ fn validate_media(capabilities: &ModelCapabilities, responses: bool) -> Result<(
         for media_type in &support.media_types {
             let valid = if modality == &Modality::image() {
                 media_type.starts_with("image/")
-            } else {
+            } else if modality == &Modality::pdf() {
                 media_type == "application/pdf"
+            } else {
+                media_type.starts_with("video/")
             };
             if !valid {
                 return Err(ModelError::invalid_request(

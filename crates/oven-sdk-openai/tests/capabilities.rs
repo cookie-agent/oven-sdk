@@ -54,5 +54,8 @@ async fn compatible_descriptor_uses_explicit_provider_adapter_and_declaration() 
     assert_eq!(descriptor.identity.provider_id.as_str(), "fixture");
     assert_eq!(descriptor.identity.model_id.as_str(), "fixture-model");
     assert_eq!(descriptor.adapter_id.as_str(), "fixture.chat");
-    assert_eq!(descriptor.capabilities, common::chat_capabilities());
+    assert_eq!(
+        descriptor.capabilities,
+        common::compatible_chat_capabilities()
+    );
 }

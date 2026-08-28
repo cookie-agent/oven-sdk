@@ -53,11 +53,11 @@ pub(crate) fn validate_request(
     validate_prompt_cache_key(options.official.prompt_cache_key.as_deref())?;
     validate_prompt_cache_breakpoints(request, profile)?;
     request.validate_for(capabilities)?;
-    validate_media(request)?;
+    validate_media(request, profile)?;
     Ok(())
 }
 
-fn validate_media(request: &Request) -> Result<(), ModelError> {
+fn validate_media(request: &Request, profile: &ChatWireProfile) -> Result<(), ModelError> {
     for turn in &request.history {
         match turn {
             HistoryTurn::User(message) => {
@@ -68,7 +68,8 @@ fn validate_media(request: &Request) -> Result<(), ModelError> {
                     match (&*file.media_type, &file.source) {
                         (media_type, FileSource::Bytes(_) | FileSource::Text(_))
                             if media_type.starts_with("image/")
-                                || media_type == "application/pdf" => {}
+                                || media_type == "application/pdf"
+                                || (profile.compatible && media_type.starts_with("video/")) => {}
                         (media_type, FileSource::Url(_)) if media_type.starts_with("image/") => {}
                         (media_type, _)
                             if !media_type.starts_with("image/")
@@ -396,7 +397,7 @@ fn user_content(parts: &[InputPart], profile: &ChatWireProfile) -> Result<JsonVa
         .map(JsonValue::Array)
 }
 
-fn file_content(file: &FilePart, _profile: &ChatWireProfile) -> Result<JsonValue, ModelError> {
+fn file_content(file: &FilePart, profile: &ChatWireProfile) -> Result<JsonValue, ModelError> {
     let data = match &file.source {
         FileSource::Bytes(bytes) => {
             format!("data:{};base64,{}", file.media_type, STANDARD.encode(bytes))
@@ -412,6 +413,8 @@ fn file_content(file: &FilePart, _profile: &ChatWireProfile) -> Result<JsonValue
     };
     let value = if file.media_type.starts_with("image/") {
         serde_json::json!({"type":"image_url","image_url":{"url":data}})
+    } else if profile.compatible && file.media_type.starts_with("video/") {
+        serde_json::json!({"type":"video_url","video_url":{"url":data}})
     } else if file.media_type == "application/pdf" {
         serde_json::json!({"type":"file","file":{"filename":file.filename.clone().unwrap_or_else(|| "document.pdf".into()),"file_data":data}})
     } else {
