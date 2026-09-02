@@ -17,7 +17,7 @@ pub struct AnthropicTimeouts {
 impl Default for AnthropicTimeouts {
     fn default() -> Self {
         Self {
-            headers: Duration::from_secs(30),
+            headers: Duration::from_secs(300),
             credentials: Duration::from_secs(30),
             stream_idle: Duration::from_secs(60),
         }

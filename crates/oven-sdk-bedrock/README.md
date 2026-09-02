@@ -187,7 +187,7 @@ Assistant-contained tool results are encoded independently of replay selection,
 so successful native replay preserves the following ordered user-role tool
 results instead of dropping them.
 
-Default phase timeouts are 10 seconds connect, 30 seconds response headers,
+Default phase timeouts are 60 seconds connect, 300 seconds response headers,
 30 seconds credentials, and 60 seconds stream/error-body idle. There is no
 default total streaming deadline. Cancellation is local-only. Provider-native
 compaction and native context windows are explicitly unsupported; declarations

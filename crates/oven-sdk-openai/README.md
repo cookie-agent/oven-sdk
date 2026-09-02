@@ -191,7 +191,7 @@ The API key and model access are caller-provided; the live test performs a real
 
 ## Timeouts, cancellation, and security
 
-Defaults are 10 seconds for connect, 30 seconds for response headers, and 60
+Defaults are 60 seconds for connect, 300 seconds for response headers, and 60
 seconds for stream inactivity, with no total stream timeout. Cancellation is
 local. Error bodies are bounded and sanitized, while byte counts, request IDs,
 retry hints, stages, and provider codes remain structured diagnostics. Secrets,

@@ -103,8 +103,8 @@ pub struct OpenResponsesTimeouts {
 impl Default for OpenResponsesTimeouts {
     fn default() -> Self {
         Self {
-            connect: Duration::from_secs(10),
-            headers: Duration::from_secs(30),
+            connect: Duration::from_secs(60),
+            headers: Duration::from_secs(300),
             stream_idle: Duration::from_secs(60),
         }
     }
