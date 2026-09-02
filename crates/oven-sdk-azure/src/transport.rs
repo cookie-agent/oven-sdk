@@ -27,7 +27,7 @@ impl Default for AzureOpenAiTimeouts {
             connect: Duration::from_secs(60),
             headers: Duration::from_secs(300),
             credentials: Duration::from_secs(30),
-            stream_idle: Duration::from_secs(60),
+            stream_idle: Duration::from_secs(300),
         }
     }
 }

@@ -24,7 +24,7 @@ impl Default for OpenAiTimeouts {
         Self {
             connect: Duration::from_secs(60),
             headers: Duration::from_secs(300),
-            stream_idle: Duration::from_secs(60),
+            stream_idle: Duration::from_secs(300),
         }
     }
 }
