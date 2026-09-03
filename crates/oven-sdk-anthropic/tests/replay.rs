@@ -300,7 +300,7 @@ async fn never_replay_reports_only_reconstructed_without_inspecting_artifacts() 
 }
 
 #[tokio::test]
-async fn unsigned_or_missing_reasoning_replay_is_omitted_with_disposition_and_warning() {
+async fn unsigned_reasoning_replays_byte_faithfully() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_string(terminal_response()))
@@ -325,7 +325,7 @@ async fn unsigned_or_missing_reasoning_replay_is_omitted_with_disposition_and_wa
         serde_json::json!({
             "format":"oven.anthropic.messages.assistant.v3",
             "message":{"role":"assistant","content":[
-                {"type":"thinking","thinking":"reason"},
+                {"type":"thinking","thinking":"reason","signature":""},
                 {"type":"text","text":"answer"}
             ]},
             "stop_reason":"end_turn",
@@ -334,39 +334,30 @@ async fn unsigned_or_missing_reasoning_replay_is_omitted_with_disposition_and_wa
     )
     .unwrap();
 
-    for turn in [
-        reasoning_assistant(Some(unsigned)),
-        reasoning_assistant(None),
-    ] {
-        let mut response = model
-            .stream(
-                Request::new(vec![turn, HistoryTurn::user(UserMessage::new(Vec::new()))]),
-                AbortSignal::default(),
-            )
-            .await
-            .unwrap();
-        assert!(
-            response
-                .request
-                .replay
-                .decisions
-                .iter()
-                .any(|decision| decision.disposition == ReplayDisposition::ReconstructedNormalized)
-        );
-        let start = response.stream.next().await.unwrap().unwrap();
-        assert!(
-            matches!(start, StreamPart::StreamStart { warnings } if warnings.iter().any(|warning| warning.contains("reasoning omitted")))
-        );
-    }
+    let response = model
+        .stream(
+            Request::new(vec![
+                reasoning_assistant(Some(unsigned)),
+                HistoryTurn::user(UserMessage::new(Vec::new())),
+            ]),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.request.replay.decisions[0].disposition,
+        ReplayDisposition::Replayed
+    );
 
-    for request in server.received_requests().await.unwrap() {
-        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-        let assistant = body["messages"][0]["content"].as_array().unwrap();
-        assert_eq!(
-            assistant,
-            &[serde_json::json!({"type":"text","text":"answer"})]
-        );
-    }
+    let request = &server.received_requests().await.unwrap()[0];
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(
+        body["messages"][0]["content"],
+        serde_json::json!([
+            {"type":"thinking","thinking":"reason","signature":""},
+            {"type":"text","text":"answer"}
+        ])
+    );
 }
 
 #[tokio::test]

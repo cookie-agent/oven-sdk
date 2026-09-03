@@ -339,26 +339,18 @@ impl State {
                         signature,
                     } => {
                         let native = if redacted {
-                            let data = data
-                                .filter(|data| {
-                                    data.as_str().is_some_and(|data| !data.is_empty())
-                                })
-                                .ok_or_else(|| {
+                            let data =
+                                data.filter(|data| data.as_str().is_some()).ok_or_else(|| {
                                     invalid_finalized_reasoning(
-                                        "Anthropic redacted_thinking requires non-empty string data",
+                                        "Anthropic redacted_thinking requires string data",
                                         bytes,
                                     )
                                 })?;
                             serde_json::json!({"type":"redacted_thinking","data":data})
                         } else {
-                            let signature = signature
-                                .filter(|signature| !signature.is_empty())
-                                .ok_or_else(|| {
-                                    invalid_finalized_reasoning(
-                                        "Messages thinking requires a non-empty signature",
-                                        bytes,
-                                    )
-                                })?;
+                            // The native schema always carries this field; a missing delta is
+                            // represented as the equivalent empty signature.
+                            let signature = signature.unwrap_or_default();
                             serde_json::json!({"type":"thinking","thinking":text,"signature":signature})
                         };
                         self.push_native(i, native, bytes)?;

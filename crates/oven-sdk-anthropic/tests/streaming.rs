@@ -523,28 +523,56 @@ async fn required_replay_declarations_accept_only_valid_authoritative_reasoning(
 }
 
 #[tokio::test]
-async fn malformed_reasoning_fails_before_finish_or_artifact_capture() {
-    let thinking = |signature_delta: Option<&str>| {
-        let mut events = vec![
+async fn unsigned_thinking_and_empty_redacted_data_are_captured_faithfully() {
+    let model = scripted_model(
+        [
             event("message_start", r#"{"type":"message_start","message":{}}"#),
             event(
                 "content_block_start",
                 r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}"#,
             ),
-        ];
-        if let Some(signature) = signature_delta {
-            events.push(event(
+            event(
                 "content_block_delta",
-                &format!(r#"{{"type":"content_block_delta","index":0,"delta":{{"type":"signature_delta","signature":"{signature}"}}}}"#),
-            ));
-        }
-        events.push(event(
-            "content_block_stop",
-            r#"{"type":"content_block_stop","index":0}"#,
-        ));
-        events.push(terminal());
-        events.concat()
-    };
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reason"}}"#,
+            ),
+            event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":""}}"#,
+            ),
+            event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":1}"#,
+            ),
+            terminal(),
+        ]
+        .concat(),
+    )
+    .await;
+    let completed = model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        completed.turn.finish.native_replay.unwrap().payload(),
+        &serde_json::json!({
+            "format": "oven.anthropic.messages.assistant.v3",
+            "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "reason", "signature": ""},
+                {"type": "redacted_thinking", "data": ""}
+            ]},
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+        })
+    );
+}
+
+#[tokio::test]
+async fn malformed_reasoning_fails_before_finish_or_artifact_capture() {
     let redacted = |data: &str| {
         [
             event("message_start", r#"{"type":"message_start","message":{}}"#),
@@ -552,17 +580,16 @@ async fn malformed_reasoning_fails_before_finish_or_artifact_capture() {
                 "content_block_start",
                 &format!(r#"{{"type":"content_block_start","index":0,"content_block":{{"type":"redacted_thinking","data":{data}}}}}"#),
             ),
-            event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+            event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
             terminal(),
         ]
         .concat()
     };
 
-    assert_reasoning_failure(&scripted_model(thinking(None)).await).await;
-    assert_reasoning_failure(&scripted_aws_model(thinking(Some(""))).await).await;
-    assert_reasoning_failure(&scripted_minimax_model(thinking(None)).await).await;
     assert_reasoning_failure(&scripted_model(redacted("null")).await).await;
-    assert_reasoning_failure(&scripted_aws_model(redacted("\"\"")).await).await;
     assert_reasoning_failure(&scripted_minimax_model(redacted("\"opaque\"")).await).await;
 }
 

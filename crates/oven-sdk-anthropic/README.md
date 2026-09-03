@@ -205,13 +205,15 @@ into replay metadata. Foreign adapters and foreign scopes are reported
 separately and fall back to normalized reconstruction according to the declared
 replay policy. There is no legacy replay decoder.
 
-Signed/redacted provider reasoning is replayed only from a matching,
-semantically valid current artifact. Normalized reconstruction never invents
+Provider reasoning is replayed only from a matching, semantically valid current
+artifact. Normalized reconstruction never invents
 provider-authoritative reasoning state. Replay payloads remain bounded and
 omit model identity because identity now belongs to the core native-context scope.
-Compatible endpoints use the same capture path: streamed signed thinking blocks
-are retained verbatim in the terminal artifact and replayed during tool-use
-continuations when the caller declares native replay support.
+Compatible endpoints use the same capture path: streamed thinking blocks are
+retained in the terminal artifact and replayed during tool-use continuations
+when the caller declares native replay support. Signature values, including an
+empty string, are preserved. Because the native artifact schema always includes
+`signature`, an absent signature delta is represented as `"signature": ""`.
 
 ## Provider-native compaction
 
@@ -231,11 +233,12 @@ cannot be duplicated or reused after finalization. Deltas and stops may
 interleave, while normalized content and replay content retain validated start
 order without null placeholders.
 
-Malformed or unsigned finalized reasoning, invalid tool JSON, usage overflow,
-terminal ordering violations, and semantic events after `message_stop` fail
-before successful `Finish` or replay capture. HTTP diagnostics retain bounded,
-selected safe fields. Cancellation stops local initiation or reading but does
-not claim remote cancellation or billing termination.
+Malformed finalized reasoning, invalid tool JSON, usage overflow, terminal
+ordering violations, and semantic events after `message_stop` fail before
+successful `Finish` or replay capture. Empty thinking signatures and empty
+redacted-thinking data remain valid provider-native content. HTTP diagnostics
+retain bounded, selected safe fields. Cancellation stops local initiation or
+reading but does not claim remote cancellation or billing termination.
 
 ## Live tests
 
