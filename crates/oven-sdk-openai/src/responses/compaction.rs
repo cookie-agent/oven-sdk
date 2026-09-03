@@ -344,11 +344,30 @@ fn parse_usage(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
         .pointer("/input_tokens_details/cached_tokens")
         .and_then(JsonValue::as_u64)
         .unwrap_or(0);
+    let cache_write = value
+        .pointer("/input_tokens_details/cache_write_tokens")
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                invalid(
+                    "OpenAI compaction cache-write token usage is invalid",
+                    bytes,
+                )
+            })
+        })
+        .transpose()?;
     let reasoning = value
         .pointer("/output_tokens_details/reasoning_tokens")
         .and_then(JsonValue::as_u64)
         .unwrap_or(0);
-    if cached > input || reasoning > output {
+    let cached_total = cached
+        .checked_add(cache_write.unwrap_or(0))
+        .ok_or_else(|| {
+            invalid(
+                "OpenAI compaction input cache token details overflowed",
+                bytes,
+            )
+        })?;
+    if cached_total > input || reasoning > output {
         return Err(invalid(
             "OpenAI compaction token details are inconsistent",
             bytes,
@@ -358,7 +377,7 @@ fn parse_usage(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
         input_tokens: Some(input),
         input_tokens_no_cache: None,
         input_tokens_cache_read: Some(cached),
-        input_tokens_cache_write: None,
+        input_tokens_cache_write: cache_write,
         output_tokens: Some(output),
         output_tokens_text: Some(output - reasoning),
         output_tokens_reasoning: Some(reasoning),
@@ -472,5 +491,29 @@ mod tests {
             }))
             .is_some()
         );
+    }
+
+    #[test]
+    fn cache_write_usage_is_optional_and_validated() {
+        let base = serde_json::json!({
+            "input_tokens": 20,
+            "output_tokens": 5,
+            "total_tokens": 25
+        });
+        assert_eq!(
+            parse_usage(&base, 0).unwrap().input_tokens_cache_write,
+            None
+        );
+
+        let mut present = base.clone();
+        present["input_tokens_details"] = serde_json::json!({"cache_write_tokens": 7});
+        assert_eq!(
+            parse_usage(&present, 0).unwrap().input_tokens_cache_write,
+            Some(7)
+        );
+
+        let mut malformed = base;
+        malformed["input_tokens_details"] = serde_json::json!({"cache_write_tokens": -1});
+        assert!(parse_usage(&malformed, 0).is_err());
     }
 }

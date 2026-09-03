@@ -356,7 +356,7 @@ impl State {
             ));
         }
         if let Some(usage) = response.get("usage").filter(|value| !value.is_null()) {
-            self.usage = usage_from(usage);
+            self.usage = usage_from(usage, bytes)?;
         }
         self.status = response
             .get("status")
@@ -1052,21 +1052,61 @@ fn invalid_finalize(message: &str, bytes: u64) -> ModelError {
         .with_bytes_received(bytes)
 }
 
-pub(crate) fn usage_from(value: &JsonValue) -> Usage {
+pub(crate) fn usage_from(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
     let output = value.get("output_tokens").and_then(JsonValue::as_u64);
     let reasoning = value
         .pointer("/output_tokens_details/reasoning_tokens")
         .and_then(JsonValue::as_u64);
-    Usage {
+    let cache_write = value
+        .pointer("/input_tokens_details/cache_write_tokens")
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                invalid_finalize("Responses cache-write token usage is invalid", bytes)
+            })
+        })
+        .transpose()?;
+    Ok(Usage {
         input_tokens: value.get("input_tokens").and_then(JsonValue::as_u64),
         input_tokens_no_cache: None,
         input_tokens_cache_read: value
             .pointer("/input_tokens_details/cached_tokens")
             .and_then(JsonValue::as_u64),
-        input_tokens_cache_write: None,
+        input_tokens_cache_write: cache_write,
         output_tokens: output,
         output_tokens_text: output.map(|total| total.saturating_sub(reasoning.unwrap_or(0))),
         output_tokens_reasoning: reasoning,
         raw: Some(value.clone()),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_write_usage_is_optional_and_validated() {
+        let present = serde_json::json!({
+            "input_tokens_details": {"cache_write_tokens": 23}
+        });
+        assert_eq!(
+            usage_from(&present, 0).unwrap().input_tokens_cache_write,
+            Some(23)
+        );
+
+        assert_eq!(
+            usage_from(&serde_json::json!({}), 0)
+                .unwrap()
+                .input_tokens_cache_write,
+            None
+        );
+        assert!(
+            usage_from(
+                &serde_json::json!({
+                    "input_tokens_details": {"cache_write_tokens": "invalid"}
+                }),
+                0
+            )
+            .is_err()
+        );
     }
 }

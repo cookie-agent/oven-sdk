@@ -91,7 +91,7 @@ impl State {
         }
         self.capture_metadata(&value);
         if let Some(usage) = value.get("usage").filter(|usage| !usage.is_null()) {
-            self.usage = usage_from(usage);
+            self.usage = usage_from(usage, bytes)?;
         }
         let choices = value
             .get("choices")
@@ -475,21 +475,68 @@ fn map_finish(reason: Option<&str>, done_marker: bool) -> FinishReason {
     }
 }
 
-fn usage_from(value: &JsonValue) -> Usage {
+fn usage_from(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
     let output = value.get("completion_tokens").and_then(JsonValue::as_u64);
     let reasoning = value
         .pointer("/completion_tokens_details/reasoning_tokens")
         .and_then(JsonValue::as_u64);
-    Usage {
+    let cache_write = optional_usage_u64(
+        value.pointer("/prompt_tokens_details/cache_write_tokens"),
+        "Chat cache-write token usage is invalid",
+        bytes,
+    )?;
+    Ok(Usage {
         input_tokens: value.get("prompt_tokens").and_then(JsonValue::as_u64),
         input_tokens_no_cache: None,
         input_tokens_cache_read: value
             .pointer("/prompt_tokens_details/cached_tokens")
             .and_then(JsonValue::as_u64),
-        input_tokens_cache_write: None,
+        input_tokens_cache_write: cache_write,
         output_tokens: output,
         output_tokens_text: output.map(|total| total.saturating_sub(reasoning.unwrap_or(0))),
         output_tokens_reasoning: reasoning,
         raw: Some(value.clone()),
+    })
+}
+
+fn optional_usage_u64(
+    value: Option<&JsonValue>,
+    message: &str,
+    bytes: u64,
+) -> Result<Option<u64>, ModelError> {
+    value
+        .map(|value| value.as_u64().ok_or_else(|| invalid_event(message, bytes)))
+        .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_write_usage_is_optional_and_validated() {
+        let present = serde_json::json!({
+            "prompt_tokens_details": {"cache_write_tokens": 17}
+        });
+        assert_eq!(
+            usage_from(&present, 0).unwrap().input_tokens_cache_write,
+            Some(17)
+        );
+
+        assert_eq!(
+            usage_from(&serde_json::json!({}), 0)
+                .unwrap()
+                .input_tokens_cache_write,
+            None
+        );
+        assert!(
+            usage_from(
+                &serde_json::json!({
+                    "prompt_tokens_details": {"cache_write_tokens": -1}
+                }),
+                0
+            )
+            .is_err()
+        );
     }
 }
