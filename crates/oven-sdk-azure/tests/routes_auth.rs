@@ -112,7 +112,7 @@ async fn entra_provider_is_async_per_request() {
 }
 
 #[test]
-fn api_versions_endpoints_and_protected_headers_validate() {
+fn api_versions_and_endpoints_validate() {
     assert!(AzureApiVersion::new("2025-04-01-preview").is_ok());
     assert!(AzureApiVersion::new("preview").is_err());
     let invalid_endpoint = common::chat_config(
@@ -123,16 +123,40 @@ fn api_versions_endpoints_and_protected_headers_validate() {
         AzureOpenAiAuth::ApiKey(SecretString::new("x")),
     );
     assert!(AzureOpenAiChatModel::new(invalid_endpoint).is_err());
+}
 
-    let mut headers = HeaderMap::new();
-    headers.insert("authorization", HeaderValue::from_static("secret"));
-    let mut protected = common::chat_config(
-        "https://example.test",
+#[tokio::test]
+async fn caller_authorization_suppresses_entra_bearer_injection() {
+    let server = MockServer::start().await;
+    common::mount(
+        &server,
+        "/openai/v1/chat/completions",
+        common::chat_document("ok"),
+    )
+    .await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider_calls = Arc::clone(&calls);
+    let mut config = common::chat_config(
+        server.uri(),
         AzureApiRoute::V1,
         "deployment",
-        common::conservative(),
-        AzureOpenAiAuth::ApiKey(SecretString::new("x")),
+        common::gpt4o(),
+        AzureOpenAiAuth::Entra(Arc::new(move || {
+            provider_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok("configured-token".into()) })
+        })),
     );
-    protected.provider.headers.static_headers = HeaderOverrides::new(headers);
-    assert!(AzureOpenAiChatModel::new(protected).is_err());
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", HeaderValue::from_static("Caller token"));
+    config.provider.headers.static_headers = HeaderOverrides::new(headers);
+    let model = AzureOpenAiChatModel::new(config).unwrap();
+
+    model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers["authorization"], "Caller token");
 }

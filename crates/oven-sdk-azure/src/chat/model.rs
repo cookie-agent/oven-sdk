@@ -113,7 +113,8 @@ impl LanguageModel for AzureOpenAiChatModel {
                 &self.descriptor().capabilities,
                 &profile.wire(),
             )?;
-            let settings = configured_settings(&self.config, &abort).await?;
+            let settings =
+                configured_settings(&self.config, &request_value.header_context, &abort).await?;
             start_stream(
                 self.descriptor().clone(),
                 request_value,
@@ -137,13 +138,17 @@ fn configured_owned(config: &Config) -> OwnedProfile {
     }
 }
 
-async fn configured_settings(config: &Config, abort: &AbortSignal) -> Result<Settings, ModelError> {
-    let mut headers = config.caller_headers()?;
+async fn configured_settings(
+    config: &Config,
+    context: &oven_sdk::HeaderContext,
+    abort: &AbortSignal,
+) -> Result<Settings, ModelError> {
+    let mut headers = config.caller_headers(context)?;
     match &config.auth {
-        AzureOpenAiAuth::ApiKey(key) => {
+        AzureOpenAiAuth::ApiKey(key) if !headers.contains_key("api-key") => {
             insert_header(&mut headers, "api-key", key.expose_secret())?;
         }
-        AzureOpenAiAuth::Entra(provider) => {
+        AzureOpenAiAuth::Entra(provider) if !headers.contains_key("authorization") => {
             let token = tokio::select! {
                 result = tokio::time::timeout(config.timeouts.credentials, provider()) => result
                     .map_err(|_| ModelError::timeout("Azure Entra credential timed out").with_stage(ErrorStage::Connect))??,
@@ -158,6 +163,7 @@ async fn configured_settings(config: &Config, abort: &AbortSignal) -> Result<Set
             }
             insert_header(&mut headers, "authorization", &format!("Bearer {token}"))?;
         }
+        _ => {}
     }
     let (replay_binding, replay_scope) = config.native_context(&headers)?;
     Ok(Settings {

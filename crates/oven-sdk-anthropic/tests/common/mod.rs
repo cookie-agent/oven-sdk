@@ -224,7 +224,7 @@ pub fn expected_native_context_scope(
 struct DynamicHeaders(Arc<dyn Fn() -> HeaderMap + Send + Sync>);
 
 impl HeaderProvider for DynamicHeaders {
-    fn headers(&self) -> Result<HeaderOverrides, ModelError> {
+    fn headers(&self, _context: &oven_sdk::HeaderContext) -> Result<HeaderOverrides, ModelError> {
         Ok(HeaderOverrides::new((self.0)()))
     }
 }
@@ -700,8 +700,6 @@ impl AnthropicAwsBuilder {
             return Err(ModelError::invalid_request("test AWS auth is required"));
         }
         for name in [
-            "authorization",
-            "x-api-key",
             "x-amz-date",
             "x-amz-security-token",
             "x-amz-content-sha256",

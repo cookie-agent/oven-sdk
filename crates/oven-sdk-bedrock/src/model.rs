@@ -12,7 +12,7 @@ use oven_sdk::{
     ProviderMetadata, ReplayCapability, Request, RequestMetadata, ResourceId, StreamPart,
     StreamResponse,
 };
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -218,10 +218,9 @@ impl BedrockModel {
                     .with_stage(ErrorStage::RequestEncoding)
             })?;
             crate::request::validate_serialized_body(&request, body.len())?;
-            let credentials = self.resolve_credentials(&abort).await?;
             let mut headers = self.config.headers.static_headers.as_map().clone();
             if let Some(provider) = &self.config.headers.dynamic_headers {
-                let dynamic = provider.headers()?;
+                let dynamic = provider.headers(&request.header_context)?;
                 let dynamic = dynamic.as_map();
                 validate_headers(dynamic)?;
                 headers.extend(dynamic.clone());
@@ -236,14 +235,17 @@ impl BedrockModel {
                 headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
             }
             let url = self.endpoint(streaming)?;
-            crate::sigv4::sign(
-                "POST",
-                &url,
-                &body,
-                &mut headers,
-                &self.config.region,
-                &credentials,
-            )?;
+            if !headers.contains_key(AUTHORIZATION) {
+                let credentials = self.resolve_credentials(&abort).await?;
+                crate::sigv4::sign(
+                    "POST",
+                    &url,
+                    &body,
+                    &mut headers,
+                    &self.config.region,
+                    &credentials,
+                )?;
+            }
             let send = self
                 .config
                 .client
@@ -710,7 +712,6 @@ fn native_context_scope(
 
 pub(crate) fn validate_headers(headers: &reqwest::header::HeaderMap) -> Result<(), ModelError> {
     const PROTECTED: &[&str] = &[
-        "authorization",
         "host",
         "content-type",
         "x-amz-date",

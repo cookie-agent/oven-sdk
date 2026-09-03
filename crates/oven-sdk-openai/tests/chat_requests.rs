@@ -3,16 +3,41 @@ pub mod common;
 use futures_util::StreamExt;
 use oven_sdk::{
     AbortSignal, AssistantMessage, AssistantPart, CompletedTurn, ContentValue, FilePart,
-    FileSource, Finish, FinishReason, HistoryTurn, InferenceOptions, InputPart, JsonSchema,
-    LanguageModel, Request, ResponseFormat, SystemMessage, SystemPart, TextPart, ToolCallPart,
-    ToolChoice, ToolContent, ToolDefinition, ToolMessage, ToolResultPart, UserMessage,
+    FileSource, Finish, FinishReason, HeaderContext, HeaderOverrides, HeaderProvider, HistoryTurn,
+    InferenceOptions, InputPart, JsonSchema, LanguageModel, ModelError, Request, ResponseFormat,
+    SystemMessage, SystemPart, TextPart, ToolCallPart, ToolChoice, ToolContent, ToolDefinition,
+    ToolMessage, ToolResultPart, UserMessage,
 };
 use oven_sdk_openai::{
     OpenAiChatOptions, OpenAiChatRequestExt, OpenAiPromptCacheBreakpointExt, OpenAiPromptCacheMode,
     OpenAiPromptCacheOptions, OpenAiPromptCacheRetention, OpenAiPromptCacheTtl,
     OpenAiResponsesOptions, OpenAiResponsesRequestExt,
 };
+use reqwest::header::{HeaderMap, HeaderValue};
+use std::sync::{Arc, Mutex};
 use wiremock::MockServer;
+
+struct ContextHeaders(Arc<Mutex<Vec<HeaderContext>>>);
+
+impl HeaderProvider for ContextHeaders {
+    fn headers(&self, context: &HeaderContext) -> Result<HeaderOverrides, ModelError> {
+        self.0.lock().unwrap().push(context.clone());
+        let mut headers = HeaderMap::new();
+        if !context.session_id.is_empty() {
+            headers.insert(
+                "x-session-id",
+                HeaderValue::from_str(&context.session_id).unwrap(),
+            );
+        }
+        if let Some(parent) = &context.parent_session_id {
+            headers.insert(
+                "x-session-parent-id",
+                HeaderValue::from_str(parent).unwrap(),
+            );
+        }
+        Ok(HeaderOverrides::new(headers))
+    }
+}
 
 #[tokio::test]
 async fn chat_rejects_tool_result_files_before_dispatch() {
@@ -116,6 +141,62 @@ async fn official_chat_encodes_headers_stream_usage_and_single_post() {
     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(body["stream"], true);
     assert_eq!(body["stream_options"]["include_usage"], true);
+}
+
+#[tokio::test]
+async fn dynamic_headers_receive_distinct_request_contexts() {
+    let server = MockServer::start().await;
+    common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut config = common::official_chat_config(&server, "gpt-4o-mini");
+    config.settings.routing_discriminator = Some("context-headers".into());
+    config.provider.headers.dynamic_headers = Some(Arc::new(ContextHeaders(Arc::clone(&seen))));
+    let model = oven_sdk_openai::OpenAiChatModel::new(config).unwrap();
+
+    for context in [
+        HeaderContext::new("session-root"),
+        HeaderContext::new("session-child").with_parent_session_id("session-root"),
+    ] {
+        model
+            .complete(
+                Request::new(Vec::new()).with_header_context(context),
+                AbortSignal::default(),
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            HeaderContext::new("session-root"),
+            HeaderContext::new("session-child").with_parent_session_id("session-root"),
+        ]
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers["x-session-id"], "session-root");
+    assert!(requests[0].headers.get("x-session-parent-id").is_none());
+    assert_eq!(requests[1].headers["x-session-id"], "session-child");
+    assert_eq!(requests[1].headers["x-session-parent-id"], "session-root");
+}
+
+#[tokio::test]
+async fn caller_authorization_suppresses_openai_bearer_injection() {
+    let server = MockServer::start().await;
+    common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+    let mut config = common::official_chat_config(&server, "gpt-4o-mini");
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", HeaderValue::from_static("Caller token"));
+    config.provider.headers.static_headers = HeaderOverrides::new(headers);
+    let model = oven_sdk_openai::OpenAiChatModel::new(config).unwrap();
+
+    model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers["authorization"], "Caller token");
 }
 
 #[tokio::test]

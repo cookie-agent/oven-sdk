@@ -516,14 +516,8 @@ async fn responses_terminal_payloads_allow_optional_status_output_and_reasons() 
 }
 
 #[test]
-fn injected_clients_are_not_a_public_configuration_surface_and_protected_headers_are_rejected() {
-    for name in [
-        "authorization",
-        "api-key",
-        "host",
-        "content-type",
-        "content-length",
-    ] {
+fn injected_clients_are_not_a_public_configuration_surface_and_transport_headers_are_rejected() {
+    for name in ["host", "content-type", "content-length"] {
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_bytes(name.as_bytes()).unwrap(),

@@ -234,10 +234,13 @@ pub(crate) struct Config {
 const NATIVE_SCOPE_VERSION: &str = "azure.openai.native_context_scope.v1";
 
 impl Config {
-    pub(crate) fn caller_headers(&self) -> Result<HeaderMap, ModelError> {
+    pub(crate) fn caller_headers(
+        &self,
+        context: &oven_sdk::HeaderContext,
+    ) -> Result<HeaderMap, ModelError> {
         let mut headers = self.base_headers.clone();
         if let Some(provider) = &self.headers.dynamic_headers {
-            let dynamic = provider.headers()?;
+            let dynamic = provider.headers(context)?;
             reject_protected_headers(dynamic.as_map())?;
             headers.extend(dynamic.as_map().clone());
         }
@@ -638,13 +641,7 @@ fn endpoint_base(
 }
 
 pub(crate) fn reject_protected_headers(headers: &HeaderMap) -> Result<(), ModelError> {
-    const PROTECTED: &[&str] = &[
-        "api-key",
-        "authorization",
-        "host",
-        "content-type",
-        "content-length",
-    ];
+    const PROTECTED: &[&str] = &["host", "content-type", "content-length"];
     if PROTECTED.iter().any(|name| headers.contains_key(*name)) {
         Err(ModelError::invalid_request(
             "Azure authentication and transport headers are protected",

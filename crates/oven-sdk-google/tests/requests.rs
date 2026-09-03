@@ -71,7 +71,7 @@ fn terminal_sse(text: &str) -> String {
 struct DynamicHeaders(HeaderMap);
 
 impl HeaderProvider for DynamicHeaders {
-    fn headers(&self) -> Result<HeaderOverrides, ModelError> {
+    fn headers(&self, _context: &oven_sdk::HeaderContext) -> Result<HeaderOverrides, ModelError> {
         Ok(HeaderOverrides::new(self.0.clone()))
     }
 }
@@ -108,6 +108,40 @@ async fn dynamic_headers_cannot_override_content_type() {
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests[0].headers[CONTENT_TYPE], "application/json");
+}
+
+#[tokio::test]
+async fn caller_api_key_suppresses_google_auth_injection() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(terminal_sse("ok")),
+        )
+        .mount(&server)
+        .await;
+    let mut config = config_with(
+        format!("{}/v1beta", server.uri()),
+        "gemini-2.5-flash",
+        "models/gemini-2.5-flash",
+        "configured-secret",
+        full_capabilities(),
+        level_thinking(),
+        default_tools(),
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert("x-goog-api-key", HeaderValue::from_static("caller-secret"));
+    config.provider.headers.static_headers = HeaderOverrides::new(headers);
+    let model = GoogleModel::new(config).unwrap();
+
+    model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers["x-goog-api-key"], "caller-secret");
 }
 
 #[tokio::test]

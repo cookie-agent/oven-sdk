@@ -1,15 +1,16 @@
 mod support;
 
 use oven_sdk::{
-    AbortSignal, Capability, FilePart, FileSource, HistoryTurn, InputPart, JsonSchema,
-    LanguageModel, Request, ResponseFormat, SystemMessage, SystemPart, TextPart, ToolChoice,
-    ToolDefinition, UserMessage,
+    AbortSignal, Capability, FilePart, FileSource, HeaderOverrides, HistoryTurn, InputPart,
+    JsonSchema, LanguageModel, Request, ResponseFormat, SystemMessage, SystemPart, TextPart,
+    ToolChoice, ToolDefinition, UserMessage,
 };
 use oven_sdk_bedrock::{
     BedrockAuth, BedrockCachePoint, BedrockCacheStrategy, BedrockCacheTtl, BedrockGuardrailConfig,
     BedrockMessageCachePoint, BedrockModel, BedrockReasoningWireFormat, BedrockRequestExt,
     BedrockRequestOptions,
 };
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -88,6 +89,43 @@ async fn converse_encodes_system_tools_and_message_cache_points() {
             .text(),
         "ok"
     );
+}
+
+#[tokio::test]
+async fn caller_authorization_suppresses_bedrock_signing() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/model/opaque/converse"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},
+            "stopReason":"end_turn",
+            "usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2},
+            "metrics":{"latencyMs":1}
+        })))
+        .mount(&server)
+        .await;
+    let mut config = support::config(
+        &server.uri(),
+        "opaque",
+        support::FixtureKind::Text,
+        BedrockAuth::Static(support::credentials()),
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        HeaderValue::from_static("Caller signature"),
+    );
+    config.provider.headers.static_headers = HeaderOverrides::new(headers);
+    let model = BedrockModel::new(config).unwrap();
+
+    model
+        .converse(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers["authorization"], "Caller signature");
+    assert!(requests[0].headers.get("x-amz-date").is_none());
 }
 
 #[tokio::test]

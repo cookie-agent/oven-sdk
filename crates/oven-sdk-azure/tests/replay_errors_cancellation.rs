@@ -18,7 +18,7 @@ use wiremock::{
 struct DynamicHeaders(HeaderMap);
 
 impl HeaderProvider for DynamicHeaders {
-    fn headers(&self) -> Result<HeaderOverrides, ModelError> {
+    fn headers(&self, _context: &oven_sdk::HeaderContext) -> Result<HeaderOverrides, ModelError> {
         Ok(HeaderOverrides::new(self.0.clone()))
     }
 }

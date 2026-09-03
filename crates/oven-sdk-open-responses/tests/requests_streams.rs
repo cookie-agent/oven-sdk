@@ -1,11 +1,33 @@
 mod common;
 
 use oven_sdk::{
-    AbortSignal, FilePart, FileSource, HistoryTurn, InferenceOptions, InputPart, JsonSchema,
-    LanguageModel, Request, ResponseFormat, TextPart, ToolDefinition, UserMessage,
+    AbortSignal, FilePart, FileSource, HeaderOverrides, HistoryTurn, InferenceOptions, InputPart,
+    JsonSchema, LanguageModel, Request, ResponseFormat, TextPart, ToolDefinition, UserMessage,
 };
-use oven_sdk_open_responses::{OpenResponsesRequestExt, OpenResponsesRequestOptions};
+use oven_sdk_open_responses::{
+    OpenResponsesModel, OpenResponsesRequestExt, OpenResponsesRequestOptions,
+};
+use reqwest::header::{HeaderMap, HeaderValue};
 use wiremock::MockServer;
+
+#[tokio::test]
+async fn caller_authorization_suppresses_open_responses_bearer_injection() {
+    let server = MockServer::start().await;
+    common::mount(&server, common::text_stream("ok")).await;
+    let mut config = common::generic_config(&server, "opaque");
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", HeaderValue::from_static("Caller token"));
+    config.provider.headers.static_headers = HeaderOverrides::new(headers);
+    let model = OpenResponsesModel::new(config).unwrap();
+
+    model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers["authorization"], "Caller token");
+}
 
 #[tokio::test]
 async fn generic_request_encodes_standard_tools_schema_reasoning_sources_and_media() {

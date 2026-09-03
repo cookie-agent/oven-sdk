@@ -7,14 +7,14 @@ use std::{
 
 use oven_sdk::{
     AbortSignal, AdapterId, AssistantMessage, AssistantPart, BoxFuture, CompactionCapability,
-    CompleteResult, CompletedTurn, ErrorStage, Finish, HeaderConfig, JsonValue, LanguageModel,
+    CompleteResult, CompletedTurn, ErrorStage, Finish, JsonValue, LanguageModel,
     LanguageModelDescriptor, ModelConfig, ModelError, ModelId, ModelIdentity, NativeContextScope,
     ProviderConfig, ProviderMetadata, ReasoningPart, Request, RequestMetadata, ResourceId,
     SecretString, StreamPart, StreamResponse, TextPart,
 };
 use reqwest::{
     Client,
-    header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
+    header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
 };
 use sha2::{Digest as _, Sha256};
 use url::Url;
@@ -107,7 +107,6 @@ impl GoogleModel {
             ));
         }
         validate_auth(&config.provider.auth)?;
-        validate_headers(&config.provider.headers)?;
         validate_endpoint(config.provider.api.as_url())?;
         validate_model_resource(&config.settings.model_resource)?;
         validate_settings(&config)?;
@@ -224,21 +223,21 @@ impl GoogleModel {
             crate::request::validate_request_body_size(body.len())?;
             let mut headers = self.config.base_headers.clone();
             if let Some(provider) = &self.config.provider.headers.dynamic_headers {
-                let dynamic = provider.headers()?;
-                validate_header_map(dynamic.as_map())?;
+                let dynamic = provider.headers(&request.header_context)?;
                 headers.extend(dynamic.as_map().clone());
             }
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            headers.insert(
-                HeaderName::from_static("x-goog-api-key"),
-                HeaderValue::from_str(self.config.provider.auth.api_key.expose_secret()).map_err(
-                    |_| {
-                        ModelError::invalid_request(
-                            "Google Gemini API key is not a valid header value",
-                        )
-                    },
-                )?,
-            );
+            if !headers.contains_key("x-goog-api-key") {
+                headers.insert(
+                    HeaderName::from_static("x-goog-api-key"),
+                    HeaderValue::from_str(self.config.provider.auth.api_key.expose_secret())
+                        .map_err(|_| {
+                            ModelError::invalid_request(
+                                "Google Gemini API key is not a valid header value",
+                            )
+                        })?,
+                );
+            }
             let send = self
                 .config
                 .client
@@ -440,19 +439,6 @@ fn validate_auth(auth: &GoogleApiKeyAuth) -> Result<(), ModelError> {
     if auth.api_key.expose_secret().trim().is_empty() {
         return Err(ModelError::invalid_request(
             "Google Gemini requires an explicit non-empty API key",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_headers(headers: &HeaderConfig) -> Result<(), ModelError> {
-    validate_header_map(headers.static_headers.as_map())
-}
-
-fn validate_header_map(headers: &HeaderMap) -> Result<(), ModelError> {
-    if headers.contains_key(AUTHORIZATION) || headers.contains_key("x-goog-api-key") {
-        return Err(ModelError::invalid_request(
-            "Google caller headers cannot set authentication headers",
         ));
     }
     Ok(())

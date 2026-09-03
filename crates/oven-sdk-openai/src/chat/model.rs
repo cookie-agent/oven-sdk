@@ -410,12 +410,18 @@ async fn start_stream(
         .map_err(|_| ModelError::invalid_request("invalid Chat endpoint URL"))?;
     url.query_pairs_mut().extend_pairs(runtime.query.iter());
     let headers = match &runtime.auth {
-        Authentication::Official(auth) => {
-            official_headers(auth, &runtime.base_headers, &runtime.headers)?
-        }
-        Authentication::Compatible(auth) => {
-            compatible_headers(auth, &runtime.base_headers, &runtime.headers)?
-        }
+        Authentication::Official(auth) => official_headers(
+            auth,
+            &runtime.base_headers,
+            &runtime.headers,
+            &request_value.header_context,
+        )?,
+        Authentication::Compatible(auth) => compatible_headers(
+            auth,
+            &runtime.base_headers,
+            &runtime.headers,
+            &request_value.header_context,
+        )?,
     };
     let send = runtime
         .client

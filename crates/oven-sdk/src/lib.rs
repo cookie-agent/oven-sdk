@@ -396,10 +396,48 @@ impl fmt::Debug for HeaderOverrides {
     }
 }
 
+/// Per-request values available to a dynamic header provider.
+#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct HeaderContext {
+    /// Session identifier for this request.
+    pub session_id: String,
+    /// Parent session identifier for delegated or forked requests.
+    pub parent_session_id: Option<String>,
+}
+
+impl HeaderContext {
+    /// Creates context for a root-session request.
+    #[must_use]
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            parent_session_id: None,
+        }
+    }
+
+    /// Attaches a parent session identifier.
+    #[must_use]
+    pub fn with_parent_session_id(mut self, parent_session_id: impl Into<String>) -> Self {
+        self.parent_session_id = Some(parent_session_id.into());
+        self
+    }
+}
+
+impl fmt::Debug for HeaderContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HeaderContext")
+            .field("has_session_id", &!self.session_id.is_empty())
+            .field("has_parent_session_id", &self.parent_session_id.is_some())
+            .finish()
+    }
+}
+
 /// Caller-managed source of dynamic headers.
 pub trait HeaderProvider: Send + Sync {
     /// Resolves headers for one provider request without environment lookup in core.
-    fn headers(&self) -> Result<HeaderOverrides, ModelError>;
+    fn headers(&self, context: &HeaderContext) -> Result<HeaderOverrides, ModelError>;
 }
 
 /// Shared dynamic header provider.
@@ -1316,6 +1354,9 @@ pub struct Request {
     pub stream_options: StreamOptions,
     /// Provider options scoped to the request.
     pub provider_options: ProviderOptions,
+    /// Context supplied to dynamic header providers for this request.
+    #[serde(skip)]
+    pub header_context: HeaderContext,
 }
 
 impl Request {
@@ -1331,6 +1372,7 @@ impl Request {
             inference: InferenceOptions::new(),
             stream_options: StreamOptions::new(),
             provider_options: ProviderOptions::new(),
+            header_context: HeaderContext::default(),
         }
     }
 
@@ -1345,6 +1387,13 @@ impl Request {
     #[must_use]
     pub fn with_native_context(mut self, native_context: NativeContextWindow) -> Self {
         self.native_context = Some(native_context);
+        self
+    }
+
+    /// Replaces the context supplied to dynamic header providers.
+    #[must_use]
+    pub fn with_header_context(mut self, header_context: HeaderContext) -> Self {
+        self.header_context = header_context;
         self
     }
 

@@ -56,6 +56,15 @@ pub fn model_with(
     capabilities: ModelCapabilities,
     settings: CohereSettings,
 ) -> CohereModel {
+    CohereModel::new(config(server, model_id, capabilities, settings)).unwrap()
+}
+
+pub fn config(
+    server: &MockServer,
+    model_id: &str,
+    capabilities: ModelCapabilities,
+    settings: CohereSettings,
+) -> ModelConfig<CohereAuth, CohereSettings> {
     let provider = ProviderConfig::new(
         ProviderId::new("cohere"),
         ApiEndpoint::parse(format!("{}/v2/chat", server.uri())).unwrap(),
@@ -64,7 +73,7 @@ pub fn model_with(
     )
     .unwrap();
     let declaration = ModelDeclaration::new(ModelId::new(model_id), capabilities).unwrap();
-    CohereModel::new(ModelConfig::new(provider, declaration, settings)).unwrap()
+    ModelConfig::new(provider, declaration, settings)
 }
 
 pub async fn mount(server: &MockServer, body: String) {

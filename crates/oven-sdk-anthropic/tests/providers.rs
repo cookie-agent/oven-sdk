@@ -324,10 +324,8 @@ async fn anthropic_aws_sigv4_invokes_provider_and_signs_exact_request_body() {
 }
 
 #[test]
-fn anthropic_aws_rejects_static_caller_auth_and_signing_headers() {
+fn anthropic_aws_rejects_static_signing_headers() {
     for (name, value) in [
-        ("authorization", "Bearer caller"),
-        ("x-api-key", "caller-key"),
         ("x-amz-date", "20260801T000000Z"),
         ("x-amz-security-token", "caller-token"),
         ("x-amz-content-sha256", "caller-hash"),
@@ -359,8 +357,8 @@ fn anthropic_aws_rejects_static_caller_auth_and_signing_headers() {
 }
 
 #[tokio::test]
-async fn anthropic_aws_rejects_dynamic_protected_headers_before_auth_or_dispatch() {
-    let server = MockServer::start().await;
+async fn anthropic_aws_caller_auth_suppresses_configured_auth() {
+    let server = success_server().await;
     let calls = Arc::new(AtomicUsize::new(0));
     let provider_calls = Arc::clone(&calls);
     let model = AnthropicAws::builder("us-west-2", "workspace")
@@ -384,13 +382,13 @@ async fn anthropic_aws_rejects_dynamic_protected_headers_before_auth_or_dispatch
         .build()
         .unwrap()
         .model("claude-opus-4-8");
-    let error = model
-        .stream(Request::new(Vec::new()), AbortSignal::default())
+    model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
         .await
-        .unwrap_err();
-    assert_eq!(error.kind, ModelErrorKind::InvalidRequest);
+        .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(server.received_requests().await.unwrap().is_empty());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers["authorization"], "Bearer caller");
 
     let bearer = AnthropicAws::builder("us-west-2", "workspace")
         .bearer_key("configured")
@@ -404,13 +402,12 @@ async fn anthropic_aws_rejects_dynamic_protected_headers_before_auth_or_dispatch
         .build()
         .unwrap()
         .model("claude-opus-4-8");
-    assert!(
-        bearer
-            .stream(Request::new(Vec::new()), AbortSignal::default())
-            .await
-            .is_err()
-    );
-    assert!(server.received_requests().await.unwrap().is_empty());
+    bearer
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[1].headers["x-api-key"], "caller");
 }
 
 #[tokio::test]

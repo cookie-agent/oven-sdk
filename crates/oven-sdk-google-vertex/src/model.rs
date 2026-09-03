@@ -245,7 +245,6 @@ impl GoogleVertexModel {
         validate_resource_segment(&config.settings.project, "project")?;
         validate_resource_segment(&config.settings.location, "location")?;
         config.settings.resource.validate()?;
-        validate_headers(config.provider.headers.static_headers.as_map())?;
         if config.provider.api.as_url().query().is_some() {
             return Err(ModelError::invalid_request(
                 "Vertex API endpoint must not include a query",
@@ -424,23 +423,24 @@ impl GoogleVertexModel {
                 ModelError::invalid_request("could not serialize Vertex Gemini request")
                     .with_stage(ErrorStage::RequestEncoding)
             })?;
-            let token = self.resolve_token(&abort).await?;
             let mut headers = self.config.base_headers.clone();
             if let Some(provider) = &self.config.provider.headers.dynamic_headers {
-                let dynamic = provider.headers()?;
-                validate_headers(dynamic.as_map())?;
+                let dynamic = provider.headers(&request.header_context)?;
                 headers.extend(dynamic.as_map().clone());
             }
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
-                    ModelError::new(
-                        ModelErrorKind::Auth,
-                        "Vertex OAuth token is not a valid header value",
-                    )
-                })?,
-            );
+            if !headers.contains_key(AUTHORIZATION) {
+                let token = self.resolve_token(&abort).await?;
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+                        ModelError::new(
+                            ModelErrorKind::Auth,
+                            "Vertex OAuth token is not a valid header value",
+                        )
+                    })?,
+                );
+            }
             if let Some(value) = encoded.shared_request_type {
                 headers.insert(
                     HeaderName::from_static("x-vertex-ai-llm-shared-request-type"),
@@ -778,15 +778,6 @@ fn validate_resource_segment(value: &str, name: &str) -> Result<(), ModelError> 
     } else {
         Ok(())
     }
-}
-
-fn validate_headers(headers: &HeaderMap) -> Result<(), ModelError> {
-    if headers.contains_key(AUTHORIZATION) || headers.contains_key("x-goog-api-key") {
-        return Err(ModelError::invalid_request(
-            "Vertex caller headers cannot set authentication headers",
-        ));
-    }
-    Ok(())
 }
 
 fn header_value(value: &str, message: &str) -> Result<HeaderValue, ModelError> {

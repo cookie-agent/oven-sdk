@@ -59,7 +59,7 @@ async fn assert_invalid_replay(model: &impl LanguageModel, turn: CompletedTurn) 
 struct RouteHeaders;
 
 impl HeaderProvider for RouteHeaders {
-    fn headers(&self) -> Result<HeaderOverrides, ModelError> {
+    fn headers(&self, _context: &oven_sdk::HeaderContext) -> Result<HeaderOverrides, ModelError> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("x-route", "dynamic".parse().unwrap());
         Ok(HeaderOverrides::new(headers))

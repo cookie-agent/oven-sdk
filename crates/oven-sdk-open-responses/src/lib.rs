@@ -265,19 +265,22 @@ impl Config {
         ))
     }
 
-    fn request_headers(&self) -> Result<HeaderMap, ModelError> {
+    fn request_headers(&self, context: &oven_sdk::HeaderContext) -> Result<HeaderMap, ModelError> {
         let mut headers = self.base_headers.clone();
         if let Some(dynamic) = &self.headers.dynamic_headers {
-            let dynamic = dynamic.headers()?;
+            let dynamic = dynamic.headers(context)?;
             reject_protected_headers(dynamic.as_map())?;
             headers.extend(dynamic.as_map().clone());
         }
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", self.auth.token.expose_secret())).map_err(
-                |_| ModelError::invalid_request("bearer token is not a valid header value"),
-            )?,
-        );
+        if !headers.contains_key(reqwest::header::AUTHORIZATION) {
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {}", self.auth.token.expose_secret()))
+                    .map_err(|_| {
+                        ModelError::invalid_request("bearer token is not a valid header value")
+                    })?,
+            );
+        }
         Ok(headers)
     }
 
@@ -328,7 +331,7 @@ impl LanguageModel for OpenResponsesModel {
                 return Err(ModelError::abort("request was aborted before dispatch")
                     .with_stage(ErrorStage::Connect));
             }
-            let headers = self.config.request_headers()?;
+            let headers = self.config.request_headers(&request.header_context)?;
             let (binding, scope) = self.config.replay_context(&headers)?;
             let encoded = encode_request(
                 &request,
@@ -3280,7 +3283,7 @@ fn validate_label(value: Option<&str>, name: &str) -> Result<(), ModelError> {
     }
 }
 fn reject_protected_headers(headers: &HeaderMap) -> Result<(), ModelError> {
-    if ["authorization", "host", "content-type", "content-length"]
+    if ["host", "content-type", "content-length"]
         .iter()
         .any(|name| headers.contains_key(*name))
     {

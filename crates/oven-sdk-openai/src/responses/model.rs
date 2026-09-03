@@ -176,6 +176,7 @@ impl LanguageModel for OpenAiResponsesModel {
                 &self.runtime.auth,
                 &self.runtime.base_headers,
                 &self.runtime.headers,
+                &request_value.header_context,
             )?;
             let send = self
                 .runtime
@@ -322,6 +323,7 @@ impl LanguageModel for OpenAiResponsesModel {
                 &self.runtime.auth,
                 &self.runtime.base_headers,
                 &self.runtime.headers,
+                &compaction_request.request.header_context,
             )?;
             let send = self
                 .runtime

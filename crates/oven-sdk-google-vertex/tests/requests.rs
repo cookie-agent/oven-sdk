@@ -64,7 +64,7 @@ async fn tool_result_files_reject_during_request_validation() {
 struct DynamicHeaders(HeaderMap);
 
 impl HeaderProvider for DynamicHeaders {
-    fn headers(&self) -> Result<HeaderOverrides, ModelError> {
+    fn headers(&self, _context: &oven_sdk::HeaderContext) -> Result<HeaderOverrides, ModelError> {
         Ok(HeaderOverrides::new(self.0.clone()))
     }
 }
@@ -97,6 +97,36 @@ async fn dynamic_headers_cannot_override_content_type() {
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests[0].headers[CONTENT_TYPE], "application/json");
+}
+
+#[tokio::test]
+async fn caller_authorization_suppresses_vertex_bearer_injection() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!(
+                    "data: {}\n\n",
+                    json!({"candidates":[{"finishReason":"STOP"}]})
+                )),
+        )
+        .mount(&server)
+        .await;
+    let mut config =
+        support::full_config(&server.uri(), "gemini-future", publisher_resource(), true);
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", HeaderValue::from_static("Caller token"));
+    config.provider.headers.static_headers = HeaderOverrides::new(headers);
+    let model = GoogleVertexModel::new(config).unwrap();
+
+    model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers["authorization"], "Caller token");
 }
 
 #[tokio::test]

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use http::{HeaderMap, HeaderValue};
 use oven_sdk::{
     AdapterId, ApiEndpoint, CancellationCapability, Capability, CompactionCapability, HeaderConfig,
-    HeaderOverrides, LanguageModelDescriptor, MediaCapabilities, MediaInputSupport,
+    HeaderContext, HeaderOverrides, LanguageModelDescriptor, MediaCapabilities, MediaInputSupport,
     MediaSourceSupport, Modalities, Modality, ModelCapabilities, ModelConfig, ModelDeclaration,
     ModelIdentity, ModelLimits, ProviderConfig, ProviderId, ReplayCapability, ReplayDeclaration,
     ReplayPolicy, SecretString, Usage, UsageTotals,
@@ -257,6 +257,13 @@ fn secret_and_header_debug_output_redacts_values() {
     let secret = SecretString::new("super-secret");
     assert!(!format!("{secret:?}").contains("super-secret"));
     assert_eq!(secret.to_string(), "<redacted>");
+
+    let context = HeaderContext::new("session-secret").with_parent_session_id("parent-secret");
+    let debug = format!("{context:?}");
+    assert!(debug.contains("has_session_id: true"));
+    assert!(debug.contains("has_parent_session_id: true"));
+    assert!(!debug.contains("session-secret"));
+    assert!(!debug.contains("parent-secret"));
 
     let mut headers = HeaderMap::new();
     headers.insert("x-api-key", HeaderValue::from_static("header-secret"));

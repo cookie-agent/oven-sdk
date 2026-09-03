@@ -328,14 +328,17 @@ pub(crate) fn official_headers(
     auth: &OpenAiAuth,
     base_headers: &HeaderMap,
     configured: &HeaderConfig,
+    context: &oven_sdk::HeaderContext,
 ) -> Result<HeaderMap, ModelError> {
     let mut headers = base_headers.clone();
-    insert_header(
-        &mut headers,
-        AUTHORIZATION,
-        &format!("Bearer {}", auth.api_key.expose_secret()),
-    )?;
-    extend_dynamic_headers(&mut headers, configured, true)?;
+    extend_dynamic_headers(&mut headers, configured, context, true)?;
+    if !headers.contains_key(AUTHORIZATION) {
+        insert_header(
+            &mut headers,
+            AUTHORIZATION,
+            &format!("Bearer {}", auth.api_key.expose_secret()),
+        )?;
+    }
     Ok(headers)
 }
 
@@ -343,9 +346,18 @@ pub(crate) fn compatible_headers(
     auth: &OpenAiCompatibleAuth,
     base_headers: &HeaderMap,
     configured: &HeaderConfig,
+    context: &oven_sdk::HeaderContext,
 ) -> Result<HeaderMap, ModelError> {
     let mut headers = base_headers.clone();
-    if let Some(token) = &auth.bearer {
+    if let Some(provider) = &auth.header_provider {
+        let supplied = provider.headers(context)?;
+        validate_headers(supplied.as_map(), false)?;
+        headers.extend(supplied.as_map().clone());
+    }
+    extend_dynamic_headers(&mut headers, configured, context, true)?;
+    if let Some(token) = &auth.bearer
+        && !headers.contains_key(AUTHORIZATION)
+    {
         if token.is_empty() {
             return Err(ModelError::invalid_request(
                 "compatible Bearer authentication must not be empty",
@@ -357,22 +369,17 @@ pub(crate) fn compatible_headers(
             &format!("Bearer {}", token.expose_secret()),
         )?;
     }
-    if let Some(provider) = &auth.header_provider {
-        let supplied = provider.headers()?;
-        validate_headers(supplied.as_map(), false)?;
-        headers.extend(supplied.as_map().clone());
-    }
-    extend_dynamic_headers(&mut headers, configured, true)?;
     Ok(headers)
 }
 
 fn extend_dynamic_headers(
     headers: &mut HeaderMap,
     configured: &HeaderConfig,
+    context: &oven_sdk::HeaderContext,
     protect_auth: bool,
 ) -> Result<(), ModelError> {
     if let Some(provider) = &configured.dynamic_headers {
-        let supplied = provider.headers()?;
+        let supplied = provider.headers(context)?;
         validate_headers(supplied.as_map(), protect_auth)?;
         headers.extend(supplied.as_map().clone());
     }
@@ -381,7 +388,7 @@ fn extend_dynamic_headers(
 
 fn validate_headers(headers: &HeaderMap, protect_auth: bool) -> Result<(), ModelError> {
     for name in headers.keys() {
-        if name == CONTENT_TYPE || (protect_auth && name == AUTHORIZATION) {
+        if name == CONTENT_TYPE {
             return Err(ModelError::invalid_request(format!(
                 "OpenAI header override `{name}` is protected"
             )));

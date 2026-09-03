@@ -119,7 +119,7 @@ impl InnerModel {
             crate::request::validate_serialized_request_size(body.len(), self.config.protocol)?;
             let mut headers = self.config.base_headers.clone();
             if let Some(provider) = &self.config.headers.dynamic_headers {
-                headers.extend(provider.headers()?.as_map().clone());
+                headers.extend(provider.headers(&request.header_context)?.as_map().clone());
             }
             if self.config.protocol == Protocol::AnthropicAws {
                 validate_aws_caller_headers(&headers)?;
@@ -293,37 +293,43 @@ impl InnerModel {
                 }
             }
             Auth::AnthropicAws(AnthropicAwsAuth::BearerKey(key)) => {
-                headers.insert(
-                    HeaderName::from_static("x-api-key"),
-                    header_value(
-                        key.expose_secret(),
-                        "invalid Anthropic AWS bearer key header",
-                    )?,
-                );
+                if !headers.contains_key("x-api-key") {
+                    headers.insert(
+                        HeaderName::from_static("x-api-key"),
+                        header_value(
+                            key.expose_secret(),
+                            "invalid Anthropic AWS bearer key header",
+                        )?,
+                    );
+                }
                 self.insert_workspace_header(headers)?;
             }
             Auth::AnthropicAws(AnthropicAwsAuth::StaticCredentials(credentials)) => {
                 self.insert_workspace_header(headers)?;
-                self.sign(url, body, headers, credentials)?;
+                if !headers.contains_key(AUTHORIZATION) {
+                    self.sign(url, body, headers, credentials)?;
+                }
             }
             Auth::AnthropicAws(AnthropicAwsAuth::CredentialProvider(provider)) => {
                 self.insert_workspace_header(headers)?;
-                let credentials = tokio::select! {
-                    value = tokio::time::timeout(self.config.timeouts.credentials, provider()) => value
-                        .map_err(|_| ModelError::timeout("Anthropic AWS credential provider timed out").with_stage(ErrorStage::RequestEncoding))?
-                        .map_err(|_| {
-                            ModelError::new(
-                                oven_sdk::ModelErrorKind::Auth,
-                                "Anthropic AWS credential provider failed",
-                            )
-                            .with_stage(ErrorStage::RequestEncoding)
-                        })?,
-                    _ = abort.aborted() => return Err(
-                        ModelError::abort("request was aborted while awaiting AWS credentials")
-                            .with_stage(ErrorStage::RequestEncoding)
-                    ),
-                };
-                self.sign(url, body, headers, &credentials)?;
+                if !headers.contains_key(AUTHORIZATION) {
+                    let credentials = tokio::select! {
+                        value = tokio::time::timeout(self.config.timeouts.credentials, provider()) => value
+                            .map_err(|_| ModelError::timeout("Anthropic AWS credential provider timed out").with_stage(ErrorStage::RequestEncoding))?
+                            .map_err(|_| {
+                                ModelError::new(
+                                    oven_sdk::ModelErrorKind::Auth,
+                                    "Anthropic AWS credential provider failed",
+                                )
+                                .with_stage(ErrorStage::RequestEncoding)
+                            })?,
+                        _ = abort.aborted() => return Err(
+                            ModelError::abort("request was aborted while awaiting AWS credentials")
+                                .with_stage(ErrorStage::RequestEncoding)
+                        ),
+                    };
+                    self.sign(url, body, headers, &credentials)?;
+                }
             }
         }
         Ok(())
@@ -606,8 +612,6 @@ fn validate_minimax_protocol(
 
 fn validate_aws_caller_headers(headers: &HeaderMap) -> Result<(), ModelError> {
     const PROTECTED: &[&str] = &[
-        "authorization",
-        "x-api-key",
         "x-amz-date",
         "x-amz-security-token",
         "x-amz-content-sha256",

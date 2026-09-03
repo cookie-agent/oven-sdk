@@ -104,7 +104,7 @@ impl LanguageModel for AzureOpenAiResponsesModel {
             let descriptor = self.descriptor();
             let replay_policy = self.config.capabilities.replay.policy;
             let (headers, replay_binding, replay_scope) =
-                configured_headers(&self.config, &abort).await?;
+                configured_headers(&self.config, &request_value.header_context, &abort).await?;
             let encoded = request::encode_request(
                 &request_value,
                 &options,
@@ -258,7 +258,8 @@ impl LanguageModel for AzureOpenAiResponsesModel {
                 &scope,
             )?;
             let (headers, resolved_binding, request_scope) =
-                configured_headers(&self.config, &abort).await?;
+                configured_headers(&self.config, &request_value.request.header_context, &abort)
+                    .await?;
             if request_scope != scope || resolved_binding != replay_binding {
                 return Err(ModelError::native_context(
                     "Azure compaction request scope changed during configuration resolution",
@@ -337,15 +338,16 @@ impl LanguageModel for AzureOpenAiResponsesModel {
 
 async fn configured_headers(
     config: &Config,
+    context: &oven_sdk::HeaderContext,
     abort: &AbortSignal,
 ) -> Result<(HeaderMap, JsonValue, NativeContextScope), ModelError> {
-    let caller_headers = config.caller_headers()?;
+    let caller_headers = config.caller_headers(context)?;
     let mut headers = caller_headers;
     match &config.auth {
-        AzureOpenAiAuth::ApiKey(key) => {
+        AzureOpenAiAuth::ApiKey(key) if !headers.contains_key("api-key") => {
             insert_header(&mut headers, "api-key", key.expose_secret())?;
         }
-        AzureOpenAiAuth::Entra(provider) => {
+        AzureOpenAiAuth::Entra(provider) if !headers.contains_key("authorization") => {
             let token = tokio::select! {
                 result = tokio::time::timeout(config.timeouts.credentials, provider()) => result
                     .map_err(|_| ModelError::timeout("Azure Entra credential timed out").with_stage(ErrorStage::Connect))??,
@@ -360,6 +362,7 @@ async fn configured_headers(
             }
             insert_header(&mut headers, "authorization", &format!("Bearer {token}"))?;
         }
+        _ => {}
     }
     let (binding, scope) = config.native_context(&headers)?;
     Ok((headers, binding, scope))

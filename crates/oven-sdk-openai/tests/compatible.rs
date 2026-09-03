@@ -94,7 +94,7 @@ fn compatible_constructor_rejects_reserved_adapter_ids() {
 struct CustomAuth;
 
 impl HeaderProvider for CustomAuth {
-    fn headers(&self) -> Result<HeaderOverrides, ModelError> {
+    fn headers(&self, _context: &oven_sdk::HeaderContext) -> Result<HeaderOverrides, ModelError> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("authorization", "Custom token".parse().unwrap());
         Ok(HeaderOverrides::new(headers))
