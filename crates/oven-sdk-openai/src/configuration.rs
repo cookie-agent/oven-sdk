@@ -332,7 +332,7 @@ pub(crate) fn official_headers(
 ) -> Result<HeaderMap, ModelError> {
     let mut headers = base_headers.clone();
     extend_dynamic_headers(&mut headers, configured, context, true)?;
-    if !headers.contains_key(AUTHORIZATION) {
+    if !oven_sdk::contains_auth_owned_header(&headers) {
         insert_header(
             &mut headers,
             AUTHORIZATION,
@@ -348,15 +348,20 @@ pub(crate) fn compatible_headers(
     configured: &HeaderConfig,
     context: &oven_sdk::HeaderContext,
 ) -> Result<HeaderMap, ModelError> {
-    let mut headers = base_headers.clone();
+    let mut caller_headers = base_headers.clone();
+    extend_dynamic_headers(&mut caller_headers, configured, context, true)?;
+    if oven_sdk::contains_auth_owned_header(&caller_headers) {
+        return Ok(caller_headers);
+    }
+
+    let mut headers = HeaderMap::new();
     if let Some(provider) = &auth.header_provider {
         let supplied = provider.headers(context)?;
         validate_headers(supplied.as_map(), false)?;
         headers.extend(supplied.as_map().clone());
     }
-    extend_dynamic_headers(&mut headers, configured, context, true)?;
-    if let Some(token) = &auth.bearer
-        && !headers.contains_key(AUTHORIZATION)
+    if !oven_sdk::contains_auth_owned_header(&headers)
+        && let Some(token) = &auth.bearer
     {
         if token.is_empty() {
             return Err(ModelError::invalid_request(
@@ -369,6 +374,7 @@ pub(crate) fn compatible_headers(
             &format!("Bearer {}", token.expose_secret()),
         )?;
     }
+    headers.extend(caller_headers);
     Ok(headers)
 }
 

@@ -374,8 +374,8 @@ async fn anthropic_aws_caller_auth_suppresses_configured_auth() {
         })
         .header_provider(Arc::new(|| {
             HeaderMap::from_iter([(
-                reqwest::header::AUTHORIZATION,
-                HeaderValue::from_static("Bearer caller"),
+                reqwest::header::HeaderName::from_static("cookie"),
+                HeaderValue::from_static("caller-session=value"),
             )])
         }))
         .base_url(server.uri())
@@ -388,14 +388,15 @@ async fn anthropic_aws_caller_auth_suppresses_configured_auth() {
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[0].headers["authorization"], "Bearer caller");
+    assert_eq!(requests[0].headers["cookie"], "caller-session=value");
+    assert!(requests[0].headers.get("authorization").is_none());
 
     let bearer = AnthropicAws::builder("us-west-2", "workspace")
         .bearer_key("configured")
         .header_provider(Arc::new(|| {
             HeaderMap::from_iter([(
-                reqwest::header::HeaderName::from_static("x-api-key"),
-                HeaderValue::from_static("caller"),
+                reqwest::header::HeaderName::from_static("cookie"),
+                HeaderValue::from_static("caller-session=value"),
             )])
         }))
         .base_url(server.uri())
@@ -407,7 +408,8 @@ async fn anthropic_aws_caller_auth_suppresses_configured_auth() {
         .await
         .unwrap();
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[1].headers["x-api-key"], "caller");
+    assert_eq!(requests[1].headers["cookie"], "caller-session=value");
+    assert!(requests[1].headers.get("x-api-key").is_none());
 }
 
 #[tokio::test]

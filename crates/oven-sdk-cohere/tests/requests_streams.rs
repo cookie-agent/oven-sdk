@@ -9,7 +9,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use wiremock::MockServer;
 
 #[tokio::test]
-async fn caller_authorization_suppresses_cohere_bearer_injection() {
+async fn caller_api_key_suppresses_cohere_bearer_injection() {
     let server = MockServer::start().await;
     common::mount(&server, common::text_stream("ok")).await;
     let mut config = common::config(
@@ -19,7 +19,7 @@ async fn caller_authorization_suppresses_cohere_bearer_injection() {
         CohereSettings::default(),
     );
     let mut headers = HeaderMap::new();
-    headers.insert("authorization", HeaderValue::from_static("Caller token"));
+    headers.insert("x-api-key", HeaderValue::from_static("caller-key"));
     config.provider.headers.static_headers = HeaderOverrides::new(headers);
     let model = CohereModel::new(config).unwrap();
 
@@ -29,7 +29,8 @@ async fn caller_authorization_suppresses_cohere_bearer_injection() {
         .unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[0].headers["authorization"], "Caller token");
+    assert_eq!(requests[0].headers["x-api-key"], "caller-key");
+    assert!(requests[0].headers.get("authorization").is_none());
 }
 
 #[tokio::test]

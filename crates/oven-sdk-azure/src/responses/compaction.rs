@@ -446,18 +446,24 @@ fn parse_usage(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
         .unwrap_or(0);
     let cache_write = value
         .pointer("/input_tokens_details/cache_write_tokens")
-        .and_then(JsonValue::as_u64)
-        .unwrap_or(0);
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                invalid("Azure compaction cache-write token usage is invalid", bytes)
+            })
+        })
+        .transpose()?;
     let reasoning = value
         .pointer("/output_tokens_details/reasoning_tokens")
         .and_then(JsonValue::as_u64)
         .unwrap_or(0);
-    let cached_total = cached.checked_add(cache_write).ok_or_else(|| {
-        invalid(
-            "Azure compaction input cache token details overflowed",
-            bytes,
-        )
-    })?;
+    let cached_total = cached
+        .checked_add(cache_write.unwrap_or(0))
+        .ok_or_else(|| {
+            invalid(
+                "Azure compaction input cache token details overflowed",
+                bytes,
+            )
+        })?;
     let input_without_cache = input.checked_sub(cached_total).ok_or_else(|| {
         invalid(
             "Azure compaction input cache token details are inconsistent",
@@ -474,7 +480,7 @@ fn parse_usage(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
         input_tokens: Some(input),
         input_tokens_no_cache: Some(input_without_cache),
         input_tokens_cache_read: Some(cached),
-        input_tokens_cache_write: Some(cache_write),
+        input_tokens_cache_write: cache_write,
         output_tokens: Some(output),
         output_tokens_text: Some(output - reasoning),
         output_tokens_reasoning: Some(reasoning),

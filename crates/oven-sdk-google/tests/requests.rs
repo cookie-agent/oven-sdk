@@ -111,7 +111,7 @@ async fn dynamic_headers_cannot_override_content_type() {
 }
 
 #[tokio::test]
-async fn caller_api_key_suppresses_google_auth_injection() {
+async fn caller_cookie_suppresses_google_auth_injection() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(
@@ -131,7 +131,7 @@ async fn caller_api_key_suppresses_google_auth_injection() {
         default_tools(),
     );
     let mut headers = HeaderMap::new();
-    headers.insert("x-goog-api-key", HeaderValue::from_static("caller-secret"));
+    headers.insert("cookie", HeaderValue::from_static("caller-session=value"));
     config.provider.headers.static_headers = HeaderOverrides::new(headers);
     let model = GoogleModel::new(config).unwrap();
 
@@ -141,7 +141,8 @@ async fn caller_api_key_suppresses_google_auth_injection() {
         .unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[0].headers["x-goog-api-key"], "caller-secret");
+    assert_eq!(requests[0].headers["cookie"], "caller-session=value");
+    assert!(requests[0].headers.get("x-goog-api-key").is_none());
 }
 
 #[tokio::test]

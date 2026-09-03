@@ -181,12 +181,12 @@ async fn dynamic_headers_receive_distinct_request_contexts() {
 }
 
 #[tokio::test]
-async fn caller_authorization_suppresses_openai_bearer_injection() {
+async fn caller_cookie_suppresses_openai_bearer_injection() {
     let server = MockServer::start().await;
     common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
     let mut config = common::official_chat_config(&server, "gpt-4o-mini");
     let mut headers = HeaderMap::new();
-    headers.insert("authorization", HeaderValue::from_static("Caller token"));
+    headers.insert("cookie", HeaderValue::from_static("caller-session=value"));
     config.provider.headers.static_headers = HeaderOverrides::new(headers);
     let model = oven_sdk_openai::OpenAiChatModel::new(config).unwrap();
 
@@ -196,7 +196,8 @@ async fn caller_authorization_suppresses_openai_bearer_injection() {
         .unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[0].headers["authorization"], "Caller token");
+    assert_eq!(requests[0].headers["cookie"], "caller-session=value");
+    assert!(requests[0].headers.get("authorization").is_none());
 }
 
 #[tokio::test]

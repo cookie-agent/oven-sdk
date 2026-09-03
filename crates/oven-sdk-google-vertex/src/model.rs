@@ -429,7 +429,7 @@ impl GoogleVertexModel {
                 headers.extend(dynamic.as_map().clone());
             }
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            if !headers.contains_key(AUTHORIZATION) {
+            if !oven_sdk::contains_auth_owned_header(&headers) {
                 let token = self.resolve_token(&abort).await?;
                 headers.insert(
                     AUTHORIZATION,

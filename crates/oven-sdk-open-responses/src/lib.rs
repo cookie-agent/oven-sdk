@@ -272,7 +272,7 @@ impl Config {
             reject_protected_headers(dynamic.as_map())?;
             headers.extend(dynamic.as_map().clone());
         }
-        if !headers.contains_key(reqwest::header::AUTHORIZATION) {
+        if !oven_sdk::contains_auth_owned_header(&headers) {
             headers.insert(
                 reqwest::header::AUTHORIZATION,
                 HeaderValue::from_str(&format!("Bearer {}", self.auth.token.expose_secret()))

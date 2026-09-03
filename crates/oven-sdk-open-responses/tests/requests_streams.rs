@@ -11,12 +11,12 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use wiremock::MockServer;
 
 #[tokio::test]
-async fn caller_authorization_suppresses_open_responses_bearer_injection() {
+async fn caller_cookie_suppresses_open_responses_bearer_injection() {
     let server = MockServer::start().await;
     common::mount(&server, common::text_stream("ok")).await;
     let mut config = common::generic_config(&server, "opaque");
     let mut headers = HeaderMap::new();
-    headers.insert("authorization", HeaderValue::from_static("Caller token"));
+    headers.insert("cookie", HeaderValue::from_static("caller-session=value"));
     config.provider.headers.static_headers = HeaderOverrides::new(headers);
     let model = OpenResponsesModel::new(config).unwrap();
 
@@ -26,7 +26,8 @@ async fn caller_authorization_suppresses_open_responses_bearer_injection() {
         .unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[0].headers["authorization"], "Caller token");
+    assert_eq!(requests[0].headers["cookie"], "caller-session=value");
+    assert!(requests[0].headers.get("authorization").is_none());
 }
 
 #[tokio::test]

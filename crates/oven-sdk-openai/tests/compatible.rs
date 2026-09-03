@@ -123,6 +123,27 @@ async fn query_params_and_custom_auth_are_explicit() {
 }
 
 #[tokio::test]
+async fn caller_authorization_is_not_overwritten_by_custom_auth() {
+    let server = MockServer::start().await;
+    common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+    let mut config = common::compatible_config(&server, "model");
+    config.provider.auth = OpenAiCompatibleAuth::headers(Arc::new(CustomAuth));
+    config.settings.routing_discriminator = Some("caller-auth-route".into());
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("authorization", "Caller token".parse().unwrap());
+    config.provider.headers.static_headers = HeaderOverrides::new(headers);
+    let model = OpenAiCompatibleChatModel::new(config).unwrap();
+
+    model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers["authorization"], "Caller token");
+}
+
+#[tokio::test]
 async fn compatible_future_scalar_labels_pass_through_unchanged() {
     let server = MockServer::start().await;
     common::mount(&server, "/chat/completions", common::chat_document("ok")).await;

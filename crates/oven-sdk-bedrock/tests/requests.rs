@@ -92,7 +92,7 @@ async fn converse_encodes_system_tools_and_message_cache_points() {
 }
 
 #[tokio::test]
-async fn caller_authorization_suppresses_bedrock_signing() {
+async fn caller_cookie_suppresses_bedrock_signing() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/model/opaque/converse"))
@@ -111,10 +111,7 @@ async fn caller_authorization_suppresses_bedrock_signing() {
         BedrockAuth::Static(support::credentials()),
     );
     let mut headers = HeaderMap::new();
-    headers.insert(
-        "authorization",
-        HeaderValue::from_static("Caller signature"),
-    );
+    headers.insert("cookie", HeaderValue::from_static("caller-session=value"));
     config.provider.headers.static_headers = HeaderOverrides::new(headers);
     let model = BedrockModel::new(config).unwrap();
 
@@ -124,7 +121,8 @@ async fn caller_authorization_suppresses_bedrock_signing() {
         .unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[0].headers["authorization"], "Caller signature");
+    assert_eq!(requests[0].headers["cookie"], "caller-session=value");
+    assert!(requests[0].headers.get("authorization").is_none());
     assert!(requests[0].headers.get("x-amz-date").is_none());
 }
 

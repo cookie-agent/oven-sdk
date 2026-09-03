@@ -242,12 +242,10 @@ impl InnerModel {
         headers: &mut HeaderMap,
         abort: &AbortSignal,
     ) -> Result<(), ModelError> {
+        let caller_auth = oven_sdk::contains_auth_owned_header(headers);
         match &self.config.auth {
             Auth::Anthropic(auth) => {
-                if !headers.contains_key("x-api-key")
-                    && !headers.contains_key(AUTHORIZATION)
-                    && let AnthropicAuth::ApiKey(key) = auth
-                {
+                if !caller_auth && let AnthropicAuth::ApiKey(key) = auth {
                     headers.insert(
                         HeaderName::from_static("x-api-key"),
                         header_value(key.expose_secret(), "invalid Anthropic API key header")?,
@@ -255,7 +253,7 @@ impl InnerModel {
                 }
             }
             Auth::Compatible(auth) => {
-                if !headers.contains_key("x-api-key") && !headers.contains_key(AUTHORIZATION) {
+                if !caller_auth {
                     match auth {
                         AnthropicCompatibleAuth::ApiKey(key) => {
                             headers.insert(
@@ -280,9 +278,7 @@ impl InnerModel {
                 }
             }
             Auth::MiniMax(auth) => {
-                if !headers.contains_key(AUTHORIZATION)
-                    && let MiniMaxAuth::Bearer(key) = auth
-                {
+                if !caller_auth && let MiniMaxAuth::Bearer(key) = auth {
                     headers.insert(
                         AUTHORIZATION,
                         header_value(
@@ -293,7 +289,7 @@ impl InnerModel {
                 }
             }
             Auth::AnthropicAws(AnthropicAwsAuth::BearerKey(key)) => {
-                if !headers.contains_key("x-api-key") {
+                if !caller_auth {
                     headers.insert(
                         HeaderName::from_static("x-api-key"),
                         header_value(
@@ -306,13 +302,13 @@ impl InnerModel {
             }
             Auth::AnthropicAws(AnthropicAwsAuth::StaticCredentials(credentials)) => {
                 self.insert_workspace_header(headers)?;
-                if !headers.contains_key(AUTHORIZATION) {
+                if !caller_auth {
                     self.sign(url, body, headers, credentials)?;
                 }
             }
             Auth::AnthropicAws(AnthropicAwsAuth::CredentialProvider(provider)) => {
                 self.insert_workspace_header(headers)?;
-                if !headers.contains_key(AUTHORIZATION) {
+                if !caller_auth {
                     let credentials = tokio::select! {
                         value = tokio::time::timeout(self.config.timeouts.credentials, provider()) => value
                             .map_err(|_| ModelError::timeout("Anthropic AWS credential provider timed out").with_stage(ErrorStage::RequestEncoding))?

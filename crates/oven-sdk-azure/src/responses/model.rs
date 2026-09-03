@@ -343,26 +343,27 @@ async fn configured_headers(
 ) -> Result<(HeaderMap, JsonValue, NativeContextScope), ModelError> {
     let caller_headers = config.caller_headers(context)?;
     let mut headers = caller_headers;
-    match &config.auth {
-        AzureOpenAiAuth::ApiKey(key) if !headers.contains_key("api-key") => {
-            insert_header(&mut headers, "api-key", key.expose_secret())?;
-        }
-        AzureOpenAiAuth::Entra(provider) if !headers.contains_key("authorization") => {
-            let token = tokio::select! {
-                result = tokio::time::timeout(config.timeouts.credentials, provider()) => result
-                    .map_err(|_| ModelError::timeout("Azure Entra credential timed out").with_stage(ErrorStage::Connect))??,
-                _ = abort.aborted() => return Err(ModelError::abort("request was aborted during Azure credential resolution").with_stage(ErrorStage::Connect)),
-            };
-            if token.is_empty() {
-                return Err(ModelError::new(
-                    oven_sdk::ModelErrorKind::Auth,
-                    "Azure Entra token provider returned an empty token",
-                )
-                .with_stage(ErrorStage::Connect));
+    if !oven_sdk::contains_auth_owned_header(&headers) {
+        match &config.auth {
+            AzureOpenAiAuth::ApiKey(key) => {
+                insert_header(&mut headers, "api-key", key.expose_secret())?;
             }
-            insert_header(&mut headers, "authorization", &format!("Bearer {token}"))?;
+            AzureOpenAiAuth::Entra(provider) => {
+                let token = tokio::select! {
+                    result = tokio::time::timeout(config.timeouts.credentials, provider()) => result
+                        .map_err(|_| ModelError::timeout("Azure Entra credential timed out").with_stage(ErrorStage::Connect))??,
+                    _ = abort.aborted() => return Err(ModelError::abort("request was aborted during Azure credential resolution").with_stage(ErrorStage::Connect)),
+                };
+                if token.is_empty() {
+                    return Err(ModelError::new(
+                        oven_sdk::ModelErrorKind::Auth,
+                        "Azure Entra token provider returned an empty token",
+                    )
+                    .with_stage(ErrorStage::Connect));
+                }
+                insert_header(&mut headers, "authorization", &format!("Bearer {token}"))?;
+            }
         }
-        _ => {}
     }
     let (binding, scope) = config.native_context(&headers)?;
     Ok((headers, binding, scope))

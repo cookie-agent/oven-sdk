@@ -396,6 +396,20 @@ impl fmt::Debug for HeaderOverrides {
     }
 }
 
+/// Returns whether headers contain any caller-owned authentication name.
+#[must_use]
+pub fn contains_auth_owned_header(headers: &HeaderMap) -> bool {
+    const AUTH_OWNED: &[&str] = &[
+        "authorization",
+        "x-api-key",
+        "api-key",
+        "cookie",
+        "set-cookie",
+        "x-goog-api-key",
+    ];
+    AUTH_OWNED.iter().any(|name| headers.contains_key(*name))
+}
+
 /// Per-request values available to a dynamic header provider.
 #[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]

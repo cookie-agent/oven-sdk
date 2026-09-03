@@ -142,6 +142,46 @@ async fn responses_v1_compaction_returns_and_reuses_the_canonical_window() {
 }
 
 #[tokio::test]
+async fn compaction_cache_write_usage_distinguishes_absent_and_malformed() {
+    let absent_server = MockServer::start().await;
+    let mut absent = compact_document();
+    absent["usage"]["input_tokens_details"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cache_write_tokens");
+    mount_compaction(&absent_server, absent).await;
+    let model = common::provider(&absent_server, AzureApiRoute::V1)
+        .responses("deployment", common::gpt5_compaction())
+        .unwrap();
+    let compacted = model
+        .compact(
+            CompactionRequest::new(user_request("absent cache write")),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(compacted.usage.input_tokens_cache_write, None);
+    assert_eq!(compacted.usage.input_tokens_no_cache, Some(129));
+
+    let malformed_server = MockServer::start().await;
+    let mut malformed = compact_document();
+    malformed["usage"]["input_tokens_details"]["cache_write_tokens"] = serde_json::json!("invalid");
+    mount_compaction(&malformed_server, malformed).await;
+    let model = common::provider(&malformed_server, AzureApiRoute::V1)
+        .responses("deployment", common::gpt5_compaction())
+        .unwrap();
+    let error = model
+        .compact(
+            CompactionRequest::new(user_request("malformed cache write")),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ModelErrorKind::InvalidResponse);
+    assert_eq!(error.diagnostics.stage, ErrorStage::NativeContextDecode);
+}
+
+#[tokio::test]
 async fn compaction_codec_rejects_retained_prompt_cache_breakpoints() {
     let server = MockServer::start().await;
     let mut response = compact_document();

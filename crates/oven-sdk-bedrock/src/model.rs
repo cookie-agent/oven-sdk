@@ -12,7 +12,7 @@ use oven_sdk::{
     ProviderMetadata, ReplayCapability, Request, RequestMetadata, ResourceId, StreamPart,
     StreamResponse,
 };
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -235,7 +235,7 @@ impl BedrockModel {
                 headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
             }
             let url = self.endpoint(streaming)?;
-            if !headers.contains_key(AUTHORIZATION) {
+            if !oven_sdk::contains_auth_owned_header(&headers) {
                 let credentials = self.resolve_credentials(&abort).await?;
                 crate::sigv4::sign(
                     "POST",

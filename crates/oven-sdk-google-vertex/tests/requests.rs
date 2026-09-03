@@ -100,7 +100,7 @@ async fn dynamic_headers_cannot_override_content_type() {
 }
 
 #[tokio::test]
-async fn caller_authorization_suppresses_vertex_bearer_injection() {
+async fn caller_cookie_suppresses_vertex_bearer_injection() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(
@@ -116,7 +116,7 @@ async fn caller_authorization_suppresses_vertex_bearer_injection() {
     let mut config =
         support::full_config(&server.uri(), "gemini-future", publisher_resource(), true);
     let mut headers = HeaderMap::new();
-    headers.insert("authorization", HeaderValue::from_static("Caller token"));
+    headers.insert("cookie", HeaderValue::from_static("caller-session=value"));
     config.provider.headers.static_headers = HeaderOverrides::new(headers);
     let model = GoogleVertexModel::new(config).unwrap();
 
@@ -126,7 +126,8 @@ async fn caller_authorization_suppresses_vertex_bearer_injection() {
         .unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[0].headers["authorization"], "Caller token");
+    assert_eq!(requests[0].headers["cookie"], "caller-session=value");
+    assert!(requests[0].headers.get("authorization").is_none());
 }
 
 #[tokio::test]

@@ -126,7 +126,7 @@ fn api_versions_and_endpoints_validate() {
 }
 
 #[tokio::test]
-async fn caller_authorization_suppresses_entra_bearer_injection() {
+async fn caller_cookie_suppresses_entra_bearer_injection() {
     let server = MockServer::start().await;
     common::mount(
         &server,
@@ -147,7 +147,7 @@ async fn caller_authorization_suppresses_entra_bearer_injection() {
         })),
     );
     let mut headers = HeaderMap::new();
-    headers.insert("authorization", HeaderValue::from_static("Caller token"));
+    headers.insert("cookie", HeaderValue::from_static("caller-session=value"));
     config.provider.headers.static_headers = HeaderOverrides::new(headers);
     let model = AzureOpenAiChatModel::new(config).unwrap();
 
@@ -158,5 +158,6 @@ async fn caller_authorization_suppresses_entra_bearer_injection() {
 
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[0].headers["authorization"], "Caller token");
+    assert_eq!(requests[0].headers["cookie"], "caller-session=value");
+    assert!(requests[0].headers.get("authorization").is_none());
 }

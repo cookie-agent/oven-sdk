@@ -301,6 +301,29 @@ fn secret_and_header_debug_output_redacts_values() {
 }
 
 #[test]
+fn auth_owned_header_detection_is_case_insensitive_and_counts_empty_values() {
+    for name in [
+        "Authorization",
+        "X-Api-Key",
+        "Api-Key",
+        "Cookie",
+        "Set-Cookie",
+        "X-Goog-Api-Key",
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderValue::from_static(""),
+        );
+        assert!(oven_sdk::contains_auth_owned_header(&headers), "{name}");
+    }
+
+    let mut headers = HeaderMap::new();
+    headers.insert("x-route", HeaderValue::from_static("value"));
+    assert!(!oven_sdk::contains_auth_owned_header(&headers));
+}
+
+#[test]
 fn usage_totals_aggregate_like_fields_and_omit_raw_usage() {
     let first = Usage {
         input_tokens: Some(10),
