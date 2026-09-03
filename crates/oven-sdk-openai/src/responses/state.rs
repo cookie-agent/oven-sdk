@@ -27,6 +27,7 @@ pub(crate) struct State {
     policy: ReplayPolicy,
     items: BTreeMap<u64, JsonValue>,
     functions: BTreeMap<u64, FunctionState>,
+    tool_ids: BTreeSet<String>,
     finalized: BTreeSet<u64>,
     open_text: BTreeSet<String>,
     open_reasoning: BTreeSet<String>,
@@ -53,6 +54,7 @@ impl State {
             policy,
             items: BTreeMap::new(),
             functions: BTreeMap::new(),
+            tool_ids: BTreeSet::new(),
             finalized: BTreeSet::new(),
             open_text: BTreeSet::new(),
             open_reasoning: BTreeSet::new(),
@@ -211,10 +213,13 @@ impl State {
         }
     }
 
-    fn add_item(&mut self, output_index: u64, item: JsonValue, parts: &mut Vec<StreamPart>) {
+    fn add_item(&mut self, output_index: u64, mut item: JsonValue, parts: &mut Vec<StreamPart>) {
         if item.get("type").and_then(JsonValue::as_str) == Some("function_call") {
-            let function = self.functions.entry(output_index).or_default();
-            update_function(function, &item);
+            self.normalize_function_id(output_index, &mut item);
+            let function = self
+                .functions
+                .get_mut(&output_index)
+                .expect("function added");
             start_function(function, parts);
         }
         self.items.insert(output_index, item);
@@ -223,10 +228,13 @@ impl State {
     fn finish_item(
         &mut self,
         output_index: u64,
-        item: JsonValue,
+        mut item: JsonValue,
         parts: &mut Vec<StreamPart>,
         bytes: u64,
     ) -> Result<(), ModelError> {
+        if item.get("type").and_then(JsonValue::as_str) == Some("function_call") {
+            self.normalize_function_id(output_index, &mut item);
+        }
         self.validate_streamed_item(output_index, &item, bytes)?;
         match item.get("type").and_then(JsonValue::as_str) {
             Some("function_call") => {
@@ -326,8 +334,11 @@ impl State {
                 bytes,
             ));
         }
-        for (index, item) in output.iter().cloned().enumerate() {
+        for (index, mut item) in output.iter().cloned().enumerate() {
             let output_index = index as u64;
+            if item.get("type").and_then(JsonValue::as_str) == Some("function_call") {
+                self.normalize_function_id(output_index, &mut item);
+            }
             if self.finalized.contains(&output_index) {
                 let finalized = self.items.get(&output_index).ok_or_else(|| {
                     invalid_finalize("Responses finalized item state is missing", bytes)
@@ -337,11 +348,6 @@ impl State {
                 self.finish_item(output_index, item, parts, bytes)?;
             }
         }
-        self.items = output
-            .into_iter()
-            .enumerate()
-            .map(|(index, item)| (index as u64, item))
-            .collect();
         self.close_all(parts);
         if self.functions.values().any(|function| !function.finalized) {
             return Err(invalid_finalize(
@@ -393,6 +399,27 @@ impl State {
         parts.push(StreamPart::Finish { finish });
         self.done = true;
         Ok(())
+    }
+
+    fn normalize_function_id(&mut self, output_index: u64, item: &mut JsonValue) {
+        let function = self.functions.entry(output_index).or_default();
+        update_function(function, item);
+        let call_id = if let Some(call_id) = &function.call_id {
+            Some(call_id.clone())
+        } else if let Some(provider_id) = item
+            .get("call_id")
+            .and_then(JsonValue::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            let call_id = reserve_tool_id(&mut self.tool_ids, provider_id);
+            function.call_id = Some(call_id.clone());
+            Some(call_id)
+        } else {
+            None
+        };
+        if let Some(call_id) = call_id {
+            item["call_id"] = call_id.into();
+        }
     }
 
     fn finish_message(&mut self, output_index: u64, item: &JsonValue, parts: &mut Vec<StreamPart>) {
@@ -952,12 +979,23 @@ fn update_function(function: &mut FunctionState, item: &JsonValue) {
     if let Some(value) = item.get("id").and_then(JsonValue::as_str) {
         function.item_id = Some(value.into());
     }
-    if let Some(value) = item.get("call_id").and_then(JsonValue::as_str) {
-        function.call_id = Some(value.into());
-    }
     if let Some(value) = item.get("name").and_then(JsonValue::as_str) {
         function.name = Some(value.into());
     }
+}
+
+fn reserve_tool_id(used: &mut BTreeSet<String>, provider_id: &str) -> String {
+    let base = provider_id.to_owned();
+    if used.insert(base.clone()) {
+        return base;
+    }
+    for suffix in 1_u64.. {
+        let candidate = format!("{base}-{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded tool ID suffix space")
 }
 
 fn required_function_field(

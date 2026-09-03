@@ -432,9 +432,10 @@ impl State {
         let response = JsonValue::Object(response.clone());
         let response = &response;
         self.capture_response(response);
+        let mut consumed = BTreeSet::new();
         for (index, item) in output.iter().cloned().enumerate() {
             let output_index = self
-                .matching_item_index(&item)
+                .matching_item_index(&item, &consumed)
                 .or_else(|| self.available_item_index(index))
                 .ok_or_else(|| {
                     invalid_finalize(
@@ -442,6 +443,7 @@ impl State {
                         bytes,
                     )
                 })?;
+            consumed.insert(output_index);
             if self.finalized.contains(&output_index) {
                 continue;
             } else {
@@ -514,10 +516,16 @@ impl State {
         Ok(())
     }
 
-    fn matching_item_index(&self, terminal: &JsonValue) -> Option<usize> {
+    fn matching_item_index(
+        &self,
+        terminal: &JsonValue,
+        consumed: &BTreeSet<usize>,
+    ) -> Option<usize> {
         self.items
             .iter()
-            .find(|(_, streamed)| item_identity_matches(streamed, terminal))
+            .find(|(index, streamed)| {
+                !consumed.contains(index) && item_identity_matches(streamed, terminal)
+            })
             .map(|(index, _)| *index)
     }
 
@@ -1201,19 +1209,10 @@ fn start_function(function: &mut FunctionState, parts: &mut Vec<StreamPart>) {
     if function.started {
         return;
     }
-    let Some(_) = function
-        .item_id
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    else {
-        return;
-    };
     let Some(call_id) = function.call_id.clone().filter(|value| !value.is_empty()) else {
         return;
     };
-    let Some(name) = function.name.clone().filter(|value| !value.is_empty()) else {
-        return;
-    };
+    let name = function.name.clone().unwrap_or_default();
     function.started = true;
     parts.push(StreamPart::ToolCallStart {
         id: call_id,

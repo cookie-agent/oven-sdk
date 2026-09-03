@@ -137,6 +137,33 @@ async fn terminal_only_function_synthesizes_once() {
 }
 
 #[tokio::test]
+async fn terminal_duplicate_function_ids_are_disambiguated_before_collection() {
+    let server = MockServer::start().await;
+    let output = serde_json::json!([
+        {"type":"function_call","id":"fc_a","call_id":"same","name":"a","arguments":"{}"},
+        {"type":"function_call","id":"fc_b","call_id":"same","name":"b","arguments":"{}"}
+    ]);
+    let event = serde_json::json!({"type":"response.completed","response":{"status":"completed","output":output}});
+    common::mount(&server, "/responses", format!("data: {event}\n\n")).await;
+    let completed = common::official_responses(&server, "gpt-5-mini")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let ids = completed
+        .turn
+        .message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            oven_sdk::AssistantPart::ToolCall(call) => Some(call.id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["same", "same-1"]);
+    assert!(completed.turn.finish.native_replay.is_some());
+}
+
+#[tokio::test]
 async fn differing_terminal_message_is_invalid_response() {
     assert_authoritative_mismatch(concat!(
         "data: {\"type\":\"response.created\",\"response\":{}}\n\n",

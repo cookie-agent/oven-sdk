@@ -283,8 +283,8 @@ async fn responses_replay_capture_strips_extras_and_optional_unknown_items_degra
 async fn responses_duplicate_tool_ids_are_disambiguated_and_replayable() {
     let server = MockServer::start().await;
     let output = serde_json::json!([
-        {"type":"function_call","id":"item_a","call_id":"same","name":"a","arguments":"{}"},
-        {"type":"function_call","id":"item_b","call_id":"same","name":"b","arguments":"{}"}
+        {"type":"function_call","call_id":"same","name":"a","arguments":"{}"},
+        {"type":"function_call","call_id":"same","name":"b","arguments":"{}"}
     ]);
     let event = serde_json::json!({"type":"response.completed","response":{"output":output}});
     common::mount(
@@ -310,7 +310,61 @@ async fn responses_duplicate_tool_ids_are_disambiguated_and_replayable() {
         })
         .collect::<Vec<_>>();
     assert_eq!(ids, ["same", "same-1"]);
+    let names = completed
+        .turn
+        .message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            oven_sdk::AssistantPart::ToolCall(call) => Some(call.name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["a", "b"]);
     assert!(completed.turn.finish.native_replay.is_some());
+}
+
+#[tokio::test]
+async fn responses_identical_no_id_terminal_messages_both_survive() {
+    let server = MockServer::start().await;
+    let message = serde_json::json!({
+        "type":"message","role":"assistant",
+        "content":[{"type":"output_text","text":"same"}]
+    });
+    let event = serde_json::json!({
+        "type":"response.completed","response":{"output":[message.clone(),message]}
+    });
+    common::mount(
+        &server,
+        "/openai/v1/responses",
+        format!("data: {event}\n\n"),
+    )
+    .await;
+    let completed = common::provider(&server, AzureApiRoute::V1)
+        .responses("deployment", common::gpt4o())
+        .unwrap()
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        completed
+            .turn
+            .message
+            .content
+            .iter()
+            .filter(
+                |part| matches!(part, oven_sdk::AssistantPart::Text(text) if text.text == "same")
+            )
+            .count(),
+        2
+    );
+    assert_eq!(
+        completed.turn.finish.native_replay.unwrap().payload()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[tokio::test]

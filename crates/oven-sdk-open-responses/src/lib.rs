@@ -1256,6 +1256,7 @@ struct State {
     scope: NativeContextScope,
     phase: Phase,
     items: BTreeMap<usize, ItemState>,
+    tool_ids: BTreeSet<String>,
     incomplete_item: Option<usize>,
     terminal: Option<Finish>,
     stream_error: Option<ModelError>,
@@ -1282,6 +1283,7 @@ impl State {
             scope,
             phase: Phase::Initial,
             items: BTreeMap::new(),
+            tool_ids: BTreeSet::new(),
             incomplete_item: None,
             terminal: None,
             stream_error: None,
@@ -1405,7 +1407,7 @@ impl State {
         if self.items.contains_key(&index) {
             return Ok(());
         }
-        let item = value
+        let mut item = value
             .get("item")
             .cloned()
             .ok_or_else(|| event_error("output_item.added is missing item", bytes))?;
@@ -1426,22 +1428,24 @@ impl State {
             return Err(event_error("unsupported standard output item type", bytes));
         }
         if kind == "function_call" {
-            let call_id = required_string(&item, "call_id", bytes)?;
-            let name = required_string(&item, "name", bytes)?;
-            if !valid_call_id(call_id) || !valid_function_name(name) {
+            let provider_call_id = required_string(&item, "call_id", bytes)?.to_owned();
+            let name = required_string(&item, "name", bytes)?.to_owned();
+            if !valid_call_id(&provider_call_id) || !valid_function_name(&name) {
                 return Err(event_error(
                     "function item call ID or name violates Open Responses limits",
                     bytes,
                 ));
             }
+            let call_id = reserve_tool_id(&mut self.tool_ids, &provider_call_id, index);
+            item["call_id"] = call_id.clone().into();
             queue.push_back(Ok(StreamPart::ToolCallStart {
-                id: call_id.into(),
-                name: name.into(),
+                id: call_id.clone(),
+                name,
                 metadata: None,
             }));
             if !initial_arguments.is_empty() {
                 queue.push_back(Ok(StreamPart::ToolCallDelta {
-                    id: call_id.into(),
+                    id: call_id,
                     delta: initial_arguments.clone(),
                     metadata: None,
                 }));
@@ -1948,6 +1952,9 @@ impl State {
             .get("item")
             .cloned()
             .ok_or_else(|| event_error("output_item.done is missing item", bytes))?;
+        if item.kind == "function_call" {
+            authoritative["call_id"] = item.item["call_id"].clone();
+        }
         if required_string(&authoritative, "id", bytes)? != item.id
             || required_string(&authoritative, "type", bytes)? != item.kind
         {
@@ -2308,14 +2315,21 @@ fn reconcile_streamed_content(item: &ItemState, authoritative: &mut JsonValue) {
             .and_then(JsonValue::as_array)
             .cloned()
             .unwrap_or_default();
+        let mut consumed = BTreeSet::new();
         let content = item
             .contents
             .values()
             .map(|state| {
                 let terminal = terminal_content
                     .iter()
-                    .find(|part| content_state_matches(state, part))
-                    .cloned();
+                    .enumerate()
+                    .find(|(index, part)| {
+                        !consumed.contains(index) && content_state_matches(state, part)
+                    })
+                    .map(|(index, part)| {
+                        consumed.insert(index);
+                        part.clone()
+                    });
                 if state.kind == "refusal" {
                     let mut part =
                         terminal.unwrap_or_else(|| serde_json::json!({"type":"refusal"}));
@@ -2340,14 +2354,21 @@ fn reconcile_streamed_content(item: &ItemState, authoritative: &mut JsonValue) {
             .and_then(JsonValue::as_array)
             .cloned()
             .unwrap_or_default();
+        let mut consumed = BTreeSet::new();
         authoritative["summary"] = JsonValue::Array(
             item.summaries
                 .values()
                 .map(|state| {
                     let mut part = terminal
                         .iter()
-                        .find(|part| content_state_matches(state, part))
-                        .cloned()
+                        .enumerate()
+                        .find(|(index, part)| {
+                            !consumed.contains(index) && content_state_matches(state, part)
+                        })
+                        .map(|(index, part)| {
+                            consumed.insert(index);
+                            part.clone()
+                        })
                         .unwrap_or_else(|| serde_json::json!({"type":"summary_text"}));
                     part["text"] = state.text.clone().into();
                     part
@@ -2367,6 +2388,25 @@ fn content_state_matches(state: &ContentState, part: &JsonValue) -> bool {
         })
         .and_then(JsonValue::as_str);
     kind == Some(state.kind.as_str()) && text == Some(state.text.as_str())
+}
+
+fn reserve_tool_id(used: &mut BTreeSet<String>, provider_id: &str, fallback: usize) -> String {
+    if used.insert(provider_id.to_owned()) {
+        return provider_id.to_owned();
+    }
+    for suffix in 1_usize.. {
+        let candidate = format!("{provider_id}-{suffix}");
+        if valid_call_id(&candidate) && used.insert(candidate.clone()) {
+            return candidate;
+        }
+        if !valid_call_id(&candidate) {
+            let fallback = format!("google-call-{fallback}-{suffix}");
+            if used.insert(fallback.clone()) {
+                return fallback;
+            }
+        }
+    }
+    unreachable!("unbounded tool ID suffix space")
 }
 
 fn flush_deferred_message_text(
@@ -2635,6 +2675,7 @@ fn validate_item_content(
                 bytes,
             ));
         }
+        let mut consumed_streamed = BTreeSet::new();
         for (index, part) in content.iter().enumerate() {
             let kind = required_string(part, "type", bytes)?;
             let text = part
@@ -2643,8 +2684,14 @@ fn validate_item_content(
                 .ok_or_else(|| event_error("message content is missing text", bytes))?;
             let streamed = item
                 .contents
-                .values()
-                .find(|state| content_state_matches(state, part));
+                .iter()
+                .find(|(state_index, state)| {
+                    !consumed_streamed.contains(*state_index) && content_state_matches(state, part)
+                })
+                .map(|(state_index, state)| {
+                    consumed_streamed.insert(*state_index);
+                    state
+                });
             if streamed.is_none() && !hugging_face {
                 return Err(event_error("missing streamed message content part", bytes));
             } else if streamed.is_none() && kind == "output_text" {
@@ -2668,10 +2715,7 @@ fn validate_item_content(
                     .into_iter()
                     .flatten()
                     .collect::<Vec<_>>();
-                let streamed_annotations = item
-                    .contents
-                    .values()
-                    .find(|state| content_state_matches(state, part))
+                let streamed_annotations = streamed
                     .map(|state| state.annotations.as_slice())
                     .unwrap_or_default();
                 if !streamed_annotations.is_empty()
@@ -2739,15 +2783,24 @@ fn validate_reasoning_content(
             bytes,
         ));
     }
+    let mut consumed_summaries = BTreeSet::new();
     for (index, part) in summaries.iter().enumerate() {
         let kind = required_string(part, "type", bytes)?;
         if kind != "summary_text" && !(hugging_face && kind == "reasoning_summary") {
             return Err(event_error("unsupported reasoning summary content", bytes));
         }
+        let streamed = item
+            .summaries
+            .iter()
+            .find(|(state_index, state)| {
+                !consumed_summaries.contains(*state_index) && content_state_matches(state, part)
+            })
+            .map(|(state_index, state)| {
+                consumed_summaries.insert(*state_index);
+                state
+            });
         validate_or_emit_reasoning(
-            item.summaries
-                .values()
-                .find(|state| content_state_matches(state, part)),
+            streamed,
             part,
             kind,
             format!("{}:summary:{index}", item.id),
@@ -2756,15 +2809,24 @@ fn validate_reasoning_content(
             hugging_face,
         )?;
     }
+    let mut consumed_contents = BTreeSet::new();
     for (index, part) in contents.iter().enumerate() {
         let kind = required_string(part, "type", bytes)?;
         if kind != "reasoning_text" {
             return Err(event_error("unsupported reasoning content", bytes));
         }
+        let streamed = item
+            .contents
+            .iter()
+            .find(|(state_index, state)| {
+                !consumed_contents.contains(*state_index) && content_state_matches(state, part)
+            })
+            .map(|(state_index, state)| {
+                consumed_contents.insert(*state_index);
+                state
+            });
         validate_or_emit_reasoning(
-            item.contents
-                .values()
-                .find(|state| content_state_matches(state, part)),
+            streamed,
             part,
             kind,
             format!("{}:{index}", item.id),

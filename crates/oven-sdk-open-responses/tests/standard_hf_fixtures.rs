@@ -541,3 +541,114 @@ async fn open_refusal_is_closed_without_losing_or_duplicating_content() {
     assert_eq!(refusals, 1);
     assert!(completed.turn.finish.native_replay.is_some());
 }
+
+#[tokio::test]
+async fn identical_sparse_parts_consume_distinct_terminal_annotations() {
+    let annotation = |title: &str| {
+        serde_json::json!({
+            "type":"url_citation","start_index":0,"end_index":4,
+            "url":format!("https://example.com/{title}"),"title":title
+        })
+    };
+    let item = serde_json::json!({
+        "type":"message","id":"msg_identical","role":"assistant","content":[
+            {"type":"output_text","text":"same","annotations":[annotation("first")]},
+            {"type":"output_text","text":"same","annotations":[annotation("second")]}
+        ]
+    });
+    let mut events = response_prefix();
+    events.extend([
+        ("response.output_item.added", serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_identical","role":"assistant","content":[]}})),
+        ("response.content_part.added", serde_json::json!({"type":"response.content_part.added","output_index":0,"content_index":1,"item_id":"msg_identical","part":{"type":"output_text","text":"","annotations":[]}})),
+        ("response.output_text.delta", serde_json::json!({"type":"response.output_text.delta","output_index":0,"content_index":1,"item_id":"msg_identical","delta":"same"})),
+        ("response.content_part.added", serde_json::json!({"type":"response.content_part.added","output_index":0,"content_index":3,"item_id":"msg_identical","part":{"type":"output_text","text":"","annotations":[]}})),
+        ("response.output_text.delta", serde_json::json!({"type":"response.output_text.delta","output_index":0,"content_index":3,"item_id":"msg_identical","delta":"same"})),
+        ("response.output_item.done", serde_json::json!({"type":"response.output_item.done","output_index":0,"item":item.clone()})),
+        ("response.completed", serde_json::json!({"type":"response.completed","response":{"output":[item]}})),
+    ]);
+    let server = MockServer::start().await;
+    common::mount(&server, sse(events, true)).await;
+    let completed = common::generic_model(&server, "opaque")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        completed
+            .turn
+            .message
+            .content
+            .iter()
+            .filter(|part| matches!(part, AssistantPart::Text(text) if text.text == "same"))
+            .count(),
+        2
+    );
+    let titles = completed
+        .turn
+        .message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantPart::Source(source) => source.title.as_deref(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(titles, ["first", "second"]);
+    let replay = completed.turn.finish.native_replay.unwrap();
+    assert_eq!(
+        replay.payload()["items"][0]["content"][0]["annotations"][0]["title"],
+        "first"
+    );
+    assert_eq!(
+        replay.payload()["items"][0]["content"][1]["annotations"][0]["title"],
+        "second"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_function_ids_are_disambiguated_before_collection() {
+    let added = |index: usize, id: &str, name: &str| {
+        serde_json::json!({
+            "type":"response.output_item.added","output_index":index,
+            "item":{"type":"function_call","id":id,"call_id":"same","name":name,"arguments":"{}"}
+        })
+    };
+    let done = |index: usize, id: &str, name: &str| {
+        serde_json::json!({
+            "type":"response.output_item.done","output_index":index,
+            "item":{"type":"function_call","id":id,"call_id":"same","name":name,"arguments":"{}"}
+        })
+    };
+    let terminal = serde_json::json!([
+        {"type":"function_call","id":"fc_a","call_id":"same","name":"a","arguments":"{}"},
+        {"type":"function_call","id":"fc_b","call_id":"same","name":"b","arguments":"{}"}
+    ]);
+    let mut events = response_prefix();
+    events.extend([
+        ("response.output_item.added", added(0, "fc_a", "a")),
+        ("response.output_item.done", done(0, "fc_a", "a")),
+        ("response.output_item.added", added(1, "fc_b", "b")),
+        ("response.output_item.done", done(1, "fc_b", "b")),
+        (
+            "response.completed",
+            serde_json::json!({"type":"response.completed","response":{"output":terminal}}),
+        ),
+    ]);
+    let server = MockServer::start().await;
+    common::mount(&server, sse(events, true)).await;
+    let completed = common::generic_model(&server, "opaque")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let ids = completed
+        .turn
+        .message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantPart::ToolCall(call) => Some(call.id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["same", "same-1"]);
+    assert!(completed.turn.finish.native_replay.is_some());
+}
