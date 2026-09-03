@@ -1,6 +1,6 @@
 //! Anthropic stream event state machine.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use oven_sdk::{
     AdapterId, ErrorStage, Finish, FinishReason, JsonValue, ModelError, ModelErrorKind,
@@ -18,11 +18,13 @@ pub(crate) struct State {
     pub(super) started: bool,
     pub(super) done: bool,
     blocks: BTreeMap<u64, Block>,
+    block_order: BTreeMap<u64, u64>,
+    next_block_order: u64,
     usage: Usage,
     stop: Option<String>,
     stop_sequence: Option<String>,
-    native: BTreeMap<(u64, u64), JsonValue>,
-    native_sequence: u64,
+    native: BTreeMap<u64, JsonValue>,
+    tool_ids: BTreeSet<String>,
     policy: ReplayPolicy,
     response_metadata: std::collections::BTreeMap<String, JsonValue>,
     request_id: Option<String>,
@@ -41,11 +43,13 @@ impl State {
             started: false,
             done: false,
             blocks: BTreeMap::new(),
+            block_order: BTreeMap::new(),
+            next_block_order: 0,
             usage: Usage::default(),
             stop: None,
             stop_sequence: None,
             native: BTreeMap::new(),
-            native_sequence: 0,
+            tool_ids: BTreeSet::new(),
             policy,
             response_metadata: std::collections::BTreeMap::new(),
             request_id: None,
@@ -168,6 +172,8 @@ impl State {
                     .ok_or_else(|| invalid_event("missing content block", bytes))?;
                 let ty = block.get("type").and_then(JsonValue::as_str).unwrap_or("");
                 let id = format!("{ty}:{i}");
+                let order = self.next_block_order;
+                self.next_block_order = self.next_block_order.saturating_add(1);
                 let b = match ty {
                     "text" => {
                         parts.push(StreamPart::TextStart { id, metadata: None });
@@ -191,12 +197,11 @@ impl State {
                         }
                     }
                     "tool_use" => {
-                        let call_id = block
+                        let provider_id = block
                             .get("id")
                             .and_then(JsonValue::as_str)
-                            .filter(|v| !v.is_empty())
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| format!("google-call-{i}"));
+                            .filter(|v| !v.is_empty());
+                        let call_id = reserve_tool_id(&mut self.tool_ids, provider_id, i);
                         let name = block
                             .get("name")
                             .and_then(JsonValue::as_str)
@@ -230,9 +235,10 @@ impl State {
                             name: format!("{}.content_block", self.protocol.metadata_namespace()),
                             data: block.clone(),
                         });
-                        return Ok(());
+                        Block::Custom
                     }
                 };
+                self.block_order.insert(i, order);
                 self.blocks.insert(i, b);
                 Ok(())
             }
@@ -246,11 +252,14 @@ impl State {
                     .get("delta")
                     .ok_or_else(|| invalid_event("missing content block delta", bytes))?;
                 let ty = delta.get("type").and_then(JsonValue::as_str).unwrap_or("");
-                match self
-                    .blocks
-                    .get_mut(&i)
-                    .ok_or_else(|| invalid_event("delta for unknown block", bytes))?
-                {
+                let Some(block) = self.blocks.get_mut(&i) else {
+                    parts.push(StreamPart::ProviderEvent {
+                        name: format!("{}.content_block_delta", self.protocol.metadata_namespace()),
+                        data: value,
+                    });
+                    return Ok(());
+                };
+                match block {
                     Block::Text { text } if ty == "text_delta" => {
                         let id = format!("text:{i}");
                         let value = delta.get("text").and_then(JsonValue::as_str).unwrap_or("");
@@ -292,6 +301,10 @@ impl State {
                             });
                         }
                     }
+                    Block::Custom => parts.push(StreamPart::ProviderEvent {
+                        name: format!("{}.content_block_delta", self.protocol.metadata_namespace()),
+                        data: value.clone(),
+                    }),
                     _ => parts.push(StreamPart::ProviderEvent {
                         name: format!("{}.content_block_delta", self.protocol.metadata_namespace()),
                         data: value.clone(),
@@ -308,9 +321,10 @@ impl State {
                 let Some(block) = self.blocks.remove(&i) else {
                     return Ok(());
                 };
+                let order = self.block_order.remove(&i).unwrap_or(self.next_block_order);
                 match block {
                     Block::Text { text } => {
-                        self.push_native(i, serde_json::json!({"type":"text","text":text}), bytes)?;
+                        self.push_native(order, serde_json::json!({"type":"text","text":text}));
                         parts.push(StreamPart::TextEnd {
                             id: format!("text:{i}"),
                             metadata: None,
@@ -331,7 +345,7 @@ impl State {
                             let signature = signature.unwrap_or_default();
                             serde_json::json!({"type":"thinking","thinking":text,"signature":signature})
                         };
-                        self.push_native(i, native, bytes)?;
+                        self.push_native(order, native);
                         parts.push(StreamPart::ReasoningEnd {
                             id: format!(
                                 "{}:{i}",
@@ -364,13 +378,17 @@ impl State {
                         }
                         let mut call = ToolCallPart::new(id, name, parsed);
                         call.raw_input = Some(raw);
-                        self.push_native(i, serde_json::json!({"type":"tool_use","id":call.id,"name":call.name,"input":call.input}), bytes)?;
+                        self.push_native(order, serde_json::json!({"type":"tool_use","id":call.id,"name":call.name,"input":call.input}));
                         parts.push(StreamPart::ToolCallEnd {
                             id: call.id.clone(),
                             metadata: None,
                         });
                         parts.push(StreamPart::ToolCall { tool_call: call });
                     }
+                    Block::Custom => parts.push(StreamPart::ProviderEvent {
+                        name: format!("{}.content_block_stop", self.protocol.metadata_namespace()),
+                        data: value,
+                    }),
                 }
                 Ok(())
             }
@@ -455,6 +473,7 @@ impl State {
                             metadata: None,
                         }),
                         Block::Tool { .. } => {}
+                        Block::Custom => {}
                     }
                 }
                 if interrupted_tool {
@@ -503,12 +522,29 @@ impl State {
             Err(invalid_event("event before message_start", bytes))
         }
     }
-    fn push_native(&mut self, index: u64, value: JsonValue, bytes: u64) -> Result<(), ModelError> {
-        validate_block_index(index, bytes)?;
-        self.native.insert((index, self.native_sequence), value);
-        self.native_sequence = self.native_sequence.saturating_add(1);
-        Ok(())
+    fn push_native(&mut self, order: u64, value: JsonValue) {
+        self.native.insert(order, value);
     }
+}
+
+fn reserve_tool_id(
+    used: &mut BTreeSet<String>,
+    provider_id: Option<&str>,
+    fallback: u64,
+) -> String {
+    let base = provider_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("google-call-{fallback}"));
+    if used.insert(base.clone()) {
+        return base;
+    }
+    for suffix in 1_u64.. {
+        let candidate = format!("{base}-{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded tool ID suffix space")
 }
 fn validate_block_index(index: u64, bytes: u64) -> Result<(), ModelError> {
     if index > MAX_CONTENT_BLOCK_INDEX {

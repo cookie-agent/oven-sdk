@@ -488,3 +488,40 @@ async fn missing_tool_id_and_name_use_a_stable_id_and_empty_name() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn duplicate_and_synthesized_tool_ids_are_disambiguated() {
+    let server = MockServer::start().await;
+    common::mount(
+        &server,
+        concat!(
+            "event: message-start\ndata: {\"type\":\"message-start\",\"delta\":{\"message\":{\"role\":\"assistant\"}}}\n\n",
+            "event: tool-call-start\ndata: {\"type\":\"tool-call-start\",\"index\":0,\"delta\":{\"message\":{\"tool_calls\":{\"id\":\"same\",\"function\":{\"name\":\"a\",\"arguments\":\"{}\"}}}}}\n\n",
+            "event: tool-call-end\ndata: {\"type\":\"tool-call-end\",\"index\":0}\n\n",
+            "event: tool-call-start\ndata: {\"type\":\"tool-call-start\",\"index\":1,\"delta\":{\"message\":{\"tool_calls\":{\"id\":\"same\",\"function\":{\"name\":\"b\",\"arguments\":\"{}\"}}}}}\n\n",
+            "event: tool-call-end\ndata: {\"type\":\"tool-call-end\",\"index\":1}\n\n",
+            "event: tool-call-start\ndata: {\"type\":\"tool-call-start\",\"index\":2,\"delta\":{\"message\":{\"tool_calls\":{\"function\":{\"name\":\"c\",\"arguments\":\"{}\"}}}}}\n\n",
+            "event: tool-call-end\ndata: {\"type\":\"tool-call-end\",\"index\":2}\n\n",
+            "event: tool-call-start\ndata: {\"type\":\"tool-call-start\",\"index\":3,\"delta\":{\"message\":{\"tool_calls\":{\"id\":\"google-call-2\",\"function\":{\"name\":\"d\",\"arguments\":\"{}\"}}}}}\n\n",
+            "event: tool-call-end\ndata: {\"type\":\"tool-call-end\",\"index\":3}\n\n",
+            "event: message-end\ndata: {\"type\":\"message-end\",\"delta\":{\"finish_reason\":\"TOOL_CALL\"}}\n\n"
+        ).into(),
+    )
+    .await;
+    let completed = common::model(&server, "opaque")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let ids = completed
+        .turn
+        .message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantPart::ToolCall(call) => Some(call.id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["same", "same-1", "google-call-2", "google-call-2-1"]);
+    assert!(completed.turn.finish.native_replay.is_some());
+}

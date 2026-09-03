@@ -734,6 +734,113 @@ async fn contiguous_multi_block_native_content_finishes_for_all_protocols() {
 }
 
 #[tokio::test]
+async fn sparse_out_of_order_indices_keep_start_order_in_normalized_and_replay_content() {
+    let model = scripted_model(
+        [
+            event("message_start", r#"{"type":"message_start","message":{}}"#),
+            event("content_block_start", r#"{"type":"content_block_start","index":5,"content_block":{"type":"text"}}"#),
+            event("content_block_start", r#"{"type":"content_block_start","index":1,"content_block":{"type":"text"}}"#),
+            event("content_block_delta", r#"{"type":"content_block_delta","index":5,"delta":{"type":"text_delta","text":"first"}}"#),
+            event("content_block_delta", r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"second"}}"#),
+            event("content_block_stop", r#"{"type":"content_block_stop","index":1}"#),
+            event("content_block_stop", r#"{"type":"content_block_stop","index":5}"#),
+            terminal(),
+        ]
+        .concat(),
+    )
+    .await;
+    let completed = model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let texts = completed
+        .turn
+        .message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantPart::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(texts, ["first", "second"]);
+    let replay = completed.turn.finish.native_replay.unwrap();
+    let content = replay.payload().pointer("/message/content").unwrap();
+    assert_eq!(content[0]["text"], "first");
+    assert_eq!(content[1]["text"], "second");
+}
+
+#[tokio::test]
+async fn unknown_content_block_lifecycle_is_forwarded_without_failing() {
+    let model = scripted_model(
+        [
+            event("message_start", r#"{"type":"message_start","message":{}}"#),
+            event("content_block_start", r#"{"type":"content_block_start","index":7,"content_block":{"type":"future_block","value":"start"}}"#),
+            event("content_block_delta", r#"{"type":"content_block_delta","index":7,"delta":{"type":"future_delta","value":"delta"}}"#),
+            event("content_block_stop", r#"{"type":"content_block_stop","index":7}"#),
+            terminal(),
+        ]
+        .concat(),
+    )
+    .await;
+    let parts = collect(&model).await;
+    assert!(!parts.iter().any(Result::is_err));
+    assert_eq!(
+        parts
+            .iter()
+            .filter(|part| matches!(part, Ok(StreamPart::ProviderEvent { .. })))
+            .count(),
+        3
+    );
+    assert!(parts.iter().any(
+        |part| matches!(part, Ok(StreamPart::Finish { finish }) if finish.native_replay.is_some())
+    ));
+}
+
+#[tokio::test]
+async fn duplicate_and_synthesized_tool_ids_are_disambiguated_in_replay() {
+    let model = scripted_model(
+        [
+            event("message_start", r#"{"type":"message_start","message":{}}"#),
+            event("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"same","name":"a","input":{}}}"#),
+            event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+            event("content_block_start", r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"same","name":"b","input":{}}}"#),
+            event("content_block_stop", r#"{"type":"content_block_stop","index":1}"#),
+            event("content_block_start", r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","name":"c","input":{}}}"#),
+            event("content_block_stop", r#"{"type":"content_block_stop","index":2}"#),
+            event("content_block_start", r#"{"type":"content_block_start","index":3,"content_block":{"type":"tool_use","id":"google-call-2","name":"d","input":{}}}"#),
+            event("content_block_stop", r#"{"type":"content_block_stop","index":3}"#),
+            terminal(),
+        ]
+        .concat(),
+    )
+    .await;
+    let completed = model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let ids = completed
+        .turn
+        .message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantPart::ToolCall(call) => Some(call.id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["same", "same-1", "google-call-2", "google-call-2-1"]);
+    let replay = completed.turn.finish.native_replay.unwrap();
+    let replay_ids = replay.payload()["message"]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(replay_ids, ids);
+}
+
+#[tokio::test]
 async fn stream_emits_exactly_one_finish() {
     let model = scripted_model(
         [

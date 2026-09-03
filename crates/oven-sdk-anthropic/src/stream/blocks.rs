@@ -17,4 +17,5 @@ pub(super) enum Block {
         name: String,
         input: String,
     },
+    Custom,
 }

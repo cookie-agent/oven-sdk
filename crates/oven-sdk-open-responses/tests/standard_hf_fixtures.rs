@@ -468,3 +468,76 @@ async fn optional_replay_omits_oversize_artifact_but_required_replay_fails() {
     let error = stream_error(&OpenResponsesModel::new(config).unwrap()).await;
     assert_eq!(error.kind, ModelErrorKind::Replay);
 }
+
+#[tokio::test]
+async fn sparse_content_index_reconciles_once_and_captures_valid_replay() {
+    let item = serde_json::json!({
+        "type":"message","id":"msg_sparse","role":"assistant",
+        "content":[{"type":"output_text","text":"once","annotations":[]}]
+    });
+    let mut events = response_prefix();
+    events.extend([
+        ("response.output_item.added", serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_sparse","role":"assistant","content":[]}})),
+        ("response.content_part.added", serde_json::json!({"type":"response.content_part.added","output_index":0,"content_index":2,"item_id":"msg_sparse","part":{"type":"output_text","text":"","annotations":[]}})),
+        ("response.output_text.delta", serde_json::json!({"type":"response.output_text.delta","output_index":0,"content_index":2,"item_id":"msg_sparse","delta":"once"})),
+        ("response.output_item.done", serde_json::json!({"type":"response.output_item.done","output_index":0,"item":item.clone()})),
+        ("response.completed", serde_json::json!({"type":"response.completed","response":{"output":[item]}})),
+    ]);
+    let server = MockServer::start().await;
+    common::mount(&server, sse(events, true)).await;
+    let model = common::generic_model(&server, "opaque");
+    let completed = model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    assert_eq!(completed.turn.text(), "once");
+    assert_eq!(
+        completed
+            .turn
+            .message
+            .content
+            .iter()
+            .filter(|part| matches!(part, AssistantPart::Text(_)))
+            .count(),
+        1
+    );
+    assert!(completed.turn.finish.native_replay.is_some());
+    model
+        .complete(
+            Request::new(vec![HistoryTurn::assistant(completed.turn)]),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn open_refusal_is_closed_without_losing_or_duplicating_content() {
+    let item = serde_json::json!({
+        "type":"message","id":"msg_refusal","role":"assistant",
+        "content":[{"type":"refusal","refusal":"blocked"}]
+    });
+    let mut events = response_prefix();
+    events.extend([
+        ("response.output_item.added", serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_refusal","role":"assistant","content":[]}})),
+        ("response.content_part.added", serde_json::json!({"type":"response.content_part.added","output_index":0,"content_index":4,"item_id":"msg_refusal","part":{"type":"refusal","refusal":""}})),
+        ("response.refusal.delta", serde_json::json!({"type":"response.refusal.delta","output_index":0,"content_index":4,"item_id":"msg_refusal","delta":"blocked"})),
+        ("response.output_item.done", serde_json::json!({"type":"response.output_item.done","output_index":0,"item":item.clone()})),
+        ("response.completed", serde_json::json!({"type":"response.completed","response":{"output":[item]}})),
+    ]);
+    let server = MockServer::start().await;
+    common::mount(&server, sse(events, true)).await;
+    let completed = common::generic_model(&server, "opaque")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let refusals = completed
+        .turn
+        .message
+        .content
+        .iter()
+        .filter(|part| matches!(part, AssistantPart::Custom(custom) if custom.data == "blocked"))
+        .count();
+    assert_eq!(refusals, 1);
+    assert!(completed.turn.finish.native_replay.is_some());
+}

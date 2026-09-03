@@ -1,6 +1,6 @@
 //! Chat Completions stream state machine.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use oven_sdk::{
     AdapterId, CustomPart, ErrorStage, Finish, FinishReason, JsonValue, ModelError, ModelErrorKind,
@@ -11,11 +11,13 @@ use crate::{configuration::ReasoningField, wire::chat::REPLAY_FORMAT};
 
 #[derive(Default)]
 struct ToolState {
+    provider_id: Option<String>,
     id: Option<String>,
     name: Option<String>,
     arguments: String,
     emitted: usize,
     started: bool,
+    order: Option<u64>,
 }
 
 pub(crate) struct State {
@@ -29,6 +31,8 @@ pub(crate) struct State {
     reasoning: String,
     refusal: String,
     tools: BTreeMap<(u64, u64), ToolState>,
+    tool_ids: BTreeSet<String>,
+    next_tool_order: u64,
     usage: Usage,
     finish_reason: Option<String>,
     response_metadata: BTreeMap<String, JsonValue>,
@@ -53,6 +57,8 @@ impl State {
             reasoning: String::new(),
             refusal: String::new(),
             tools: BTreeMap::new(),
+            tool_ids: BTreeSet::new(),
+            next_tool_order: 0,
             usage: Usage::default(),
             finish_reason: None,
             response_metadata: BTreeMap::new(),
@@ -172,13 +178,26 @@ impl State {
         bytes: u64,
     ) -> Result<(), ModelError> {
         let mut index = call.get("index").and_then(JsonValue::as_u64).unwrap_or(0);
-        if let Some(id) = call.get("id").and_then(JsonValue::as_str)
-            && self
-                .tools
-                .get(&(choice_index, index))
-                .and_then(|state| state.id.as_deref())
-                .is_some_and(|existing| existing != id)
-        {
+        let provider_id = call
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .filter(|id| !id.is_empty());
+        let provider_name = call.pointer("/function/name").and_then(JsonValue::as_str);
+        let starts_new_call = self.tools.get(&(choice_index, index)).is_some_and(|state| {
+            provider_id.is_some_and(|id| {
+                state
+                    .provider_id
+                    .as_deref()
+                    .is_some_and(|existing| existing != id)
+                    || provider_name.is_some_and(|name| {
+                        state
+                            .name
+                            .as_deref()
+                            .is_some_and(|existing| existing != name)
+                    })
+            })
+        });
+        if starts_new_call {
             index = self
                 .tools
                 .keys()
@@ -188,13 +207,16 @@ impl State {
                 .unwrap_or(index)
                 .saturating_add(1);
         }
+        let needs_id = provider_id.is_some()
+            && self
+                .tools
+                .get(&(choice_index, index))
+                .is_none_or(|state| state.id.is_none());
+        let reserved_id = needs_id.then(|| reserve_tool_id(&mut self.tool_ids, provider_id, index));
         let state = self.tools.entry((choice_index, index)).or_default();
-        if let Some(id) = call
-            .get("id")
-            .and_then(JsonValue::as_str)
-            .filter(|id| !id.is_empty())
-        {
-            state.id = Some(id.into());
+        if let (Some(provider_id), Some(id)) = (provider_id, reserved_id) {
+            state.provider_id = Some(provider_id.into());
+            state.id = Some(id);
         }
         if let Some(name) = call.pointer("/function/name").and_then(JsonValue::as_str) {
             if state
@@ -216,6 +238,8 @@ impl State {
             && let (Some(id), Some(name)) = (&state.id, &state.name)
         {
             state.started = true;
+            state.order = Some(self.next_tool_order);
+            self.next_tool_order = self.next_tool_order.saturating_add(1);
             parts.push(StreamPart::ToolCallStart {
                 id: id.clone(),
                 name: name.clone(),
@@ -257,13 +281,15 @@ impl State {
         }
         let tools = std::mem::take(&mut self.tools);
         let mut native_calls = Vec::new();
-        for (call_number, (_, tool)) in tools.into_iter().enumerate() {
+        for (call_number, (_, mut tool)) in tools.into_iter().enumerate() {
             let id = tool
                 .id
-                .unwrap_or_else(|| format!("google-call-{call_number}"));
+                .unwrap_or_else(|| reserve_tool_id(&mut self.tool_ids, None, call_number as u64));
             let provider_name = tool.name;
             let name = provider_name.clone().unwrap_or_default();
             if !tool.started {
+                tool.order = Some(self.next_tool_order);
+                self.next_tool_order = self.next_tool_order.saturating_add(1);
                 parts.push(StreamPart::ToolCallStart {
                     id: id.clone(),
                     name: name.clone(),
@@ -297,8 +323,13 @@ impl State {
             if let Some(provider_name) = provider_name {
                 native["function"]["name"] = provider_name.into();
             }
-            native_calls.push(native);
+            native_calls.push((tool.order.unwrap_or(u64::MAX), native));
         }
+        native_calls.sort_by_key(|(order, _)| *order);
+        let native_calls = native_calls
+            .into_iter()
+            .map(|(_, call)| call)
+            .collect::<Vec<_>>();
         if !self.refusal.is_empty() {
             parts.push(StreamPart::Custom {
                 part: CustomPart::new("openai.refusal", JsonValue::String(self.refusal.clone())),
@@ -403,6 +434,26 @@ fn invalid_event(message: &str, bytes: u64) -> ModelError {
     ModelError::invalid_response(message)
         .with_stage(ErrorStage::StreamEvent)
         .with_bytes_received(bytes)
+}
+
+fn reserve_tool_id(
+    used: &mut BTreeSet<String>,
+    provider_id: Option<&str>,
+    fallback: u64,
+) -> String {
+    let base = provider_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("google-call-{fallback}"));
+    if used.insert(base.clone()) {
+        return base;
+    }
+    for suffix in 1_u64.. {
+        let candidate = format!("{base}-{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded tool ID suffix space")
 }
 
 fn invalid_finalize(message: &str, bytes: u64) -> ModelError {

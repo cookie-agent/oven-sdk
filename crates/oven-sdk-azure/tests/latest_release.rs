@@ -227,7 +227,7 @@ async fn forged_responses_hidden_continuation_with_recomputed_payload_hash_is_re
 }
 
 #[tokio::test]
-async fn responses_replay_capture_strips_provider_extras_and_rejects_unknown_items() {
+async fn responses_replay_capture_strips_extras_and_optional_unknown_items_degrade() {
     let safe_server = MockServer::start().await;
     let safe = concat!(
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp\"}}\n\n",
@@ -257,13 +257,60 @@ async fn responses_replay_capture_strips_provider_extras_and_rejects_unknown_ite
         "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"future_item\",\"id\":\"future\"}]}}\n\n"
     );
     common::mount(&unknown_server, "/openai/v1/responses", unknown.into()).await;
-    let error = common::provider(&unknown_server, AzureApiRoute::V1)
+    let completed = common::provider(&unknown_server, AzureApiRoute::V1)
+        .responses("deployment", common::gpt4o())
+        .unwrap()
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    assert!(completed.turn.finish.native_replay.is_none());
+    assert!(completed.turn.message.content.iter().any(|part| {
+        matches!(part, oven_sdk::AssistantPart::Custom(custom) if custom.kind == "azure.openai.responses.future_item")
+    }));
+
+    let required_server = MockServer::start().await;
+    common::mount(&required_server, "/openai/v1/responses", unknown.into()).await;
+    let error = common::provider(&required_server, AzureApiRoute::V1)
         .responses("deployment", common::gpt5())
         .unwrap()
         .complete(Request::new(Vec::new()), AbortSignal::default())
         .await
         .unwrap_err();
     assert_eq!(error.kind, ModelErrorKind::InvalidResponse);
+}
+
+#[tokio::test]
+async fn responses_duplicate_tool_ids_are_disambiguated_and_replayable() {
+    let server = MockServer::start().await;
+    let output = serde_json::json!([
+        {"type":"function_call","id":"item_a","call_id":"same","name":"a","arguments":"{}"},
+        {"type":"function_call","id":"item_b","call_id":"same","name":"b","arguments":"{}"}
+    ]);
+    let event = serde_json::json!({"type":"response.completed","response":{"output":output}});
+    common::mount(
+        &server,
+        "/openai/v1/responses",
+        format!("data: {event}\n\n"),
+    )
+    .await;
+    let completed = common::provider(&server, AzureApiRoute::V1)
+        .responses("deployment", common::gpt5())
+        .unwrap()
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let ids = completed
+        .turn
+        .message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            oven_sdk::AssistantPart::ToolCall(call) => Some(call.id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["same", "same-1"]);
+    assert!(completed.turn.finish.native_replay.is_some());
 }
 
 #[tokio::test]
@@ -306,17 +353,19 @@ async fn responses_provider_indices_are_bounded_but_may_be_sparse() {
         "/openai/v1/responses",
         concat!(
             "data: {\"type\":\"response.output_item.added\",\"output_index\":127,\"item\":{\"type\":\"message\",\"id\":\"msg\",\"role\":\"assistant\",\"content\":[]}}\n\n",
-            "data: {\"type\":\"response.output_item.done\",\"output_index\":127,\"item\":{\"type\":\"message\",\"id\":\"msg\",\"role\":\"assistant\",\"content\":[]}}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":127,\"item\":{\"type\":\"message\",\"id\":\"msg\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"once\"}]}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"once\"}]}]}}\n\n"
         ).into(),
     )
     .await;
-    common::provider(&server, AzureApiRoute::V1)
+    let completed = common::provider(&server, AzureApiRoute::V1)
         .responses("deployment", common::gpt5())
         .unwrap()
         .complete(Request::new(Vec::new()), AbortSignal::default())
         .await
         .unwrap();
+    assert_eq!(completed.turn.text(), "once");
+    assert!(completed.turn.finish.native_replay.is_some());
 
     for (item_type, field, part_type) in [
         ("message", "content", "output_text"),
@@ -610,7 +659,7 @@ async fn chat_repeated_tool_index_and_missing_identity_are_accepted() {
         "/openai/v1/chat/completions",
         concat!(
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"a\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
-            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_b\",\"function\":{\"name\":\"b\",\"arguments\":\"{}\"}},{\"index\":2,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"b\",\"arguments\":\"{}\"}},{\"index\":2,\"function\":{\"arguments\":\"{}\"}},{\"index\":3,\"id\":\"google-call-2\",\"function\":{\"name\":\"real\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: [DONE]\n\n"
         ).into(),
     )
@@ -636,14 +685,14 @@ async fn chat_repeated_tool_index_and_missing_identity_are_accepted() {
             .iter()
             .map(|call| call.id.as_str())
             .collect::<Vec<_>>(),
-        ["call_a", "call_b", "google-call-2"]
+        ["call_a", "call_a-1", "google-call-2", "google-call-2-1"]
     );
-    assert_eq!(calls[2].name, "");
+    assert_eq!(calls[3].name, "");
     let replay = completed.turn.finish.native_replay.unwrap();
     assert!(
         replay
             .payload()
-            .pointer("/message/tool_calls/2/function/name")
+            .pointer("/message/tool_calls/3/function/name")
             .is_none()
     );
 }

@@ -3826,7 +3826,6 @@ pub trait LanguageModel: Send + Sync {
                             || reasoning.contains_key(&id)
                             || tool.contains_key(&id)
                             || ended_tool.contains_key(&id)
-                            || finalized_tool_ids.contains(&id)
                         {
                             return Err(ModelError::invalid_response(
                                 "duplicate or mismatched block start",
@@ -3867,11 +3866,7 @@ pub trait LanguageModel: Send + Sync {
                         );
                     }
                     StreamPart::ToolCall { mut tool_call } => {
-                        if !finalized_tool_ids.insert(tool_call.id.clone()) {
-                            return Err(ModelError::invalid_response(
-                                "stream emitted a duplicate finalized tool call ID",
-                            ));
-                        }
+                        finalized_tool_ids.insert(tool_call.id.clone());
                         if tool.contains_key(&tool_call.id) {
                             return Err(ModelError::invalid_response(
                                 "finalized tool call arrived before tool-call end",
@@ -4359,8 +4354,8 @@ mod tests {
     }
 
     #[test]
-    fn collector_rejects_duplicate_full_call_only_ids() {
-        assert_invalid(vec![
+    fn collector_accepts_sequential_duplicate_full_call_ids() {
+        let turn = collect(vec![
             StreamPart::ToolCall {
                 tool_call: ToolCallPart::new("call", "tool", JsonValue::Null),
             },
@@ -4368,11 +4363,13 @@ mod tests {
                 tool_call: ToolCallPart::new("call", "tool", JsonValue::Null),
             },
             finish(FinishReason::ToolCalls),
-        ]);
+        ])
+        .expect("sequential duplicate calls are representable");
+        assert_eq!(turn.message.content.len(), 2);
     }
 
     #[test]
-    fn collector_rejects_full_and_streamed_tool_call_id_reuse() {
+    fn collector_accepts_completed_sequential_tool_call_id_reuse() {
         assert_invalid(vec![
             StreamPart::ToolCall {
                 tool_call: ToolCallPart::new("call", "tool", JsonValue::Null),
@@ -4384,7 +4381,7 @@ mod tests {
             },
             finish(FinishReason::ToolCalls),
         ]);
-        assert_invalid(vec![
+        let turn = collect(vec![
             StreamPart::ToolCallStart {
                 id: "call".into(),
                 name: "tool".into(),
@@ -4397,11 +4394,22 @@ mod tests {
             StreamPart::ToolCall {
                 tool_call: ToolCallPart::new("call", "tool", JsonValue::Null),
             },
+            StreamPart::ToolCallStart {
+                id: "call".into(),
+                name: "tool".into(),
+                metadata: None,
+            },
+            StreamPart::ToolCallEnd {
+                id: "call".into(),
+                metadata: None,
+            },
             StreamPart::ToolCall {
                 tool_call: ToolCallPart::new("call", "tool", JsonValue::Null),
             },
             finish(FinishReason::ToolCalls),
-        ]);
+        ])
+        .expect("completed sequential duplicate lifecycles are representable");
+        assert_eq!(turn.message.content.len(), 2);
         assert_invalid(vec![
             StreamPart::ToolCallStart {
                 id: "call".into(),

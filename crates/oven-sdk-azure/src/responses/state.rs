@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use oven_sdk::{
     AdapterId, CustomPart, ErrorStage, Finish, FinishReason, JsonValue, ModelError, ModelErrorKind,
-    NativeContextScope, NativeReplayArtifact, ReplayPolicy, StreamPart, ToolCallPart, Usage,
+    NativeContextScope, NativeReplayArtifact, ReplayCapability, ReplayPolicy, StreamPart,
+    ToolCallPart, Usage,
 };
 
 use crate::{responses::replay, wire::responses::REPLAY_FORMAT};
@@ -33,8 +34,10 @@ struct FunctionState {
 pub(crate) struct State {
     adapter_id: AdapterId,
     policy: ReplayPolicy,
+    replay_capability: ReplayCapability,
     items: BTreeMap<usize, JsonValue>,
     functions: BTreeMap<usize, FunctionState>,
+    tool_ids: BTreeSet<String>,
     finalized: BTreeSet<usize>,
     open_text: BTreeSet<String>,
     open_reasoning: BTreeSet<String>,
@@ -55,14 +58,17 @@ impl State {
     pub(crate) fn new(
         adapter_id: AdapterId,
         policy: ReplayPolicy,
+        replay_capability: ReplayCapability,
         replay_binding: JsonValue,
         replay_scope: NativeContextScope,
     ) -> Self {
         Self {
             adapter_id,
             policy,
+            replay_capability,
             items: BTreeMap::new(),
             functions: BTreeMap::new(),
+            tool_ids: BTreeSet::new(),
             finalized: BTreeSet::new(),
             open_text: BTreeSet::new(),
             open_reasoning: BTreeSet::new(),
@@ -262,7 +268,7 @@ impl State {
     fn add_item(
         &mut self,
         output_index: usize,
-        item: JsonValue,
+        mut item: JsonValue,
         parts: &mut Vec<StreamPart>,
         bytes: u64,
     ) -> Result<(), ModelError> {
@@ -270,6 +276,9 @@ impl State {
         if item.get("type").and_then(JsonValue::as_str) == Some("function_call") {
             let function = self.functions.entry(output_index).or_default();
             update_function(function, &item);
+            let call_id =
+                ensure_function_id(function, &item, &mut self.tool_ids, output_index as u64);
+            item["call_id"] = call_id.into();
             start_function(function, parts);
         }
         self.items.insert(output_index, item);
@@ -316,12 +325,8 @@ impl State {
                     .get("id")
                     .and_then(JsonValue::as_str)
                     .map(str::to_owned);
-                let call_id = item
-                    .get("call_id")
-                    .and_then(JsonValue::as_str)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("google-call-{output_index}"));
+                let call_id =
+                    ensure_function_id(function, &item, &mut self.tool_ids, output_index as u64);
                 let name = item
                     .get("name")
                     .and_then(JsonValue::as_str)
@@ -378,7 +383,10 @@ impl State {
             }
             Some("message") => self.finish_message(output_index, &item, parts),
             Some("reasoning") => self.finish_reasoning(output_index, &item, parts),
-            _ => {}
+            Some(kind) => parts.push(StreamPart::Custom {
+                part: CustomPart::new(format!("azure.openai.responses.{kind}"), item.clone()),
+            }),
+            None => {}
         }
         self.items.insert(output_index, item);
         self.finalized.insert(output_index);
@@ -425,7 +433,15 @@ impl State {
         let response = &response;
         self.capture_response(response);
         for (index, item) in output.iter().cloned().enumerate() {
-            let output_index = index;
+            let output_index = self
+                .matching_item_index(&item)
+                .or_else(|| self.available_item_index(index))
+                .ok_or_else(|| {
+                    invalid_finalize(
+                        "Responses terminal output has no available item slot",
+                        bytes,
+                    )
+                })?;
             if self.finalized.contains(&output_index) {
                 continue;
             } else {
@@ -458,12 +474,17 @@ impl State {
             let items = std::mem::take(&mut self.items)
                 .into_values()
                 .collect::<Vec<_>>();
-            let (items, fingerprint) = replay::capture(&items).ok_or_else(|| {
-                invalid_finalize(
+            let Some((items, fingerprint)) = replay::capture(&items) else {
+                if self.replay_capability == ReplayCapability::Optional {
+                    parts.push(StreamPart::Finish { finish });
+                    self.done = true;
+                    return Ok(());
+                }
+                return Err(invalid_finalize(
                     "Responses output contains an item unsafe for native replay",
                     bytes,
-                )
-            })?;
+                ));
+            };
             parts.push(StreamPart::Custom {
                 part: CustomPart::new(
                     replay::FINGERPRINT_KIND,
@@ -491,6 +512,24 @@ impl State {
         parts.push(StreamPart::Finish { finish });
         self.done = true;
         Ok(())
+    }
+
+    fn matching_item_index(&self, terminal: &JsonValue) -> Option<usize> {
+        self.items
+            .iter()
+            .find(|(_, streamed)| item_identity_matches(streamed, terminal))
+            .map(|(index, _)| *index)
+    }
+
+    fn available_item_index(&self, preferred: usize) -> Option<usize> {
+        if preferred < MAX_OUTPUT_ITEMS
+            && !self.items.contains_key(&preferred)
+            && !self.functions.contains_key(&preferred)
+        {
+            return Some(preferred);
+        }
+        (0..MAX_OUTPUT_ITEMS)
+            .find(|index| !self.items.contains_key(index) && !self.functions.contains_key(index))
     }
 
     fn finish_message(
@@ -1097,12 +1136,65 @@ fn update_function(function: &mut FunctionState, item: &JsonValue) {
     if let Some(value) = item.get("id").and_then(JsonValue::as_str) {
         function.item_id = Some(value.into());
     }
-    if let Some(value) = item.get("call_id").and_then(JsonValue::as_str) {
-        function.call_id = Some(value.into());
-    }
     if let Some(value) = item.get("name").and_then(JsonValue::as_str) {
         function.name = Some(value.into());
     }
+}
+
+fn ensure_function_id(
+    function: &mut FunctionState,
+    item: &JsonValue,
+    used: &mut BTreeSet<String>,
+    fallback: u64,
+) -> String {
+    if let Some(id) = &function.call_id {
+        return id.clone();
+    }
+    let provider_id = item
+        .get("call_id")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.is_empty());
+    let id = reserve_tool_id(used, provider_id, fallback);
+    function.call_id = Some(id.clone());
+    id
+}
+
+fn reserve_tool_id(
+    used: &mut BTreeSet<String>,
+    provider_id: Option<&str>,
+    fallback: u64,
+) -> String {
+    let base = provider_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("google-call-{fallback}"));
+    if used.insert(base.clone()) {
+        return base;
+    }
+    for suffix in 1_u64.. {
+        let candidate = format!("{base}-{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded tool ID suffix space")
+}
+
+fn item_identity_matches(streamed: &JsonValue, terminal: &JsonValue) -> bool {
+    if let (Some(streamed), Some(terminal)) = (
+        streamed.get("id").and_then(JsonValue::as_str),
+        terminal.get("id").and_then(JsonValue::as_str),
+    ) {
+        return !streamed.is_empty() && streamed == terminal;
+    }
+    if let (Some(streamed), Some(terminal)) = (
+        streamed.get("call_id").and_then(JsonValue::as_str),
+        terminal.get("call_id").and_then(JsonValue::as_str),
+    ) {
+        return !streamed.is_empty() && streamed == terminal;
+    }
+    streamed.get("type") == terminal.get("type")
+        && streamed.get("content") == terminal.get("content")
+        && streamed.get("summary") == terminal.get("summary")
 }
 
 fn start_function(function: &mut FunctionState, parts: &mut Vec<StreamPart>) {

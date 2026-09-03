@@ -173,6 +173,7 @@ impl LanguageModel for AzureOpenAiResponsesModel {
                 state: State::new(
                     descriptor.adapter_id.clone(),
                     replay_policy,
+                    self.config.capabilities.replay.capability,
                     replay_binding,
                     replay_scope,
                 ),

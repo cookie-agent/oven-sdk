@@ -216,17 +216,12 @@ impl State {
                 .and_then(JsonValue::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            let id = call
+            let provider_id = call
                 .get("id")
                 .and_then(JsonValue::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    let id = format!("google-call-{}", self.call_counter);
-                    self.call_counter = self.call_counter.saturating_add(1);
-                    id
-                });
-            self.call_ids.insert(id.clone());
+                .filter(|value| !value.is_empty());
+            let id = reserve_tool_id(&mut self.call_ids, provider_id, self.call_counter);
+            self.call_counter = self.call_counter.saturating_add(1);
             let input = call
                 .get("args")
                 .cloned()
@@ -866,6 +861,26 @@ fn invalid_event(message: &str, bytes: u64) -> ModelError {
         .with_bytes_received(bytes)
 }
 
+fn reserve_tool_id(
+    used: &mut BTreeSet<String>,
+    provider_id: Option<&str>,
+    fallback: u64,
+) -> String {
+    let base = provider_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("google-call-{fallback}"));
+    if used.insert(base.clone()) {
+        return base;
+    }
+    for suffix in 1_u64.. {
+        let candidate = format!("{base}-{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded tool ID suffix space")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1187,6 +1202,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].id, "same");
+        assert_eq!(calls[1].id, "same-1");
         assert_eq!(calls[0].name, "");
         let finish = parts
             .iter()

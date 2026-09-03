@@ -51,7 +51,7 @@ async fn repeated_tool_index_and_missing_identity_finalize_with_stable_ids() {
     let server = MockServer::start().await;
     let body = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"a\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
-        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_b\",\"function\":{\"name\":\"b\",\"arguments\":\"{}\"}},{\"index\":2,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"b\",\"arguments\":\"{}\"}},{\"index\":2,\"function\":{\"arguments\":\"{}\"}},{\"index\":3,\"id\":\"google-call-2\",\"function\":{\"name\":\"real\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
         "data: [DONE]\n\n"
     );
     common::mount(&server, "/chat/completions", body.into()).await;
@@ -74,14 +74,14 @@ async fn repeated_tool_index_and_missing_identity_finalize_with_stable_ids() {
             .iter()
             .map(|call| call.id.as_str())
             .collect::<Vec<_>>(),
-        ["call_a", "call_b", "google-call-2"]
+        ["call_a", "call_a-1", "google-call-2", "google-call-2-1"]
     );
-    assert_eq!(calls[2].name, "");
+    assert_eq!(calls[3].name, "");
     let replay = completed.turn.finish.native_replay.unwrap();
     assert!(
         replay
             .payload()
-            .pointer("/message/tool_calls/2/function/name")
+            .pointer("/message/tool_calls/3/function/name")
             .is_none()
     );
 }

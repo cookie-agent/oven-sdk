@@ -2289,6 +2289,14 @@ fn close_hugging_face_item(item: &mut ItemState, queue: &mut VecDeque<StreamItem
                 id,
                 metadata: reasoning_metadata(&state.kind),
             }));
+        } else if state.kind == "refusal" {
+            queue.push_back(Ok(StreamPart::Custom {
+                part: CustomPart {
+                    kind: REFUSAL_KIND.into(),
+                    data: state.text.clone().into(),
+                    metadata: phase.clone(),
+                },
+            }));
         }
     }
 }
@@ -2302,24 +2310,23 @@ fn reconcile_streamed_content(item: &ItemState, authoritative: &mut JsonValue) {
             .unwrap_or_default();
         let content = item
             .contents
-            .iter()
-            .map(|(index, state)| {
+            .values()
+            .map(|state| {
+                let terminal = terminal_content
+                    .iter()
+                    .find(|part| content_state_matches(state, part))
+                    .cloned();
                 if state.kind == "refusal" {
-                    serde_json::json!({"type":"refusal","refusal":state.text})
+                    let mut part =
+                        terminal.unwrap_or_else(|| serde_json::json!({"type":"refusal"}));
+                    part["refusal"] = state.text.clone().into();
+                    part
                 } else {
-                    let mut part = serde_json::json!({"type":state.kind,"text":state.text});
-                    if state.kind == "output_text" {
-                        let annotations = if state.annotations.is_empty() {
-                            terminal_content
-                                .get(*index)
-                                .and_then(|part| part.get("annotations"))
-                                .and_then(JsonValue::as_array)
-                                .cloned()
-                                .unwrap_or_default()
-                        } else {
-                            state.annotations.clone()
-                        };
-                        part["annotations"] = JsonValue::Array(annotations);
+                    let mut part =
+                        terminal.unwrap_or_else(|| serde_json::json!({"type":state.kind}));
+                    part["text"] = state.text.clone().into();
+                    if state.kind == "output_text" && !state.annotations.is_empty() {
+                        part["annotations"] = JsonValue::Array(state.annotations.clone());
                     }
                     part
                 }
@@ -2328,13 +2335,38 @@ fn reconcile_streamed_content(item: &ItemState, authoritative: &mut JsonValue) {
         authoritative["content"] = JsonValue::Array(content);
     }
     if !item.summaries.is_empty() {
+        let terminal = authoritative
+            .get("summary")
+            .and_then(JsonValue::as_array)
+            .cloned()
+            .unwrap_or_default();
         authoritative["summary"] = JsonValue::Array(
             item.summaries
                 .values()
-                .map(|state| serde_json::json!({"type":"summary_text","text":state.text}))
+                .map(|state| {
+                    let mut part = terminal
+                        .iter()
+                        .find(|part| content_state_matches(state, part))
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({"type":"summary_text"}));
+                    part["text"] = state.text.clone().into();
+                    part
+                })
                 .collect(),
         );
     }
+}
+
+fn content_state_matches(state: &ContentState, part: &JsonValue) -> bool {
+    let kind = part.get("type").and_then(JsonValue::as_str);
+    let text = part
+        .get(if state.kind == "refusal" {
+            "refusal"
+        } else {
+            "text"
+        })
+        .and_then(JsonValue::as_str);
+    kind == Some(state.kind.as_str()) && text == Some(state.text.as_str())
 }
 
 fn flush_deferred_message_text(
@@ -2609,16 +2641,13 @@ fn validate_item_content(
                 .get(if kind == "refusal" { "refusal" } else { "text" })
                 .and_then(JsonValue::as_str)
                 .ok_or_else(|| event_error("message content is missing text", bytes))?;
-            if let Some(state) = item.contents.get(&index) {
-                if kind != state.kind || text != state.text {
-                    return Err(event_error(
-                        "message content differs from streamed content",
-                        bytes,
-                    ));
-                }
-            } else if !hugging_face {
+            let streamed = item
+                .contents
+                .values()
+                .find(|state| content_state_matches(state, part));
+            if streamed.is_none() && !hugging_face {
                 return Err(event_error("missing streamed message content part", bytes));
-            } else if kind == "output_text" {
+            } else if streamed.is_none() && kind == "output_text" {
                 let id = format!("{}:{index}", item.id);
                 let metadata = phase_metadata(authoritative);
                 queue.push_back(Ok(StreamPart::TextStart {
@@ -2641,7 +2670,8 @@ fn validate_item_content(
                     .collect::<Vec<_>>();
                 let streamed_annotations = item
                     .contents
-                    .get(&index)
+                    .values()
+                    .find(|state| content_state_matches(state, part))
                     .map(|state| state.annotations.as_slice())
                     .unwrap_or_default();
                 if !streamed_annotations.is_empty()
@@ -2664,7 +2694,7 @@ fn validate_item_content(
                     }
                 }
             } else if kind == "refusal" {
-                if !item.contents.contains_key(&index) {
+                if streamed.is_none() {
                     queue.push_back(Ok(StreamPart::Custom {
                         part: CustomPart {
                             kind: REFUSAL_KIND.into(),
@@ -2715,7 +2745,9 @@ fn validate_reasoning_content(
             return Err(event_error("unsupported reasoning summary content", bytes));
         }
         validate_or_emit_reasoning(
-            item.summaries.get(&index),
+            item.summaries
+                .values()
+                .find(|state| content_state_matches(state, part)),
             part,
             kind,
             format!("{}:summary:{index}", item.id),
@@ -2730,7 +2762,9 @@ fn validate_reasoning_content(
             return Err(event_error("unsupported reasoning content", bytes));
         }
         validate_or_emit_reasoning(
-            item.contents.get(&index),
+            item.contents
+                .values()
+                .find(|state| content_state_matches(state, part)),
             part,
             kind,
             format!("{}:{index}", item.id),

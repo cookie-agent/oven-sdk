@@ -44,7 +44,9 @@ pub(crate) struct State {
     reasoning: bool,
     signed_reasoning: bool,
     blocks: BTreeMap<u64, Block>,
+    block_order: BTreeMap<u64, u64>,
     native: BTreeMap<u64, JsonValue>,
+    next_block_order: u64,
     next_index: u64,
     stopped_indices: BTreeSet<u64>,
     call_ids: BTreeSet<String>,
@@ -74,7 +76,9 @@ impl State {
             reasoning: config.reasoning,
             signed_reasoning: config.signed_reasoning,
             blocks: BTreeMap::new(),
+            block_order: BTreeMap::new(),
             native: BTreeMap::new(),
+            next_block_order: 0,
             next_index: 0,
             stopped_indices: BTreeSet::new(),
             call_ids: BTreeSet::new(),
@@ -397,10 +401,14 @@ impl State {
         let block = self.blocks.remove(&index).ok_or_else(|| {
             invalid_event("Bedrock contentBlockStop referenced no open block", bytes)
         })?;
+        let order = self
+            .block_order
+            .remove(&index)
+            .unwrap_or(self.next_block_order);
         match block {
             Block::Text { id, text } => {
                 parts.push(StreamPart::TextEnd { id, metadata: None });
-                self.native.insert(index, serde_json::json!({"text":text}));
+                self.native.insert(order, serde_json::json!({"text":text}));
             }
             Block::Reasoning {
                 id,
@@ -443,7 +451,7 @@ impl State {
                     }
                     serde_json::json!({"reasoningContent":{"reasoningText":reasoning_text}})
                 };
-                self.native.insert(index, native);
+                self.native.insert(order, native);
             }
             Block::Tool { id, name, input } => {
                 parts.push(StreamPart::ToolCallEnd {
@@ -479,7 +487,7 @@ impl State {
                 call.raw_input = Some(raw);
                 parts.push(StreamPart::ToolCall { tool_call: call });
                 self.native.insert(
-                    index,
+                    order,
                     serde_json::json!({"toolUse":{"toolUseId":id,"name":name,"input":parsed}}),
                 );
             }
@@ -656,6 +664,8 @@ impl State {
             ));
         }
         self.stopped_indices.remove(&index);
+        self.block_order.insert(index, self.next_block_order);
+        self.next_block_order = self.next_block_order.saturating_add(1);
         self.next_index = self.next_index.max(index.saturating_add(1));
         Ok(())
     }
@@ -1276,8 +1286,18 @@ mod tests {
         state
             .apply("metadata", serde_json::json!({"usage":{}}), &mut parts, 6)
             .unwrap();
-        assert!(
-            matches!(parts.last(), Some(StreamPart::Finish { finish }) if finish.native_replay.is_some())
+        let StreamPart::Finish { finish } = parts.last().unwrap() else {
+            panic!("missing finish")
+        };
+        let replay = finish.native_replay.as_ref().unwrap();
+        let content = replay.payload()["assistant_content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(
+            content
+                .iter()
+                .map(|part| part["text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["x", "x", "x"]
         );
     }
 

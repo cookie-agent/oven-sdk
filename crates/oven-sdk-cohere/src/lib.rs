@@ -1092,6 +1092,7 @@ struct CohereState {
     done: bool,
     contents: BTreeMap<usize, ContentState>,
     tools: BTreeMap<usize, ToolState>,
+    tool_ids: BTreeSet<String>,
     citations: BTreeMap<usize, JsonValue>,
     open_citations: BTreeSet<usize>,
     tool_plan: String,
@@ -1119,6 +1120,7 @@ impl CohereState {
             done: false,
             contents: BTreeMap::new(),
             tools: BTreeMap::new(),
+            tool_ids: BTreeSet::new(),
             citations: BTreeMap::new(),
             open_citations: BTreeSet::new(),
             tool_plan: String::new(),
@@ -1255,12 +1257,11 @@ impl CohereState {
                 if self.tools.contains_key(&index) {
                     return Err(event_error("duplicate Cohere tool-call-start index", bytes));
                 }
-                let id = value
+                let provider_id = value
                     .pointer("/delta/message/tool_calls/id")
                     .and_then(JsonValue::as_str)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("google-call-{index}"));
+                    .filter(|value| !value.is_empty());
+                let id = reserve_tool_id(&mut self.tool_ids, provider_id, index as u64);
                 let name = value
                     .pointer("/delta/message/tool_calls/function/name")
                     .and_then(JsonValue::as_str)
@@ -1642,6 +1643,26 @@ fn replay_fingerprint(message: &JsonValue) -> Option<String> {
         .ok()
         .map(Sha256::digest)
         .map(|digest| URL_SAFE_NO_PAD.encode(digest))
+}
+
+fn reserve_tool_id(
+    used: &mut BTreeSet<String>,
+    provider_id: Option<&str>,
+    fallback: u64,
+) -> String {
+    let base = provider_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("google-call-{fallback}"));
+    if used.insert(base.clone()) {
+        return base;
+    }
+    for suffix in 1_u64.. {
+        let candidate = format!("{base}-{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded tool ID suffix space")
 }
 
 fn decode_replay(
