@@ -101,6 +101,16 @@ impl HeaderProvider for CustomAuth {
     }
 }
 
+struct DynamicCallerAuth;
+
+impl HeaderProvider for DynamicCallerAuth {
+    fn headers(&self, _context: &oven_sdk::HeaderContext) -> Result<HeaderOverrides, ModelError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("authorization", "Dynamic caller token".parse().unwrap());
+        Ok(HeaderOverrides::new(headers))
+    }
+}
+
 #[tokio::test]
 async fn query_params_and_custom_auth_are_explicit() {
     let server = MockServer::start().await;
@@ -141,6 +151,47 @@ async fn caller_authorization_is_not_overwritten_by_custom_auth() {
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests[0].headers["authorization"], "Caller token");
+}
+
+#[tokio::test]
+async fn dynamic_caller_authorization_suppresses_custom_auth() {
+    let server = MockServer::start().await;
+    common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+    let mut config = common::compatible_config(&server, "model");
+    config.provider.auth = OpenAiCompatibleAuth::headers(Arc::new(CustomAuth));
+    config.provider.headers.dynamic_headers = Some(Arc::new(DynamicCallerAuth));
+    config.settings.routing_discriminator = Some("dynamic-caller-auth-route".into());
+    let model = OpenAiCompatibleChatModel::new(config).unwrap();
+
+    model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers["authorization"], "Dynamic caller token");
+}
+
+#[tokio::test]
+async fn caller_cookie_suppresses_custom_auth_entirely() {
+    let server = MockServer::start().await;
+    common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+    let mut config = common::compatible_config(&server, "model");
+    config.provider.auth = OpenAiCompatibleAuth::headers(Arc::new(CustomAuth));
+    config.settings.routing_discriminator = Some("caller-cookie-route".into());
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("cookie", "caller-session=value".parse().unwrap());
+    config.provider.headers.static_headers = HeaderOverrides::new(headers);
+    let model = OpenAiCompatibleChatModel::new(config).unwrap();
+
+    model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers["cookie"], "caller-session=value");
+    assert!(requests[0].headers.get("authorization").is_none());
 }
 
 #[tokio::test]
