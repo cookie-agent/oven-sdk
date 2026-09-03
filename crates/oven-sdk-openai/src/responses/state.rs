@@ -858,11 +858,11 @@ impl State {
     }
 }
 
-fn output_index(value: &JsonValue, bytes: u64) -> Result<u64, ModelError> {
-    value
+fn output_index(value: &JsonValue, _bytes: u64) -> Result<u64, ModelError> {
+    Ok(value
         .get("output_index")
         .and_then(JsonValue::as_u64)
-        .ok_or_else(|| invalid_event("Responses event is missing output_index", bytes))
+        .unwrap_or(0))
 }
 
 fn item_text<'a>(item: &'a JsonValue, field: &str, index: u64) -> Option<&'a str> {

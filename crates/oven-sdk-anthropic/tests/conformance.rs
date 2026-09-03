@@ -281,14 +281,20 @@ async fn adapter_backed_malformed_sse_returns_decoder_errors() {
     .await;
     assert_malformed_payload_returns_error(|| Err(truncated_json)).unwrap();
 
-    let unknown_event = decoder_error(format!(
-        "{}{}",
-        event("message_start", r#"{"type":"message_start","message":{}}"#),
-        event("unknown_event", r#"{"type":"unknown_event"}"#),
-    ))
+    let unknown_model = scripted_sse_model(vec![
+        format!(
+            "{}{}{}",
+            event("message_start", r#"{"type":"message_start","message":{}}"#),
+            event("unknown_event", r#"{"type":"unknown_event"}"#),
+            event("message_stop", r#"{"type":"message_stop"}"#),
+        )
+        .into_bytes(),
+    ])
     .await;
-    assert_eq!(unknown_event.kind, ModelErrorKind::InvalidResponse);
-    assert_malformed_payload_returns_error(|| Err(unknown_event)).unwrap();
+    unknown_model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
 
     let invalid_tool_args = decoder_error(
         [

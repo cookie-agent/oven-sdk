@@ -195,12 +195,6 @@ impl State {
     ) -> Result<(), ModelError> {
         self.require_open_message(bytes)?;
         let index = index(payload, bytes)?;
-        if self.stopped_indices.contains(&index) {
-            return Err(invalid_event(
-                "Bedrock delta targeted a stopped content block",
-                bytes,
-            ));
-        }
         let delta = payload
             .get("delta")
             .and_then(JsonValue::as_object)
@@ -423,15 +417,6 @@ impl State {
                 {
                     return Err(invalid_final(
                         "Bedrock reasoning block mixed text and redacted union members",
-                        bytes,
-                    ));
-                }
-                if redacted.is_none()
-                    && self.signed_reasoning
-                    && signature.as_deref().is_none_or(str::is_empty)
-                {
-                    return Err(invalid_final(
-                        "Bedrock signed reasoning block is missing its signature",
                         bytes,
                     ));
                 }
@@ -664,19 +649,14 @@ impl State {
     }
 
     fn reserve_index(&mut self, index: u64, bytes: u64) -> Result<(), ModelError> {
-        if self.blocks.contains_key(&index)
-            || self.stopped_indices.contains(&index)
-            || index != self.next_index
-        {
+        if self.blocks.contains_key(&index) {
             return Err(invalid_event(
-                "Bedrock content block indices must start at zero and increase without reuse",
+                "duplicate open Bedrock content block index",
                 bytes,
             ));
         }
-        self.next_index = self
-            .next_index
-            .checked_add(1)
-            .ok_or_else(|| invalid_event("Bedrock block index counter overflowed", bytes))?;
+        self.stopped_indices.remove(&index);
+        self.next_index = self.next_index.max(index.saturating_add(1));
         Ok(())
     }
 
@@ -1223,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_signature_malformed_tool_and_event_order_fail() {
+    fn missing_signature_is_accepted_while_event_order_stays_strict() {
         let mut state = State::new(config("anthropic.claude-sonnet-4-6", true, true));
         let mut parts = Vec::new();
         assert!(
@@ -1245,15 +1225,59 @@ mod tests {
             )
             .unwrap();
         state.apply("contentBlockDelta", serde_json::json!({"contentBlockIndex":0,"delta":{"reasoningContent":{"text":"x"}}}), &mut parts, 2).unwrap();
-        assert!(
+        state
+            .apply(
+                "contentBlockStop",
+                serde_json::json!({"contentBlockIndex":0}),
+                &mut parts,
+                3,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn sparse_and_reused_block_indices_are_accepted() {
+        let mut state = State::new(config("unknown", false, false));
+        let mut parts = Vec::new();
+        state
+            .apply(
+                "messageStart",
+                serde_json::json!({"role":"assistant"}),
+                &mut parts,
+                1,
+            )
+            .unwrap();
+        for index in [4, 1, 4] {
+            state
+                .apply(
+                    "contentBlockDelta",
+                    serde_json::json!({"contentBlockIndex":index,"delta":{"text":"x"}}),
+                    &mut parts,
+                    3,
+                )
+                .unwrap();
             state
                 .apply(
                     "contentBlockStop",
-                    serde_json::json!({"contentBlockIndex":0}),
+                    serde_json::json!({"contentBlockIndex":index}),
                     &mut parts,
-                    3
+                    4,
                 )
-                .is_err()
+                .unwrap();
+        }
+        state
+            .apply(
+                "messageStop",
+                serde_json::json!({"stopReason":"end_turn"}),
+                &mut parts,
+                5,
+            )
+            .unwrap();
+        state
+            .apply("metadata", serde_json::json!({"usage":{}}), &mut parts, 6)
+            .unwrap();
+        assert!(
+            matches!(parts.last(), Some(StreamPart::Finish { finish }) if finish.native_replay.is_some())
         );
     }
 

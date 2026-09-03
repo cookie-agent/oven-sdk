@@ -47,7 +47,7 @@ fn semantic_message(message: &JsonValue, reasoning_field: ReasoningField) -> Jso
                 .map(|call| {
                     serde_json::json!({
                         "id": call.get("id"),
-                        "name": call.pointer("/function/name"),
+                        "name": call.pointer("/function/name").and_then(JsonValue::as_str).unwrap_or_default(),
                         "arguments": call.pointer("/function/arguments")
                     })
                 })

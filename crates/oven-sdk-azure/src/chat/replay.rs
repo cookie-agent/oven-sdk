@@ -49,17 +49,16 @@ fn validate_message(message: &JsonValue, reasoning_field: AzureReasoningField) -
     }
     if let Some(calls) = object.get("tool_calls") {
         let calls = calls.as_array()?;
-        let mut ids = BTreeSet::new();
         for call in calls {
             let call = call.as_object()?;
             exact_keys(call, &["function", "id", "type"])?;
             let id = call.get("id")?.as_str()?;
-            if id.is_empty() || !ids.insert(id) || call.get("type")?.as_str()? != "function" {
+            if id.is_empty() || call.get("type")?.as_str()? != "function" {
                 return None;
             }
             let function = call.get("function")?.as_object()?;
-            exact_keys(function, &["arguments", "name"])?;
-            if function.get("name")?.as_str()?.is_empty() {
+            exact_subset(function, &["arguments", "name"])?;
+            if function.get("name").is_some_and(|value| !value.is_string()) {
                 return None;
             }
             let arguments = function.get("arguments")?.as_str()?;
@@ -101,7 +100,7 @@ fn semantic_message(message: &JsonValue, reasoning_field: AzureReasoningField) -
                 .map(|call| {
                     serde_json::json!({
                         "id": call.get("id"),
-                        "name": call.pointer("/function/name"),
+                        "name": call.pointer("/function/name").and_then(JsonValue::as_str).unwrap_or_default(),
                         "arguments": call.pointer("/function/arguments")
                     })
                 })

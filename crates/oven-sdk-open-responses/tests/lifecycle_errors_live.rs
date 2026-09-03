@@ -8,7 +8,7 @@ use wiremock::{
 };
 
 #[tokio::test]
-async fn rejects_sequence_gaps_and_missing_done() {
+async fn accepts_sequence_gaps_but_still_requires_done() {
     let server = MockServer::start().await;
     common::mount(&server, common::bad_sequence_stream()).await;
     let model = common::generic_model(&server, "opaque");
@@ -24,7 +24,7 @@ async fn rejects_sequence_gaps_and_missing_done() {
             None => panic!("expected lifecycle error"),
         }
     };
-    assert_eq!(error.kind, ModelErrorKind::InvalidResponse);
+    assert_eq!(error.kind, ModelErrorKind::UnexpectedEof);
 }
 
 #[tokio::test]

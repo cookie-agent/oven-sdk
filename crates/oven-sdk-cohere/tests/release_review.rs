@@ -429,7 +429,7 @@ async fn timeout_settings_are_scope_bound_and_error_finish_is_always_in_band() {
 }
 
 #[tokio::test]
-async fn malformed_and_truncated_sse_fail_closed() {
+async fn truncated_sse_fails_but_event_name_mismatch_is_accepted() {
     let truncated_server = MockServer::start().await;
     common::mount(
         &truncated_server,
@@ -446,13 +446,45 @@ async fn malformed_and_truncated_sse_fail_closed() {
     let mismatch_server = MockServer::start().await;
     common::mount(
         &mismatch_server,
-        "event: content-start\ndata: {\"type\":\"message-start\",\"delta\":{\"message\":{\"role\":\"assistant\"}}}\n\n".into(),
+        concat!(
+            "event: content-start\ndata: {\"type\":\"message-start\",\"delta\":{\"message\":{\"role\":\"assistant\"}}}\n\n",
+            "event: content-end\ndata: {\"type\":\"message-end\",\"delta\":{\"finish_reason\":\"COMPLETE\"}}\n\n"
+        ).into(),
     )
     .await;
     let mismatch = common::model(&mismatch_server, "opaque");
-    let error = mismatch
+    let completed = mismatch
         .complete(Request::new(Vec::new()), AbortSignal::default())
         .await
-        .unwrap_err();
-    assert_eq!(error.kind, ModelErrorKind::InvalidResponse);
+        .unwrap();
+    assert_eq!(completed.turn.finish.finish_reason, FinishReason::Stop);
+}
+
+#[tokio::test]
+async fn missing_tool_id_and_name_use_a_stable_id_and_empty_name() {
+    let server = MockServer::start().await;
+    common::mount(
+        &server,
+        concat!(
+            "event: message-start\ndata: {\"type\":\"message-start\",\"delta\":{\"message\":{\"role\":\"assistant\"}}}\n\n",
+            "event: tool-call-start\ndata: {\"type\":\"tool-call-start\",\"index\":3,\"delta\":{\"message\":{\"tool_calls\":{\"function\":{\"arguments\":\"{}\"}}}}}\n\n",
+            "event: tool-call-end\ndata: {\"type\":\"tool-call-end\",\"index\":3}\n\n",
+            "event: message-end\ndata: {\"type\":\"message-end\",\"delta\":{\"finish_reason\":\"TOOL_CALL\"}}\n\n"
+        ).into(),
+    )
+    .await;
+    let completed = common::model(&server, "opaque")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    assert!(completed.turn.message.content.iter().any(|part| {
+        matches!(part, AssistantPart::ToolCall(call) if call.id == "google-call-3" && call.name.is_empty())
+    }));
+    let replay = completed.turn.finish.native_replay.unwrap();
+    assert!(
+        replay
+            .payload()
+            .pointer("/message/tool_calls/0/function/name")
+            .is_none()
+    );
 }

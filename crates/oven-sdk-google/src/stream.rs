@@ -214,8 +214,7 @@ impl State {
             let name = call
                 .get("name")
                 .and_then(JsonValue::as_str)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| invalid_final("Gemini function call is missing a name", bytes))?
+                .unwrap_or_default()
                 .to_owned();
             let id = call
                 .get("id")
@@ -227,12 +226,7 @@ impl State {
                     self.call_counter = self.call_counter.saturating_add(1);
                     id
                 });
-            if !self.call_ids.insert(id.clone()) {
-                return Err(invalid_final(
-                    "Gemini function call ID was duplicated",
-                    bytes,
-                ));
-            }
+            self.call_ids.insert(id.clone());
             let input = call
                 .get("args")
                 .cloned()
@@ -305,10 +299,8 @@ impl State {
             self.native_parts.push(native);
             return Ok(());
         }
-        Err(invalid_event(
-            "Gemini returned an unsupported content part",
-            bytes,
-        ))
+        self.native_parts.push(native);
+        Ok(())
     }
 
     fn emit_sources(&mut self, candidate: &JsonValue, parts: &mut Vec<StreamPart>) {
@@ -874,12 +866,6 @@ fn invalid_event(message: &str, bytes: u64) -> ModelError {
         .with_bytes_received(bytes)
 }
 
-fn invalid_final(message: &str, bytes: u64) -> ModelError {
-    ModelError::invalid_response(message)
-        .with_stage(ErrorStage::StreamFinalize)
-        .with_bytes_received(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1169,6 +1155,53 @@ mod tests {
         assert_eq!(replay["parts"][3]["toolResponse"]["id"], "");
         assert_eq!(replay["parts"][4]["toolCall"]["id"], "call-exact");
         assert_eq!(replay["parts"][5]["toolResponse"]["id"], "response-exact");
+    }
+
+    #[test]
+    fn client_calls_accept_duplicate_ids_missing_names_and_unknown_parts() {
+        let value = serde_json::json!({
+            "candidates":[{
+                "content":{"parts":[
+                    {"functionCall":{"id":"same","args":{}}},
+                    {"functionCall":{"id":"same","name":"lookup","args":{}}},
+                    {"futurePart":{"opaque":true}}
+                ]},
+                "finishReason":"STOP"
+            }]
+        });
+        let (parts, _) = normalize_single(
+            value,
+            ReplayPolicy::IfValid,
+            native_context_scope("gemini-3.5-flash"),
+            None,
+            false,
+            100,
+        )
+        .unwrap();
+        let calls = parts
+            .iter()
+            .filter_map(|part| match part {
+                StreamPart::ToolCall { tool_call } => Some(tool_call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "same");
+        assert_eq!(calls[0].name, "");
+        let finish = parts
+            .iter()
+            .find_map(|part| match part {
+                StreamPart::Finish { finish } => Some(finish),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            finish.native_replay.as_ref().unwrap().payload()["parts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]

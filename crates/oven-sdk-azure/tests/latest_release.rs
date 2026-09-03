@@ -267,7 +267,7 @@ async fn responses_replay_capture_strips_provider_extras_and_rejects_unknown_ite
 }
 
 #[tokio::test]
-async fn responses_provider_indices_are_checked_before_vector_extension() {
+async fn responses_provider_indices_are_bounded_but_may_be_sparse() {
     for (event_type, index_field) in [
         ("response.output_text.delta", "content_index"),
         ("response.refusal.delta", "content_index"),
@@ -289,7 +289,7 @@ async fn responses_provider_indices_are_checked_before_vector_extension() {
         }
     }
 
-    for output_index in [u64::MAX, 128, 127] {
+    for output_index in [u64::MAX, 128] {
         let event = serde_json::json!({
             "type":"response.output_text.delta",
             "output_index":output_index,
@@ -300,12 +300,23 @@ async fn responses_provider_indices_are_checked_before_vector_extension() {
         assert_typed_invalid(&error, ErrorStage::StreamEvent);
     }
 
-    let output_gap = concat!(
-        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg\",\"role\":\"assistant\",\"content\":[]}}\n\n",
-        "data: {\"type\":\"response.output_text.delta\",\"output_index\":2,\"content_index\":0,\"delta\":\"x\"}\n\n"
-    );
-    let error = responses_error(output_gap.into()).await;
-    assert_typed_invalid(&error, ErrorStage::StreamEvent);
+    let server = MockServer::start().await;
+    common::mount(
+        &server,
+        "/openai/v1/responses",
+        concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":127,\"item\":{\"type\":\"message\",\"id\":\"msg\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":127,\"item\":{\"type\":\"message\",\"id\":\"msg\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+        ).into(),
+    )
+    .await;
+    common::provider(&server, AzureApiRoute::V1)
+        .responses("deployment", common::gpt5())
+        .unwrap()
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
 
     for (item_type, field, part_type) in [
         ("message", "content", "output_text"),
@@ -330,30 +341,46 @@ async fn responses_provider_indices_are_checked_before_vector_extension() {
 }
 
 #[tokio::test]
-async fn responses_terminal_payloads_are_fail_closed() {
+async fn responses_terminal_payloads_allow_optional_status_output_and_reasons() {
     let valid_item = serde_json::json!({
         "type":"message",
         "id":"msg",
         "role":"assistant",
         "content":[{"type":"output_text","text":"ok"}]
     });
-    let invalid_events = [
-        serde_json::json!({"type":"response.completed"}),
+    let error = responses_error(format!(
+        "data: {}\n\n",
+        serde_json::json!({"type":"response.completed"})
+    ))
+    .await;
+    assert_typed_invalid(&error, ErrorStage::StreamFinalize);
+
+    let accepted_events = [
         serde_json::json!({"type":"response.completed","response":{"output":[valid_item.clone()]}}),
         serde_json::json!({"type":"response.completed","response":{"status":"incomplete","output":[valid_item.clone()]}}),
         serde_json::json!({"type":"response.completed","response":{"status":"completed"}}),
         serde_json::json!({"type":"response.completed","response":{"status":"completed","output":null}}),
         serde_json::json!({"type":"response.completed","response":{"status":"completed","output":[]}}),
-        serde_json::json!({"type":"response.completed","response":{"status":"completed","output":[{"type":"hosted_tool_call","id":"hosted"}]}}),
         serde_json::json!({"type":"response.completed","response":{"status":"completed","output":[valid_item.clone()],"incomplete_details":{"reason":"max_output_tokens"}}}),
         serde_json::json!({"type":"response.incomplete","response":{"status":"incomplete","output":[valid_item.clone()]}}),
         serde_json::json!({"type":"response.incomplete","response":{"status":"incomplete","output":[valid_item.clone()],"incomplete_details":null}}),
         serde_json::json!({"type":"response.incomplete","response":{"status":"incomplete","output":[valid_item.clone()],"incomplete_details":{"reason":"future_reason"}}}),
         serde_json::json!({"type":"response.incomplete","response":{"status":"completed","output":[valid_item.clone()],"incomplete_details":{"reason":"max_output_tokens"}}}),
     ];
-    for event in invalid_events {
-        let error = responses_error(format!("data: {event}\n\n")).await;
-        assert_typed_invalid(&error, ErrorStage::StreamFinalize);
+    for event in accepted_events {
+        let server = MockServer::start().await;
+        common::mount(
+            &server,
+            "/openai/v1/responses",
+            format!("data: {event}\n\n"),
+        )
+        .await;
+        common::provider(&server, AzureApiRoute::V1)
+            .responses("deployment", common::gpt5())
+            .unwrap()
+            .complete(Request::new(Vec::new()), AbortSignal::default())
+            .await
+            .unwrap();
     }
 
     for (reason, expected) in [
@@ -556,7 +583,7 @@ fn strict_schema_references_enforce_depth_cycles_and_local_definition_boundaries
 }
 
 #[tokio::test]
-async fn chat_requires_a_choice_and_finish_reason_for_success() {
+async fn chat_without_a_choice_or_finish_reason_completes_unknown() {
     for document in [
         "data: [DONE]\n\n".to_owned(),
         "data: {\"prompt_filter_results\":[],\"choices\":[]}\n\ndata: [DONE]\n\n".to_owned(),
@@ -565,17 +592,60 @@ async fn chat_requires_a_choice_and_finish_reason_for_success() {
     ] {
         let server = MockServer::start().await;
         common::mount(&server, "/openai/v1/chat/completions", document).await;
-        let error = common::provider(&server, AzureApiRoute::V1)
+        let completed = common::provider(&server, AzureApiRoute::V1)
             .chat("deployment", common::gpt4o())
             .unwrap()
             .complete(Request::new(Vec::new()), AbortSignal::default())
             .await
-            .unwrap_err();
-        assert!(matches!(
-            error.kind,
-            ModelErrorKind::UnexpectedEof | ModelErrorKind::InvalidResponse
-        ));
+            .unwrap();
+        assert_eq!(completed.turn.finish.finish_reason, oven_sdk::FinishReason::Unknown);
     }
+}
+
+#[tokio::test]
+async fn chat_repeated_tool_index_and_missing_identity_are_accepted() {
+    let server = MockServer::start().await;
+    common::mount(
+        &server,
+        "/openai/v1/chat/completions",
+        concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"a\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_b\",\"function\":{\"name\":\"b\",\"arguments\":\"{}\"}},{\"index\":2,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        ).into(),
+    )
+    .await;
+    let completed = common::provider(&server, AzureApiRoute::V1)
+        .chat("deployment", common::gpt4o())
+        .unwrap()
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let calls = completed
+        .turn
+        .message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            oven_sdk::AssistantPart::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.id.as_str())
+            .collect::<Vec<_>>(),
+        ["call_a", "call_b", "google-call-2"]
+    );
+    assert_eq!(calls[2].name, "");
+    let replay = completed.turn.finish.native_replay.unwrap();
+    assert!(
+        replay
+            .payload()
+            .pointer("/message/tool_calls/2/function/name")
+            .is_none()
+    );
 }
 
 #[test]

@@ -89,28 +89,16 @@ async fn collect(model: &dyn LanguageModel) -> Vec<Result<StreamPart, oven_sdk::
     parts
 }
 
-async fn assert_reasoning_failure(model: &dyn LanguageModel) {
+async fn assert_reasoning_accepted(model: &dyn LanguageModel) {
     assert_eq!(
         model.capabilities().replay.capability,
         ReplayCapability::Required
     );
     let parts = collect(model).await;
-    assert!(
-        !parts
-            .iter()
-            .any(|part| matches!(part, Ok(StreamPart::Finish { .. })))
-    );
-    let error = parts.into_iter().find_map(Result::err).unwrap();
-    assert_eq!(error.kind, ModelErrorKind::InvalidResponse);
-    assert!(
-        matches!(
-            error.diagnostics.stage,
-            ErrorStage::StreamEvent | ErrorStage::StreamFinalize
-        ),
-        "unexpected stage: {:?}",
-        error.diagnostics.stage
-    );
-    assert!(error.diagnostics.bytes_received > 0);
+    assert!(!parts.iter().any(Result::is_err));
+    assert!(parts.iter().any(
+        |part| matches!(part, Ok(StreamPart::Finish { finish }) if finish.native_replay.is_some())
+    ));
 }
 
 async fn assert_index_failure(model: &dyn LanguageModel) {
@@ -129,7 +117,7 @@ async fn assert_index_failure(model: &dyn LanguageModel) {
     assert!(error.diagnostics.bytes_received > 0);
 }
 
-async fn assert_all_protocols_reject_indices(body: String) {
+async fn assert_all_protocols_accept_indices(body: String) {
     let direct = scripted_model(body.clone()).await;
     let aws = scripted_aws_model(body.clone()).await;
     let minimax = scripted_minimax_model(body).await;
@@ -138,7 +126,13 @@ async fn assert_all_protocols_reject_indices(body: String) {
         &aws as &dyn LanguageModel,
         &minimax as &dyn LanguageModel,
     ] {
-        assert_index_failure(model).await;
+        let parts = collect(model).await;
+        assert!(!parts.iter().any(Result::is_err));
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, Ok(StreamPart::Finish { .. })))
+        );
     }
 }
 
@@ -338,10 +332,8 @@ async fn tool_input_finalizes_only_at_content_block_stop() {
     )
     .await;
     let parts = collect(&missing_stop).await;
-    assert!(
-        matches!(parts.last(), Some(Err(error)) if error.kind == ModelErrorKind::InvalidResponse)
-    );
-    assert!(!parts.iter().any(
+    assert!(!parts.iter().any(Result::is_err));
+    assert!(parts.iter().any(
         |part| matches!(part, Ok(StreamPart::ToolCall { tool_call }) if tool_call.id == "missing")
     ));
 }
@@ -572,7 +564,7 @@ async fn unsigned_thinking_and_empty_redacted_data_are_captured_faithfully() {
 }
 
 #[tokio::test]
-async fn malformed_reasoning_fails_before_finish_or_artifact_capture() {
+async fn non_string_redacted_reasoning_and_minimax_redaction_are_preserved() {
     let redacted = |data: &str| {
         [
             event("message_start", r#"{"type":"message_start","message":{}}"#),
@@ -589,12 +581,12 @@ async fn malformed_reasoning_fails_before_finish_or_artifact_capture() {
         .concat()
     };
 
-    assert_reasoning_failure(&scripted_model(redacted("null")).await).await;
-    assert_reasoning_failure(&scripted_minimax_model(redacted("\"opaque\"")).await).await;
+    assert_reasoning_accepted(&scripted_model(redacted("null")).await).await;
+    assert_reasoning_accepted(&scripted_minimax_model(redacted("\"opaque\"")).await).await;
 }
 
 #[tokio::test]
-async fn noncontiguous_duplicate_reused_and_terminal_starts_fail_for_all_protocols() {
+async fn noncontiguous_duplicate_and_reused_indices_finish_for_all_protocols() {
     let signed_thinking_without_zero = [
         event("message_start", r#"{"type":"message_start","message":{}}"#),
         event("content_block_start", r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking"}}"#),
@@ -604,7 +596,7 @@ async fn noncontiguous_duplicate_reused_and_terminal_starts_fail_for_all_protoco
         terminal(),
     ]
     .concat();
-    assert_all_protocols_reject_indices(signed_thinking_without_zero).await;
+    assert_all_protocols_accept_indices(signed_thinking_without_zero).await;
 
     let reused_after_stop = [
         event("message_start", r#"{"type":"message_start","message":{}}"#),
@@ -623,7 +615,7 @@ async fn noncontiguous_duplicate_reused_and_terminal_starts_fail_for_all_protoco
         terminal(),
     ]
     .concat();
-    assert_all_protocols_reject_indices(reused_after_stop).await;
+    assert_all_protocols_accept_indices(reused_after_stop).await;
 
     let duplicate_active_start = [
         event("message_start", r#"{"type":"message_start","message":{}}"#),
@@ -638,7 +630,7 @@ async fn noncontiguous_duplicate_reused_and_terminal_starts_fail_for_all_protoco
         terminal(),
     ]
     .concat();
-    assert_all_protocols_reject_indices(duplicate_active_start).await;
+    assert_all_protocols_accept_indices(duplicate_active_start).await;
 
     let gap = [
         event("message_start", r#"{"type":"message_start","message":{}}"#),
@@ -665,7 +657,7 @@ async fn noncontiguous_duplicate_reused_and_terminal_starts_fail_for_all_protoco
         terminal(),
     ]
     .concat();
-    assert_all_protocols_reject_indices(gap).await;
+    assert_all_protocols_accept_indices(gap).await;
 
     let start_after_terminal = [
         event("message_start", r#"{"type":"message_start","message":{}}"#),
@@ -676,7 +668,8 @@ async fn noncontiguous_duplicate_reused_and_terminal_starts_fail_for_all_protoco
         ),
     ]
     .concat();
-    assert_all_protocols_reject_indices(start_after_terminal).await;
+    let direct = scripted_model(start_after_terminal).await;
+    assert_index_failure(&direct).await;
 }
 
 #[tokio::test]

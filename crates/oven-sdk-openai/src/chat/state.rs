@@ -1,6 +1,6 @@
 //! Chat Completions stream state machine.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use oven_sdk::{
     AdapterId, CustomPart, ErrorStage, Finish, FinishReason, JsonValue, ModelError, ModelErrorKind,
@@ -29,12 +29,10 @@ pub(crate) struct State {
     reasoning: String,
     refusal: String,
     tools: BTreeMap<(u64, u64), ToolState>,
-    tool_ids: BTreeSet<String>,
     usage: Usage,
     finish_reason: Option<String>,
     response_metadata: BTreeMap<String, JsonValue>,
     done: bool,
-    saw_choice: bool,
 }
 
 impl State {
@@ -55,12 +53,10 @@ impl State {
             reasoning: String::new(),
             refusal: String::new(),
             tools: BTreeMap::new(),
-            tool_ids: BTreeSet::new(),
             usage: Usage::default(),
             finish_reason: None,
             response_metadata: BTreeMap::new(),
             done: false,
-            saw_choice: false,
         }
     }
 
@@ -110,7 +106,6 @@ impl State {
                     bytes,
                 ));
             }
-            self.saw_choice = true;
             if let Some(reason) = choice.get("finish_reason").and_then(JsonValue::as_str) {
                 self.finish_reason = Some(reason.to_owned());
             }
@@ -176,12 +171,29 @@ impl State {
         parts: &mut Vec<StreamPart>,
         bytes: u64,
     ) -> Result<(), ModelError> {
-        let index = call.get("index").and_then(JsonValue::as_u64).unwrap_or(0);
+        let mut index = call.get("index").and_then(JsonValue::as_u64).unwrap_or(0);
+        if let Some(id) = call.get("id").and_then(JsonValue::as_str)
+            && self
+                .tools
+                .get(&(choice_index, index))
+                .and_then(|state| state.id.as_deref())
+                .is_some_and(|existing| existing != id)
+        {
+            index = self
+                .tools
+                .keys()
+                .filter(|(choice, _)| *choice == choice_index)
+                .map(|(_, index)| *index)
+                .max()
+                .unwrap_or(index)
+                .saturating_add(1);
+        }
         let state = self.tools.entry((choice_index, index)).or_default();
-        if let Some(id) = call.get("id").and_then(JsonValue::as_str) {
-            if state.id.as_deref().is_some_and(|existing| existing != id) {
-                return Err(invalid_event("Chat tool call ID changed", bytes));
-            }
+        if let Some(id) = call
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .filter(|id| !id.is_empty())
+        {
             state.id = Some(id.into());
         }
         if let Some(name) = call.pointer("/function/name").and_then(JsonValue::as_str) {
@@ -203,9 +215,6 @@ impl State {
         if !state.started
             && let (Some(id), Some(name)) = (&state.id, &state.name)
         {
-            if !self.tool_ids.insert(id.clone()) {
-                return Err(invalid_event("duplicate Chat tool call ID", bytes));
-            }
             state.started = true;
             parts.push(StreamPart::ToolCallStart {
                 id: id.clone(),
@@ -238,12 +247,6 @@ impl State {
         if self.done {
             return Ok(());
         }
-        if !done_marker && self.finish_reason.is_none() {
-            return Err(ModelError::unexpected_eof(
-                "Chat stream ended before [DONE] or finish_reason",
-            )
-            .with_bytes_received(bytes));
-        }
         self.close_reasoning(parts);
         if self.text_open {
             self.text_open = false;
@@ -254,15 +257,12 @@ impl State {
         }
         let tools = std::mem::take(&mut self.tools);
         let mut native_calls = Vec::new();
-        for (_, tool) in tools {
+        for (call_number, (_, tool)) in tools.into_iter().enumerate() {
             let id = tool
                 .id
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| invalid_finalize("final Chat tool call is missing ID", bytes))?;
-            let name = tool
-                .name
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| invalid_finalize("final Chat tool call is missing name", bytes))?;
+                .unwrap_or_else(|| format!("google-call-{call_number}"));
+            let provider_name = tool.name;
+            let name = provider_name.clone().unwrap_or_default();
             if !tool.started {
                 parts.push(StreamPart::ToolCallStart {
                     id: id.clone(),
@@ -293,7 +293,11 @@ impl State {
             let mut call = ToolCallPart::new(id.clone(), name.clone(), parsed);
             call.raw_input = Some(tool.arguments.clone());
             parts.push(StreamPart::ToolCall { tool_call: call });
-            native_calls.push(serde_json::json!({"id":id,"type":"function","function":{"name":name,"arguments":tool.arguments}}));
+            let mut native = serde_json::json!({"id":id,"type":"function","function":{"arguments":tool.arguments}});
+            if let Some(provider_name) = provider_name {
+                native["function"]["name"] = provider_name.into();
+            }
+            native_calls.push(native);
         }
         if !self.refusal.is_empty() {
             parts.push(StreamPart::Custom {

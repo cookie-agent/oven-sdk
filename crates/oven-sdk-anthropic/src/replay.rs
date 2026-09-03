@@ -25,7 +25,7 @@ pub(crate) fn decode(
         .and_then(JsonValue::as_array)
         .ok_or("Messages replay content is invalid")?
         .clone();
-    if !authoritative_reasoning_is_well_formed(&content, protocol) {
+    if !authoritative_reasoning_is_well_formed(&content) {
         return Err("Messages replay contains invalid provider reasoning");
     }
     let expected = normalized
@@ -38,14 +38,11 @@ pub(crate) fn decode(
     Ok(content)
 }
 
-fn authoritative_reasoning_is_well_formed(content: &[JsonValue], protocol: Protocol) -> bool {
+fn authoritative_reasoning_is_well_formed(content: &[JsonValue]) -> bool {
     content.iter().all(
         |block| match block.get("type").and_then(JsonValue::as_str) {
             Some("thinking") => block.get("thinking").and_then(JsonValue::as_str).is_some(),
-            Some("redacted_thinking") => {
-                protocol != Protocol::MiniMax
-                    && block.get("data").and_then(JsonValue::as_str).is_some()
-            }
+            Some("redacted_thinking") => block.get("data").is_some(),
             _ => true,
         },
     )

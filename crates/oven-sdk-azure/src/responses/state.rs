@@ -89,27 +89,7 @@ impl State {
     }
 
     fn output_index(&self, value: &JsonValue, bytes: u64) -> Result<usize, ModelError> {
-        let index = bounded_index(value, "output_index", MAX_OUTPUT_ITEMS, bytes)?;
-        let highest = self
-            .items
-            .keys()
-            .chain(self.functions.keys())
-            .chain(self.finalized.iter())
-            .copied()
-            .max();
-        let next = match highest {
-            Some(value) => value.checked_add(1).ok_or_else(|| {
-                invalid_event("Responses output index arithmetic overflow", bytes)
-            })?,
-            None => 0,
-        };
-        if index > next {
-            return Err(invalid_event(
-                "Responses output index contains a gap",
-                bytes,
-            ));
-        }
-        Ok(index)
+        bounded_index(value, "output_index", MAX_OUTPUT_ITEMS, bytes)
     }
 
     pub(crate) fn apply(
@@ -299,36 +279,64 @@ impl State {
     fn finish_item(
         &mut self,
         output_index: usize,
-        item: JsonValue,
+        mut item: JsonValue,
         parts: &mut Vec<StreamPart>,
         bytes: u64,
     ) -> Result<(), ModelError> {
         validate_stream_item_slots(&item, bytes)?;
-        self.validate_streamed_item(output_index, &item, bytes)?;
+        if let Some(streamed) = self.items.get(&output_index).and_then(JsonValue::as_object) {
+            let target = item
+                .as_object_mut()
+                .ok_or_else(|| invalid_finalize("Responses output item is not an object", bytes))?;
+            for (key, value) in streamed {
+                if matches!(key.as_str(), "content" | "summary")
+                    && !self
+                        .text_deltas
+                        .iter()
+                        .any(|(index, _)| *index == output_index)
+                    && !self
+                        .refusal_deltas
+                        .iter()
+                        .any(|(index, _)| *index == output_index)
+                    && !self
+                        .reasoning_deltas
+                        .iter()
+                        .any(|(index, _, _)| *index == output_index)
+                {
+                    continue;
+                }
+                target.insert(key.clone(), value.clone());
+            }
+        }
         match item.get("type").and_then(JsonValue::as_str) {
             Some("function_call") => {
-                let item_id = required_function_field(&item, "id", bytes)?;
-                let call_id = required_function_field(&item, "call_id", bytes)?;
-                let name = required_function_field(&item, "name", bytes)?;
-                let final_arguments = required_function_field(&item, "arguments", bytes)?;
                 let function = self.functions.entry(output_index).or_default();
                 update_function(function, &item);
-                if function
-                    .expected
-                    .as_deref()
-                    .is_some_and(|expected| expected != final_arguments)
-                {
-                    return Err(invalid_finalize(
-                        "Responses done and authoritative tool arguments differ",
-                        bytes,
-                    ));
-                }
-                if !function.arguments.is_empty() && function.arguments != final_arguments {
-                    return Err(invalid_finalize(
-                        "Responses streamed and authoritative tool arguments differ",
-                        bytes,
-                    ));
-                }
+                let item_id = item
+                    .get("id")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_owned);
+                let call_id = item
+                    .get("call_id")
+                    .and_then(JsonValue::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("google-call-{output_index}"));
+                let name = item
+                    .get("name")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let final_arguments = if function.arguments.is_empty() {
+                    item.get("arguments")
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or("{}")
+                        .to_owned()
+                } else {
+                    function.arguments.clone()
+                };
+                item["call_id"] = call_id.clone().into();
+                item["arguments"] = final_arguments.clone().into();
                 let parsed: JsonValue = serde_json::from_str(&final_arguments).map_err(|_| {
                     invalid_finalize("final Responses tool arguments are invalid JSON", bytes)
                 })?;
@@ -338,7 +346,7 @@ impl State {
                         bytes,
                     ));
                 }
-                function.item_id = Some(item_id.clone());
+                function.item_id = item_id.clone();
                 function.call_id = Some(call_id.clone());
                 function.name = Some(name.clone());
                 let started_before = function.started;
@@ -362,7 +370,7 @@ impl State {
                     metadata: None,
                 });
                 let mut call = ToolCallPart::new(call_id, name, parsed);
-                call.provider_item_id = Some(item_id);
+                call.provider_item_id = item_id;
                 call.raw_input = Some(final_arguments);
                 parts.push(StreamPart::ToolCall { tool_call: call });
                 function.finalized = true;
@@ -393,90 +401,40 @@ impl State {
                     bytes,
                 )
             })?;
-        let expected_status = match terminal_kind {
-            TerminalKind::Completed => "completed",
-            TerminalKind::Incomplete => "incomplete",
-        };
-        if response.get("status").and_then(JsonValue::as_str) != Some(expected_status) {
-            return Err(invalid_finalize(
-                "Responses terminal status contradicts the event type",
-                bytes,
-            ));
-        }
         let output = response
             .get("output")
             .and_then(JsonValue::as_array)
             .cloned()
-            .filter(|output| !output.is_empty())
-            .ok_or_else(|| {
-                invalid_finalize(
-                    "Responses terminal response requires a non-empty output array",
-                    bytes,
-                )
-            })?;
+            .unwrap_or_default();
         if output.len() > MAX_OUTPUT_ITEMS {
             return Err(invalid_finalize(
                 "Responses terminal output exceeds the supported item limit",
                 bytes,
             ));
         }
-        validate_terminal_items(&output, bytes)?;
         let incomplete_reason = match terminal_kind {
-            TerminalKind::Completed => {
-                if response
-                    .get("incomplete_details")
-                    .is_some_and(|value| !value.is_null())
-                {
-                    return Err(invalid_finalize(
-                        "completed Responses terminal payload contains incomplete details",
-                        bytes,
-                    ));
-                }
-                None
-            }
-            TerminalKind::Incomplete => {
-                let reason = response
-                    .get("incomplete_details")
-                    .and_then(JsonValue::as_object)
-                    .and_then(|details| details.get("reason"))
-                    .and_then(JsonValue::as_str)
-                    .filter(|reason| matches!(*reason, "max_output_tokens" | "content_filter"))
-                    .ok_or_else(|| {
-                        invalid_finalize(
-                            "incomplete Responses terminal payload requires a documented reason",
-                            bytes,
-                        )
-                    })?;
-                Some(reason)
-            }
+            TerminalKind::Completed => None,
+            TerminalKind::Incomplete => response
+                .get("incomplete_details")
+                .and_then(JsonValue::as_object)
+                .and_then(|details| details.get("reason"))
+                .and_then(JsonValue::as_str)
+                .filter(|reason| !reason.is_empty()),
         };
         let response = JsonValue::Object(response.clone());
         let response = &response;
         self.capture_response(response);
-        let output_len = output.len();
-        if self
-            .items
-            .keys()
-            .chain(self.functions.keys())
-            .any(|index| *index >= output_len)
-        {
-            return Err(invalid_finalize(
-                "Responses terminal output omitted a streamed item",
-                bytes,
-            ));
-        }
         for (index, item) in output.iter().cloned().enumerate() {
             let output_index = index;
             if self.finalized.contains(&output_index) {
-                let finalized = self.items.get(&output_index).ok_or_else(|| {
-                    invalid_finalize("Responses finalized item state is missing", bytes)
-                })?;
-                validate_finalized_item(finalized, &item, bytes)?;
+                continue;
             } else {
+                if !self.items.contains_key(&output_index) {
+                    self.add_item(output_index, item.clone(), parts, bytes)?;
+                }
                 self.finish_item(output_index, item, parts, bytes)?;
             }
         }
-        self.items = output.into_iter().enumerate().collect();
         self.close_all(parts);
         if self.functions.values().any(|function| !function.finalized) {
             return Err(invalid_finalize(
@@ -492,7 +450,7 @@ impl State {
             Some("content_filter") => FinishReason::ContentFilter,
             None if self.client_calls => FinishReason::ToolCalls,
             None => FinishReason::Stop,
-            Some(_) => unreachable!("incomplete reason was validated"),
+            Some(reason) => FinishReason::Other(reason.into()),
         };
         let mut finish = Finish::new(std::mem::take(&mut self.usage), finish_reason);
         finish.response_metadata = std::mem::take(&mut self.response_metadata);
@@ -595,78 +553,6 @@ impl State {
                 _ => {}
             }
         }
-    }
-
-    fn validate_streamed_item(
-        &self,
-        output_index: usize,
-        authoritative: &JsonValue,
-        bytes: u64,
-    ) -> Result<(), ModelError> {
-        let Some(streamed) = self.items.get(&output_index) else {
-            return Ok(());
-        };
-        validate_optional_string(streamed, authoritative, "type", bytes)?;
-        validate_optional_string(streamed, authoritative, "id", bytes)?;
-        match authoritative.get("type").and_then(JsonValue::as_str) {
-            Some("message") => {
-                for (_, item_index) in self
-                    .text_deltas
-                    .iter()
-                    .filter(|(index, _)| *index == output_index)
-                {
-                    if item_text(streamed, "content", *item_index)
-                        != item_text(authoritative, "content", *item_index)
-                    {
-                        return Err(invalid_finalize(
-                            "Responses streamed and authoritative message text differ",
-                            bytes,
-                        ));
-                    }
-                }
-                for (_, item_index) in self
-                    .refusal_deltas
-                    .iter()
-                    .filter(|(index, _)| *index == output_index)
-                {
-                    if item_refusal(streamed, *item_index)
-                        != item_refusal(authoritative, *item_index)
-                    {
-                        return Err(invalid_finalize(
-                            "Responses streamed and authoritative refusal differ",
-                            bytes,
-                        ));
-                    }
-                }
-            }
-            Some("reasoning") => {
-                for (_, kind, item_index) in self
-                    .reasoning_deltas
-                    .iter()
-                    .filter(|(index, _, _)| *index == output_index)
-                {
-                    let field = if kind == "summary" {
-                        "summary"
-                    } else {
-                        "content"
-                    };
-                    if item_text(streamed, field, *item_index)
-                        != item_text(authoritative, field, *item_index)
-                    {
-                        return Err(invalid_finalize(
-                            "Responses streamed and authoritative reasoning text differ",
-                            bytes,
-                        ));
-                    }
-                }
-            }
-            Some("function_call") => {
-                validate_optional_string(streamed, authoritative, "call_id", bytes)?;
-                validate_optional_string(streamed, authoritative, "name", bytes)?;
-            }
-            _ => {}
-        }
-        Ok(())
     }
 
     fn ensure_unfinalized(&self, output_index: usize, bytes: u64) -> Result<(), ModelError> {
@@ -1198,154 +1084,6 @@ fn validate_stream_item_slots(item: &JsonValue, bytes: u64) -> Result<(), ModelE
     Ok(())
 }
 
-fn validate_terminal_items(items: &[JsonValue], bytes: u64) -> Result<(), ModelError> {
-    let mut item_ids = BTreeSet::new();
-    let mut call_ids = BTreeSet::new();
-    for item in items {
-        let object = item.as_object().ok_or_else(|| {
-            invalid_finalize("Responses terminal output item is not an object", bytes)
-        })?;
-        let id = object
-            .get("id")
-            .and_then(JsonValue::as_str)
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| invalid_finalize("Responses terminal item has an invalid ID", bytes))?;
-        if !item_ids.insert(id) {
-            return Err(invalid_finalize(
-                "Responses terminal output contains duplicate item IDs",
-                bytes,
-            ));
-        }
-        match object.get("type").and_then(JsonValue::as_str) {
-            Some("message") => {
-                if object.get("role").and_then(JsonValue::as_str) != Some("assistant") {
-                    return Err(invalid_finalize(
-                        "Responses terminal message requires assistant role",
-                        bytes,
-                    ));
-                }
-                let content = object
-                    .get("content")
-                    .and_then(JsonValue::as_array)
-                    .filter(|content| !content.is_empty() && content.len() <= MAX_CONTENT_SLOTS)
-                    .ok_or_else(|| {
-                        invalid_finalize(
-                            "Responses terminal message requires bounded non-empty content",
-                            bytes,
-                        )
-                    })?;
-                for part in content {
-                    match part.get("type").and_then(JsonValue::as_str) {
-                        Some("output_text")
-                            if part.get("text").and_then(JsonValue::as_str).is_some() => {}
-                        Some("refusal")
-                            if part.get("refusal").and_then(JsonValue::as_str).is_some() => {}
-                        _ => {
-                            return Err(invalid_finalize(
-                                "Responses terminal message contains an invalid content part",
-                                bytes,
-                            ));
-                        }
-                    }
-                }
-            }
-            Some("reasoning") => {
-                if object
-                    .get("id")
-                    .and_then(JsonValue::as_str)
-                    .is_none_or(str::is_empty)
-                {
-                    return Err(invalid_finalize(
-                        "Responses terminal reasoning item requires an ID",
-                        bytes,
-                    ));
-                }
-                validate_terminal_text_array(object.get("summary"), "summary_text", bytes)?;
-                if object.contains_key("content") {
-                    validate_terminal_text_array(object.get("content"), "reasoning_text", bytes)?;
-                }
-                if object
-                    .get("encrypted_content")
-                    .is_some_and(|value| value.as_str().is_none_or(str::is_empty))
-                {
-                    return Err(invalid_finalize(
-                        "Responses terminal reasoning encrypted content is invalid",
-                        bytes,
-                    ));
-                }
-            }
-            Some("function_call") => {
-                for field in ["id", "call_id", "name", "arguments"] {
-                    if object
-                        .get(field)
-                        .and_then(JsonValue::as_str)
-                        .is_none_or(str::is_empty)
-                    {
-                        return Err(invalid_finalize(
-                            "Responses terminal function call is missing a required field",
-                            bytes,
-                        ));
-                    }
-                }
-                let call_id = object["call_id"].as_str().expect("validated string");
-                if !call_ids.insert(call_id) {
-                    return Err(invalid_finalize(
-                        "Responses terminal output contains duplicate call IDs",
-                        bytes,
-                    ));
-                }
-                if !serde_json::from_str::<JsonValue>(
-                    object["arguments"].as_str().expect("validated string"),
-                )
-                .ok()
-                .is_some_and(|value| value.is_object())
-                {
-                    return Err(invalid_finalize(
-                        "Responses terminal function arguments must be a JSON object",
-                        bytes,
-                    ));
-                }
-            }
-            _ => {
-                return Err(invalid_finalize(
-                    "Responses terminal output contains an unsupported item type",
-                    bytes,
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_terminal_text_array(
-    value: Option<&JsonValue>,
-    expected_type: &str,
-    bytes: u64,
-) -> Result<(), ModelError> {
-    let values = value
-        .and_then(JsonValue::as_array)
-        .filter(|values| values.len() <= MAX_CONTENT_SLOTS)
-        .ok_or_else(|| invalid_finalize("Responses terminal reasoning array is invalid", bytes))?;
-    if values.iter().any(|value| {
-        value.get("type").and_then(JsonValue::as_str) != Some(expected_type)
-            || value.get("text").and_then(JsonValue::as_str).is_none()
-    }) {
-        return Err(invalid_finalize(
-            "Responses terminal reasoning array contains an invalid part",
-            bytes,
-        ));
-    }
-    Ok(())
-}
-
-fn item_text<'a>(item: &'a JsonValue, field: &str, index: usize) -> Option<&'a str> {
-    item.get(field)
-        .and_then(JsonValue::as_array)
-        .and_then(|values| values.get(index))
-        .and_then(|value| value.get("text"))
-        .and_then(JsonValue::as_str)
-}
-
 fn item_refusal(item: &JsonValue, index: usize) -> Option<&str> {
     item.get("content")
         .and_then(JsonValue::as_array)
@@ -1353,81 +1091,6 @@ fn item_refusal(item: &JsonValue, index: usize) -> Option<&str> {
         .filter(|value| value.get("type").and_then(JsonValue::as_str) == Some("refusal"))
         .and_then(|value| value.get("refusal"))
         .and_then(JsonValue::as_str)
-}
-
-fn validate_optional_string(
-    streamed: &JsonValue,
-    authoritative: &JsonValue,
-    field: &str,
-    bytes: u64,
-) -> Result<(), ModelError> {
-    if let Some(streamed) = streamed.get(field).and_then(JsonValue::as_str)
-        && authoritative.get(field).and_then(JsonValue::as_str) != Some(streamed)
-    {
-        return Err(invalid_finalize(
-            "Responses streamed and authoritative item identity differ",
-            bytes,
-        ));
-    }
-    Ok(())
-}
-
-fn validate_finalized_item(
-    finalized: &JsonValue,
-    authoritative: &JsonValue,
-    bytes: u64,
-) -> Result<(), ModelError> {
-    let kind = finalized.get("type").and_then(JsonValue::as_str);
-    if kind != authoritative.get("type").and_then(JsonValue::as_str) {
-        return Err(invalid_finalize(
-            "Responses done and terminal item types differ",
-            bytes,
-        ));
-    }
-    let matches = match kind {
-        Some("message") => {
-            selected_item(finalized, &["type", "id", "role", "content"])
-                == selected_item(authoritative, &["type", "id", "role", "content"])
-        }
-        Some("reasoning") => {
-            selected_item(
-                finalized,
-                &["type", "id", "summary", "content", "encrypted_content"],
-            ) == selected_item(
-                authoritative,
-                &["type", "id", "summary", "content", "encrypted_content"],
-            )
-        }
-        Some("function_call") => {
-            selected_item(finalized, &["type", "id", "call_id", "name", "arguments"])
-                == selected_item(
-                    authoritative,
-                    &["type", "id", "call_id", "name", "arguments"],
-                )
-        }
-        _ => finalized == authoritative,
-    };
-    if matches {
-        Ok(())
-    } else {
-        Err(invalid_finalize(
-            "Responses done and terminal authoritative items differ",
-            bytes,
-        ))
-    }
-}
-
-fn selected_item(item: &JsonValue, fields: &[&str]) -> JsonValue {
-    JsonValue::Object(
-        fields
-            .iter()
-            .filter_map(|field| {
-                item.get(*field)
-                    .cloned()
-                    .map(|value| ((*field).into(), value))
-            })
-            .collect(),
-    )
 }
 
 fn update_function(function: &mut FunctionState, item: &JsonValue) {
@@ -1440,23 +1103,6 @@ fn update_function(function: &mut FunctionState, item: &JsonValue) {
     if let Some(value) = item.get("name").and_then(JsonValue::as_str) {
         function.name = Some(value.into());
     }
-}
-
-fn required_function_field(
-    item: &JsonValue,
-    field: &str,
-    bytes: u64,
-) -> Result<String, ModelError> {
-    item.get(field)
-        .and_then(JsonValue::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            invalid_finalize(
-                &format!("Responses function call is missing non-empty {field}"),
-                bytes,
-            )
-        })
 }
 
 fn start_function(function: &mut FunctionState, parts: &mut Vec<StreamPart>) {

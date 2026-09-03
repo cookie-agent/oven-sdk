@@ -1,6 +1,6 @@
 //! Anthropic stream event state machine.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use oven_sdk::{
     AdapterId, ErrorStage, Finish, FinishReason, JsonValue, ModelError, ModelErrorKind,
@@ -21,11 +21,8 @@ pub(crate) struct State {
     usage: Usage,
     stop: Option<String>,
     stop_sequence: Option<String>,
-    tool_ids: BTreeSet<String>,
-    native: Vec<JsonValue>,
-    pending_native: BTreeMap<u64, JsonValue>,
-    finalized_indices: BTreeSet<u64>,
-    next_expected_start_index: u64,
+    native: BTreeMap<(u64, u64), JsonValue>,
+    native_sequence: u64,
     policy: ReplayPolicy,
     response_metadata: std::collections::BTreeMap<String, JsonValue>,
     request_id: Option<String>,
@@ -47,11 +44,8 @@ impl State {
             usage: Usage::default(),
             stop: None,
             stop_sequence: None,
-            tool_ids: BTreeSet::new(),
-            native: Vec::new(),
-            pending_native: BTreeMap::new(),
-            finalized_indices: BTreeSet::new(),
-            next_expected_start_index: 0,
+            native: BTreeMap::new(),
+            native_sequence: 0,
             policy,
             response_metadata: std::collections::BTreeMap::new(),
             request_id: None,
@@ -161,15 +155,13 @@ impl State {
                     .and_then(JsonValue::as_u64)
                     .ok_or_else(|| invalid_event("missing content block index", bytes))?;
                 validate_block_index(i, bytes)?;
-                self.reject_finalized_reuse(i, bytes)?;
                 if self.blocks.contains_key(&i) {
-                    return Err(invalid_event("duplicate content block index", bytes));
-                }
-                if i != self.next_expected_start_index {
-                    return Err(invalid_event(
-                        "Messages content block starts must be contiguous and ordered",
+                    self.apply(
+                        "content_block_stop",
+                        serde_json::json!({"index":i}),
+                        parts,
                         bytes,
-                    ));
+                    )?;
                 }
                 let block = value
                     .get("content_block")
@@ -184,12 +176,6 @@ impl State {
                         }
                     }
                     "thinking" | "redacted_thinking" => {
-                        if ty == "redacted_thinking" && self.protocol == Protocol::MiniMax {
-                            return Err(invalid_event(
-                                "MiniMax does not support redacted_thinking blocks",
-                                bytes,
-                            ));
-                        }
                         let metadata = (ty == "redacted_thinking").then(|| {
                             BTreeMap::from([(
                                 "anthropic.redacted".into(),
@@ -209,17 +195,13 @@ impl State {
                             .get("id")
                             .and_then(JsonValue::as_str)
                             .filter(|v| !v.is_empty())
-                            .ok_or_else(|| invalid_event("tool use is missing id", bytes))?
-                            .to_owned();
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("google-call-{i}"));
                         let name = block
                             .get("name")
                             .and_then(JsonValue::as_str)
-                            .filter(|v| !v.is_empty())
-                            .ok_or_else(|| invalid_event("tool use is missing name", bytes))?
+                            .unwrap_or_default()
                             .to_owned();
-                        if !self.tool_ids.insert(call_id.clone()) {
-                            return Err(invalid_event("duplicate tool call id", bytes));
-                        }
                         parts.push(StreamPart::ToolCallStart {
                             id: call_id.clone(),
                             name: name.clone(),
@@ -243,12 +225,14 @@ impl State {
                             input,
                         }
                     }
-                    _ => return Err(invalid_event("unsupported Messages content block", bytes)),
+                    _ => {
+                        parts.push(StreamPart::ProviderEvent {
+                            name: format!("{}.content_block", self.protocol.metadata_namespace()),
+                            data: block.clone(),
+                        });
+                        return Ok(());
+                    }
                 };
-                self.next_expected_start_index = self
-                    .next_expected_start_index
-                    .checked_add(1)
-                    .ok_or_else(|| invalid_event("content block start index overflowed", bytes))?;
                 self.blocks.insert(i, b);
                 Ok(())
             }
@@ -258,7 +242,6 @@ impl State {
                     .and_then(JsonValue::as_u64)
                     .ok_or_else(|| invalid_event("missing content block index", bytes))?;
                 validate_block_index(i, bytes)?;
-                self.reject_finalized_reuse(i, bytes)?;
                 let delta = value
                     .get("delta")
                     .ok_or_else(|| invalid_event("missing content block delta", bytes))?;
@@ -309,7 +292,10 @@ impl State {
                             });
                         }
                     }
-                    _ => return Err(invalid_event("content block delta type mismatch", bytes)),
+                    _ => parts.push(StreamPart::ProviderEvent {
+                        name: format!("{}.content_block_delta", self.protocol.metadata_namespace()),
+                        data: value.clone(),
+                    }),
                 }
                 Ok(())
             }
@@ -319,12 +305,10 @@ impl State {
                     .and_then(JsonValue::as_u64)
                     .ok_or_else(|| invalid_event("missing content block index", bytes))?;
                 validate_block_index(i, bytes)?;
-                self.reject_finalized_reuse(i, bytes)?;
-                match self
-                    .blocks
-                    .remove(&i)
-                    .ok_or_else(|| invalid_event("stop for unknown block", bytes))?
-                {
+                let Some(block) = self.blocks.remove(&i) else {
+                    return Ok(());
+                };
+                match block {
                     Block::Text { text } => {
                         self.push_native(i, serde_json::json!({"type":"text","text":text}), bytes)?;
                         parts.push(StreamPart::TextEnd {
@@ -339,13 +323,7 @@ impl State {
                         signature,
                     } => {
                         let native = if redacted {
-                            let data =
-                                data.filter(|data| data.as_str().is_some()).ok_or_else(|| {
-                                    invalid_finalized_reasoning(
-                                        "Anthropic redacted_thinking requires string data",
-                                        bytes,
-                                    )
-                                })?;
+                            let data = data.unwrap_or_else(|| JsonValue::String(String::new()));
                             serde_json::json!({"type":"redacted_thinking","data":data})
                         } else {
                             // The native schema always carries this field; a missing delta is
@@ -415,20 +393,25 @@ impl State {
             }
             "message_stop" => {
                 self.require_started(bytes)?;
-                if !self.blocks.is_empty() {
-                    return Err(invalid_event(
-                        "message_stop arrived before all content blocks stopped",
+                let open = self.blocks.keys().copied().collect::<Vec<_>>();
+                for index in open {
+                    self.apply(
+                        "content_block_stop",
+                        serde_json::json!({"index":index}),
+                        parts,
                         bytes,
-                    ));
+                    )?;
                 }
-                self.validate_native_complete(bytes)?;
                 let mut finish = Finish::new(
                     std::mem::take(&mut self.usage),
                     map_stop(self.stop.as_deref()),
                 );
                 finish.response_metadata = std::mem::take(&mut self.response_metadata);
                 if self.policy != ReplayPolicy::Never {
-                    let payload = serde_json::json!({"format":self.protocol.replay_format(),"message":{"role":"assistant","content":std::mem::take(&mut self.native)},"stop_reason":self.stop.take(),"stop_sequence":self.stop_sequence.take()});
+                    let content = std::mem::take(&mut self.native)
+                        .into_values()
+                        .collect::<Vec<_>>();
+                    let payload = serde_json::json!({"format":self.protocol.replay_format(),"message":{"role":"assistant","content":content},"stop_reason":self.stop.take(),"stop_sequence":self.stop_sequence.take()});
                     finish.native_replay = Some(
                         NativeReplayArtifact::new(
                             self.adapter_id.clone(),
@@ -504,7 +487,13 @@ impl State {
                 self.done = true;
                 Ok(())
             }
-            _ => Err(invalid_event("unknown Messages stream event", bytes)),
+            _ => {
+                parts.push(StreamPart::ProviderEvent {
+                    name: format!("{}.stream_event.{kind}", self.protocol.metadata_namespace()),
+                    data: value,
+                });
+                Ok(())
+            }
         }
     }
     fn require_started(&self, bytes: u64) -> Result<(), ModelError> {
@@ -516,56 +505,8 @@ impl State {
     }
     fn push_native(&mut self, index: u64, value: JsonValue, bytes: u64) -> Result<(), ModelError> {
         validate_block_index(index, bytes)?;
-        self.reject_finalized_reuse(index, bytes)?;
-        self.finalized_indices.insert(index);
-        self.pending_native.insert(index, value);
-        loop {
-            let next = u64::try_from(self.native.len()).map_err(|_| {
-                invalid_finalized_index("native content length does not fit provider index", bytes)
-            })?;
-            let Some(value) = self.pending_native.remove(&next) else {
-                break;
-            };
-            self.native.push(value);
-        }
-        Ok(())
-    }
-
-    fn reject_finalized_reuse(&self, index: u64, bytes: u64) -> Result<(), ModelError> {
-        if self.finalized_indices.contains(&index) {
-            Err(invalid_event(
-                "Messages content block index was reused after stop",
-                bytes,
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn validate_native_complete(&self, bytes: u64) -> Result<(), ModelError> {
-        let expected = usize::try_from(self.next_expected_start_index).map_err(|_| {
-            invalid_finalized_index("provider start count does not fit usize", bytes)
-        })?;
-        if !self.pending_native.is_empty()
-            || self.finalized_indices.len() != expected
-            || self.native.len() != expected
-        {
-            return Err(invalid_finalized_index(
-                "Messages native content is incomplete",
-                bytes,
-            ));
-        }
-        for (expected, index) in self.finalized_indices.iter().copied().enumerate() {
-            let expected = u64::try_from(expected).map_err(|_| {
-                invalid_finalized_index("native content length does not fit provider index", bytes)
-            })?;
-            if index != expected {
-                return Err(invalid_finalized_index(
-                    "Messages native content indices are not contiguous",
-                    bytes,
-                ));
-            }
-        }
+        self.native.insert((index, self.native_sequence), value);
+        self.native_sequence = self.native_sequence.saturating_add(1);
         Ok(())
     }
 }
@@ -582,16 +523,6 @@ fn validate_block_index(index: u64, bytes: u64) -> Result<(), ModelError> {
 fn invalid_event(message: &str, bytes: u64) -> ModelError {
     ModelError::invalid_response(message)
         .with_stage(ErrorStage::StreamEvent)
-        .with_bytes_received(bytes)
-}
-fn invalid_finalized_reasoning(message: &str, bytes: u64) -> ModelError {
-    ModelError::invalid_response(message)
-        .with_stage(ErrorStage::StreamFinalize)
-        .with_bytes_received(bytes)
-}
-fn invalid_finalized_index(message: &str, bytes: u64) -> ModelError {
-    ModelError::invalid_response(message)
-        .with_stage(ErrorStage::StreamFinalize)
         .with_bytes_received(bytes)
 }
 fn usage(v: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {

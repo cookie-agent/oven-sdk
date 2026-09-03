@@ -95,18 +95,20 @@ fn sanitize_message(item: &JsonValue) -> Option<JsonValue> {
 
 fn sanitize_reasoning(item: &JsonValue) -> Option<JsonValue> {
     let object = item.as_object()?;
-    let id = object.get("id")?.as_str()?;
-    let encrypted = object.get("encrypted_content")?.as_str()?;
-    if id.is_empty() || encrypted.is_empty() {
-        return None;
-    }
-    let summary = sanitize_text_parts(object.get("summary")?, "summary_text")?;
+    let summary = match object.get("summary") {
+        Some(value) => sanitize_text_parts(value, "summary_text")?,
+        None => Vec::new(),
+    };
     let mut sanitized = serde_json::json!({
         "type":"reasoning",
-        "id":id,
-        "summary":summary,
-        "encrypted_content":encrypted
+        "summary":summary
     });
+    if let Some(id) = object.get("id").and_then(JsonValue::as_str) {
+        sanitized["id"] = id.into();
+    }
+    if let Some(encrypted) = object.get("encrypted_content").and_then(JsonValue::as_str) {
+        sanitized["encrypted_content"] = encrypted.into();
+    }
     if let Some(content) = object.get("content") {
         sanitized["content"] = JsonValue::Array(sanitize_text_parts(content, "reasoning_text")?);
     }
@@ -131,26 +133,27 @@ fn sanitize_text_parts(value: &JsonValue, expected_type: &str) -> Option<Vec<Jso
 
 fn sanitize_function_call(item: &JsonValue) -> Option<JsonValue> {
     let object = item.as_object()?;
-    let id = object.get("id")?.as_str()?;
     let call_id = object.get("call_id")?.as_str()?;
-    let name = object.get("name")?.as_str()?;
     let arguments = object.get("arguments")?.as_str()?;
-    if id.is_empty()
-        || call_id.is_empty()
-        || name.is_empty()
+    if call_id.is_empty()
         || !serde_json::from_str::<JsonValue>(arguments)
             .ok()
             .is_some_and(|value| value.is_object())
     {
         return None;
     }
-    Some(serde_json::json!({
+    let mut sanitized = serde_json::json!({
         "type":"function_call",
-        "id":id,
         "call_id":call_id,
-        "name":name,
         "arguments":arguments
-    }))
+    });
+    if let Some(id) = object.get("id").and_then(JsonValue::as_str) {
+        sanitized["id"] = id.into();
+    }
+    if let Some(name) = object.get("name").and_then(JsonValue::as_str) {
+        sanitized["name"] = name.into();
+    }
+    Some(sanitized)
 }
 
 fn fingerprint(items: &[JsonValue]) -> Option<String> {
@@ -230,10 +233,10 @@ fn semantic_items(items: &[JsonValue]) -> JsonValue {
                 }
             }
             Some("function_call") => calls.push(serde_json::json!({
-                "id":item.get("call_id"),
-                "provider_item_id":item.get("id"),
-                "name":item.get("name"),
-                "arguments":item.get("arguments")
+                "id":item.get("call_id").and_then(JsonValue::as_str).unwrap_or_default(),
+                "provider_item_id":item.get("id").and_then(JsonValue::as_str),
+                "name":item.get("name").and_then(JsonValue::as_str).unwrap_or_default(),
+                "arguments":item.get("arguments").and_then(JsonValue::as_str).unwrap_or_default()
             })),
             _ => {}
         }

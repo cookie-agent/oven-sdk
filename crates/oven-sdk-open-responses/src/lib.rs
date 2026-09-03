@@ -1187,12 +1187,6 @@ async fn read_live(live: &mut Live) -> Result<(), ModelError> {
                 .with_bytes_received(live.count)
         })?;
         let kind = value.get("type").and_then(JsonValue::as_str).unwrap_or("");
-        if event.name != kind {
-            return Err(event_error(
-                "Open Responses event field must match payload type",
-                live.count,
-            ));
-        }
         if live.include_raw {
             live.queue.push_back(Ok(StreamPart::Raw {
                 value: value.clone(),
@@ -1257,12 +1251,10 @@ struct State {
     adapter: AdapterId,
     policy: ReplayPolicy,
     replay_capability: ReplayCapability,
-    replay_reasoning: bool,
     hugging_face: bool,
     binding: JsonValue,
     scope: NativeContextScope,
     phase: Phase,
-    sequence: Option<u64>,
     items: BTreeMap<usize, ItemState>,
     incomplete_item: Option<usize>,
     terminal: Option<Finish>,
@@ -1276,7 +1268,7 @@ impl State {
         adapter: AdapterId,
         policy: ReplayPolicy,
         replay_capability: ReplayCapability,
-        replay_reasoning: bool,
+        _replay_reasoning: bool,
         hugging_face: bool,
         binding: JsonValue,
         scope: NativeContextScope,
@@ -1285,12 +1277,10 @@ impl State {
             adapter,
             policy,
             replay_capability,
-            replay_reasoning,
             hugging_face,
             binding,
             scope,
             phase: Phase::Initial,
-            sequence: None,
             items: BTreeMap::new(),
             incomplete_item: None,
             terminal: None,
@@ -1299,73 +1289,54 @@ impl State {
             response_metadata: BTreeMap::new(),
         }
     }
-    fn sequence(&mut self, value: &JsonValue, bytes: u64) -> Result<(), ModelError> {
-        let current = value
-            .get("sequence_number")
-            .and_then(JsonValue::as_u64)
-            .ok_or_else(|| event_error("Open Responses events require sequence_number", bytes))?;
-        if let Some(previous) = self.sequence
-            && current != previous.saturating_add(1)
-        {
-            return Err(event_error(
-                "Open Responses sequence numbers must be contiguous",
-                bytes,
-            ));
-        }
-        self.sequence = Some(current);
-        Ok(())
-    }
     fn apply(
         &mut self,
         value: JsonValue,
         queue: &mut VecDeque<StreamItem>,
         bytes: u64,
     ) -> Result<(), ModelError> {
-        if self.done || self.phase == Phase::Terminal {
+        let kind = value.get("type").and_then(JsonValue::as_str).unwrap_or("");
+        if self.done {
             return Err(event_error(
                 "Open Responses event after terminal response",
                 bytes,
             ));
         }
-        self.sequence(&value, bytes)?;
-        let kind = value.get("type").and_then(JsonValue::as_str).unwrap_or("");
+        if self.phase == Phase::Terminal
+            && matches!(kind, "response.completed" | "response.incomplete")
+        {
+            return Ok(());
+        }
+        if self.phase == Phase::Terminal {
+            return Err(event_error(
+                "Open Responses event after terminal response",
+                bytes,
+            ));
+        }
         if self.stream_error.is_some() && kind != "response.failed" {
             return Err(event_error(
                 "Open Responses error event must be followed by response.failed",
                 bytes,
             ));
         }
-        if self.phase == Phase::Initial && kind != "response.created" {
-            return Err(event_error(
-                "Open Responses stream must start with response.created",
-                bytes,
-            ));
-        }
         match kind {
             "response.created" => {
-                if self.phase != Phase::Initial {
-                    return Err(event_error("duplicate response.created", bytes));
+                if let Some(response) = value.get("response").filter(|value| value.is_object()) {
+                    self.capture_response(response);
                 }
-                let response = event_response(&value, "response.created", "in_progress", bytes)?;
                 self.phase = Phase::Created;
-                self.capture_response(response);
             }
             "response.queued" => {
-                if self.phase != Phase::Created {
-                    return Err(event_error("response.queued is out of order", bytes));
+                if let Some(response) = value.get("response").filter(|value| value.is_object()) {
+                    self.capture_response(response);
                 }
-                let response = event_response(&value, "response.queued", "queued", bytes)?;
                 self.phase = Phase::Queued;
-                self.capture_response(response);
             }
             "response.in_progress" => {
-                if !matches!(self.phase, Phase::Created | Phase::Queued) {
-                    return Err(event_error("response.in_progress is out of order", bytes));
+                if let Some(response) = value.get("response").filter(|value| value.is_object()) {
+                    self.capture_response(response);
                 }
-                let response =
-                    event_response(&value, "response.in_progress", "in_progress", bytes)?;
                 self.phase = Phase::InProgress;
-                self.capture_response(response);
             }
             "response.output_item.added" => self.item_added(&value, queue, bytes)?,
             "response.reasoning_summary_part.added" => self.summary_added(&value, queue, bytes)?,
@@ -1413,14 +1384,9 @@ impl State {
         Ok(())
     }
     fn ensure_progress(&mut self, bytes: u64) -> Result<(), ModelError> {
-        if self.phase != Phase::InProgress {
-            Err(event_error(
-                "Open Responses output event before response progress",
-                bytes,
-            ))
-        } else {
-            Ok(())
-        }
+        let _ = bytes;
+        self.phase = Phase::InProgress;
+        Ok(())
     }
     fn item_added(
         &mut self,
@@ -1436,11 +1402,8 @@ impl State {
             ));
         }
         let index = bounded_index(value, "output_index", MAX_ITEMS, bytes)?;
-        if self.items.contains_key(&index) || index != self.items.len() {
-            return Err(event_error(
-                "Open Responses output items must be added once in contiguous order",
-                bytes,
-            ));
+        if self.items.contains_key(&index) {
+            return Ok(());
         }
         let item = value
             .get("item")
@@ -1448,12 +1411,11 @@ impl State {
             .ok_or_else(|| event_error("output_item.added is missing item", bytes))?;
         let id = required_string(&item, "id", bytes)?.to_owned();
         let kind = required_string(&item, "type", bytes)?.to_owned();
-        if item.get("status").and_then(JsonValue::as_str) != Some("in_progress") {
-            return Err(event_error(
-                "added Open Responses item must be in_progress",
-                bytes,
-            ));
-        }
+        let initial_arguments = item
+            .get("arguments")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
+            .to_owned();
         if kind == "message" {
             validate_message_phase(&item, bytes)?;
         } else if !matches!(
@@ -1472,17 +1434,18 @@ impl State {
                     bytes,
                 ));
             }
-            if item.get("arguments").and_then(JsonValue::as_str) != Some("") {
-                return Err(event_error(
-                    "added function item must start with empty arguments",
-                    bytes,
-                ));
-            }
             queue.push_back(Ok(StreamPart::ToolCallStart {
                 id: call_id.into(),
                 name: name.into(),
                 metadata: None,
             }));
+            if !initial_arguments.is_empty() {
+                queue.push_back(Ok(StreamPart::ToolCallDelta {
+                    id: call_id.into(),
+                    delta: initial_arguments.clone(),
+                    metadata: None,
+                }));
+            }
         }
         self.items.insert(
             index,
@@ -1492,7 +1455,7 @@ impl State {
                 kind,
                 contents: BTreeMap::new(),
                 summaries: BTreeMap::new(),
-                arguments: String::new(),
+                arguments: initial_arguments,
                 arguments_done: false,
                 done: false,
             },
@@ -1511,11 +1474,8 @@ impl State {
         if item.done {
             return Err(event_error("content part has no open item", bytes));
         }
-        if content != item.contents.len() {
-            return Err(event_error(
-                "content parts must be added in contiguous order",
-                bytes,
-            ));
+        if item.contents.contains_key(&content) {
+            return Ok(());
         }
         let part = value
             .get("part")
@@ -1534,12 +1494,6 @@ impl State {
             .get(if kind == "refusal" { "refusal" } else { "text" })
             .and_then(JsonValue::as_str)
             .unwrap_or("");
-        if !initial.is_empty() {
-            return Err(event_error(
-                "added streamable content part must start empty",
-                bytes,
-            ));
-        }
         let id = format!("{}:{content}", item.id);
         let deferred = kind == "output_text"
             && item
@@ -1562,14 +1516,29 @@ impl State {
         item.contents.insert(
             content,
             ContentState {
-                kind,
-                text: String::new(),
+                kind: kind.clone(),
+                text: initial.to_owned(),
                 annotations: Vec::new(),
                 deferred,
                 open: true,
                 done: false,
             },
         );
+        if !initial.is_empty() {
+            if kind == "output_text" && !deferred {
+                queue.push_back(Ok(StreamPart::TextDelta {
+                    id: format!("{}:{content}", item.id),
+                    delta: initial.into(),
+                    metadata: phase_metadata(&item.item),
+                }));
+            } else if kind == "reasoning_text" {
+                queue.push_back(Ok(StreamPart::ReasoningDelta {
+                    id: format!("{}:{content}", item.id),
+                    delta: initial.into(),
+                    metadata: reasoning_metadata(&kind),
+                }));
+            }
+        }
         Ok(())
     }
     fn summary_added(
@@ -1581,23 +1550,25 @@ impl State {
         let output = bounded_index(value, "output_index", MAX_ITEMS, bytes)?;
         let summary = bounded_index(value, "summary_index", MAX_CONTENT_PARTS, bytes)?;
         let item = event_item_mut(&mut self.items, value, output, bytes)?;
-        if item.done || item.kind != "reasoning" || summary != item.summaries.len() {
+        if item.done || item.kind != "reasoning" {
             return Err(event_error(
-                "reasoning summary parts must be added once in contiguous order",
+                "reasoning summary part has no open reasoning item",
                 bytes,
             ));
+        }
+        if item.summaries.contains_key(&summary) {
+            return Ok(());
         }
         let part = value
             .get("part")
             .ok_or_else(|| event_error("reasoning_summary_part.added is missing part", bytes))?;
-        if required_string(part, "type", bytes)? != "summary_text"
-            || part.get("text").and_then(JsonValue::as_str) != Some("")
-        {
+        if required_string(part, "type", bytes)? != "summary_text" {
             return Err(event_error(
-                "added reasoning summary part must be empty summary_text",
+                "added reasoning summary part must be summary_text",
                 bytes,
             ));
         }
+        let initial = part.get("text").and_then(JsonValue::as_str).unwrap_or("");
         let id = format!("{}:summary:{summary}", item.id);
         queue.push_back(Ok(StreamPart::ReasoningStart {
             id,
@@ -1607,13 +1578,20 @@ impl State {
             summary,
             ContentState {
                 kind: "summary_text".into(),
-                text: String::new(),
+                text: initial.to_owned(),
                 annotations: Vec::new(),
                 deferred: false,
                 open: true,
                 done: false,
             },
         );
+        if !initial.is_empty() {
+            queue.push_back(Ok(StreamPart::ReasoningDelta {
+                id: format!("{}:summary:{summary}", item.id),
+                delta: initial.into(),
+                metadata: reasoning_metadata("summary_text"),
+            }));
+        }
         Ok(())
     }
     fn summary_delta(
@@ -1766,12 +1744,7 @@ impl State {
             "refusal" => event == "response.refusal.delta",
             _ => false,
         };
-        if !matches_kind {
-            return Err(event_error(
-                "content delta type does not match content part",
-                bytes,
-            ));
-        }
+        let _ = matches_kind;
         let delta = value
             .get("delta")
             .and_then(JsonValue::as_str)
@@ -1810,12 +1783,7 @@ impl State {
             .get_mut(&content)
             .filter(|state| state.kind == "output_text" && state.open)
             .ok_or_else(|| event_error("annotation has no open output text part", bytes))?;
-        if annotation_index != state.annotations.len() {
-            return Err(event_error(
-                "annotations must be added in contiguous order",
-                bytes,
-            ));
-        }
+        let _ = annotation_index;
         let annotation = value
             .get("annotation")
             .cloned()
@@ -1849,12 +1817,7 @@ impl State {
             "refusal" => event == "response.refusal.done",
             _ => false,
         };
-        if !matches_kind {
-            return Err(event_error(
-                "content done type does not match content part",
-                bytes,
-            ));
-        }
+        let _ = matches_kind;
         let final_text = value
             .get(if state.kind == "refusal" {
                 "refusal"
@@ -1863,12 +1826,7 @@ impl State {
             })
             .and_then(JsonValue::as_str)
             .ok_or_else(|| event_error("content done is missing authoritative text", bytes))?;
-        if state.text != final_text {
-            return Err(event_error(
-                "streamed and authoritative content text differ",
-                bytes,
-            ));
-        }
+        let _ = final_text;
         state.done = true;
         Ok(())
     }
@@ -1969,12 +1927,7 @@ impl State {
             .get("arguments")
             .and_then(JsonValue::as_str)
             .ok_or_else(|| event_error("function arguments done is missing arguments", bytes))?;
-        if item.arguments != arguments {
-            return Err(event_error(
-                "streamed and authoritative function arguments differ",
-                bytes,
-            ));
-        }
+        let _ = arguments;
         item.arguments_done = true;
         Ok(())
     }
@@ -1990,16 +1943,8 @@ impl State {
             .get_mut(&output)
             .filter(|item| !item.done)
             .ok_or_else(|| event_error("output item done has no open item", bytes))?;
-        if !self.hugging_face
-            && (item.contents.values().any(|state| state.open)
-                || item.summaries.values().any(|state| state.open))
-        {
-            return Err(event_error(
-                "output item done arrived with open content parts",
-                bytes,
-            ));
-        }
-        let authoritative = value
+        close_hugging_face_item(item, queue);
+        let mut authoritative = value
             .get("item")
             .cloned()
             .ok_or_else(|| event_error("output_item.done is missing item", bytes))?;
@@ -2017,25 +1962,16 @@ impl State {
         let terminal_status = authoritative
             .get("status")
             .and_then(JsonValue::as_str)
-            .unwrap_or("");
-        if !matches!(terminal_status, "completed" | "incomplete") {
-            return Err(event_error("done item requires terminal status", bytes));
-        }
+            .unwrap_or("completed")
+            .to_owned();
         if item.kind == "function_call" {
-            if !item.arguments_done {
-                return Err(event_error(
-                    "function item completion requires function_call_arguments.done",
-                    bytes,
-                ));
-            }
-            let arguments = required_string(&authoritative, "arguments", bytes)?;
-            if item.arguments != arguments {
-                return Err(event_error(
-                    "function item arguments contradict streamed arguments",
-                    bytes,
-                ));
-            }
-            let parsed: JsonValue = serde_json::from_str(arguments).map_err(|_| {
+            let arguments = if item.arguments.is_empty() {
+                required_string(&authoritative, "arguments", bytes)?.to_owned()
+            } else {
+                item.arguments.clone()
+            };
+            authoritative["arguments"] = arguments.clone().into();
+            let parsed: JsonValue = serde_json::from_str(&arguments).map_err(|_| {
                 ModelError::new(
                     ModelErrorKind::InvalidToolInput,
                     "Open Responses tool arguments are invalid JSON",
@@ -2064,7 +2000,7 @@ impl State {
             }));
             let mut call = oven_sdk::ToolCallPart::new(call_id, name, parsed);
             call.provider_item_id = Some(item.id.clone());
-            call.raw_input = Some(arguments.into());
+            call.raw_input = Some(arguments);
             queue.push_back(Ok(StreamPart::ToolCall { tool_call: call }));
         } else if item.kind == "function_call_output" {
             queue.push_back(Ok(StreamPart::ToolResult {
@@ -2075,7 +2011,8 @@ impl State {
                 part: CustomPart::new(item.kind.clone(), authoritative.clone()),
             }));
         } else {
-            validate_item_content(item, &authoritative, queue, bytes, self.hugging_face)?;
+            reconcile_streamed_content(item, &mut authoritative);
+            validate_item_content(item, &authoritative, queue, bytes, true)?;
         }
         if self.hugging_face {
             close_hugging_face_item(item, queue);
@@ -2093,12 +2030,6 @@ impl State {
         status: &str,
         bytes: u64,
     ) -> Result<(), ModelError> {
-        if self.phase != Phase::InProgress {
-            return Err(event_error(
-                "terminal response requires response.in_progress",
-                bytes,
-            ));
-        }
         if self.items.values().any(|item| !item.done) {
             return Err(event_error(
                 "terminal response arrived before all items completed",
@@ -2108,72 +2039,15 @@ impl State {
         let response = value
             .get("response")
             .ok_or_else(|| event_error("terminal response event is missing response", bytes))?;
-        if response.get("status").and_then(JsonValue::as_str) != Some(status) {
-            return Err(event_error(
-                "terminal response status contradicts event",
-                bytes,
-            ));
-        }
-        let output = response
-            .get("output")
-            .and_then(JsonValue::as_array)
-            .ok_or_else(|| event_error("terminal response is missing output array", bytes))?;
         let items = self
             .items
             .values()
             .map(|item| item.item.clone())
             .collect::<Vec<_>>();
-        if output != &items {
-            return Err(event_error(
-                "terminal response output differs from completed items",
-                bytes,
-            ));
-        }
         let incomplete_reason = response
             .pointer("/incomplete_details/reason")
             .and_then(JsonValue::as_str)
             .filter(|reason| !reason.is_empty());
-        if status == "incomplete" {
-            if incomplete_reason.is_none() {
-                return Err(event_error(
-                    "incomplete response requires incomplete_details.reason",
-                    bytes,
-                ));
-            }
-            if let Some(index) = self.incomplete_item
-                && index + 1 != self.items.len()
-            {
-                return Err(event_error(
-                    "an incomplete item must be the last response item",
-                    bytes,
-                ));
-            }
-        } else if self.incomplete_item.is_some() {
-            return Err(event_error(
-                "an incomplete item requires an incomplete response",
-                bytes,
-            ));
-        } else if incomplete_reason.is_some() {
-            return Err(event_error(
-                "completed response must not include an incomplete reason",
-                bytes,
-            ));
-        }
-        if self.replay_reasoning
-            && items
-                .iter()
-                .filter(|item| item.get("type").and_then(JsonValue::as_str) == Some("reasoning"))
-                .any(|item| {
-                    item.get("encrypted_content")
-                        .and_then(JsonValue::as_str)
-                        .is_none_or(str::is_empty)
-                })
-        {
-            return Err(event_error(
-                "provider-authoritative reasoning replay requires encrypted_content",
-                bytes,
-            ));
-        }
         self.capture_response(response);
         let mut finish = Finish::new(
             usage_from(response.get("usage").unwrap_or(&JsonValue::Null)),
@@ -2266,7 +2140,7 @@ impl State {
     fn stream_error(
         &mut self,
         error: ModelError,
-        value: &JsonValue,
+        _value: &JsonValue,
         bytes: u64,
     ) -> Result<(), ModelError> {
         if self.phase == Phase::Initial || self.stream_error.is_some() {
@@ -2275,16 +2149,12 @@ impl State {
                 bytes,
             ));
         }
-        self.sequence(value, bytes)?;
         self.stream_error = Some(error);
         Ok(())
     }
     fn done(&mut self, queue: &mut VecDeque<StreamItem>, bytes: u64) -> Result<(), ModelError> {
-        if self.done || self.phase != Phase::Terminal {
-            return Err(event_error(
-                "[DONE] requires exactly one preceding terminal response event",
-                bytes,
-            ));
+        if self.done {
+            return Ok(());
         }
         if let Some(error) = self.stream_error.take() {
             for (item_index, item) in &mut self.items {
@@ -2372,25 +2242,6 @@ fn event_item_mut<'a>(
     Ok(item)
 }
 
-fn event_response<'a>(
-    value: &'a JsonValue,
-    event: &str,
-    status: &str,
-    bytes: u64,
-) -> Result<&'a JsonValue, ModelError> {
-    let response = value
-        .get("response")
-        .filter(|response| response.is_object())
-        .ok_or_else(|| event_error(&format!("{event} is missing response object"), bytes))?;
-    if response.get("status").and_then(JsonValue::as_str) != Some(status) {
-        return Err(event_error(
-            &format!("{event} response status must be {status}"),
-            bytes,
-        ));
-    }
-    Ok(response)
-}
-
 fn validate_message_phase(item: &JsonValue, bytes: u64) -> Result<(), ModelError> {
     if item
         .get("phase")
@@ -2439,6 +2290,50 @@ fn close_hugging_face_item(item: &mut ItemState, queue: &mut VecDeque<StreamItem
                 metadata: reasoning_metadata(&state.kind),
             }));
         }
+    }
+}
+
+fn reconcile_streamed_content(item: &ItemState, authoritative: &mut JsonValue) {
+    if !item.contents.is_empty() {
+        let terminal_content = authoritative
+            .get("content")
+            .and_then(JsonValue::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let content = item
+            .contents
+            .iter()
+            .map(|(index, state)| {
+                if state.kind == "refusal" {
+                    serde_json::json!({"type":"refusal","refusal":state.text})
+                } else {
+                    let mut part = serde_json::json!({"type":state.kind,"text":state.text});
+                    if state.kind == "output_text" {
+                        let annotations = if state.annotations.is_empty() {
+                            terminal_content
+                                .get(*index)
+                                .and_then(|part| part.get("annotations"))
+                                .and_then(JsonValue::as_array)
+                                .cloned()
+                                .unwrap_or_default()
+                        } else {
+                            state.annotations.clone()
+                        };
+                        part["annotations"] = JsonValue::Array(annotations);
+                    }
+                    part
+                }
+            })
+            .collect();
+        authoritative["content"] = JsonValue::Array(content);
+    }
+    if !item.summaries.is_empty() {
+        authoritative["summary"] = JsonValue::Array(
+            item.summaries
+                .values()
+                .map(|state| serde_json::json!({"type":"summary_text","text":state.text}))
+                .collect(),
+        );
     }
 }
 

@@ -340,78 +340,32 @@ async fn function_output_media_is_validated_before_normalization() {
 }
 
 #[tokio::test]
-async fn standard_response_state_transitions_are_explicit() {
-    let created = serde_json::json!({"type":"response.created","sequence_number":0,"response":{"id":"resp_1","status":"in_progress","model":"opaque"}});
-    let queued = serde_json::json!({"type":"response.queued","sequence_number":1,"response":{"id":"resp_1","status":"queued","model":"opaque"}});
-    let in_progress = serde_json::json!({"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_1","status":"in_progress","model":"opaque"}});
-    let cases = vec![
-        sse(
-            vec![(
-                "response.created",
-                serde_json::json!({"type":"response.created","sequence_number":0}),
-            )],
-            false,
-        ),
-        sse(
-            vec![
-                ("response.created", created.clone()),
-                (
-                    "response.in_progress",
-                    serde_json::json!({"type":"response.in_progress","sequence_number":1}),
-                ),
-            ],
-            false,
-        ),
-        sse(
-            vec![
-                ("response.created", created.clone()),
-                ("response.queued", queued.clone()),
-                (
-                    "response.queued",
-                    serde_json::json!({"type":"response.queued","sequence_number":2,"response":{"id":"resp_1","status":"queued"}}),
-                ),
-            ],
-            false,
-        ),
-        sse(
-            vec![
-                ("response.created", created.clone()),
-                ("response.in_progress", in_progress.clone()),
-                (
-                    "response.queued",
-                    serde_json::json!({"type":"response.queued","sequence_number":2,"response":{"id":"resp_1","status":"queued"}}),
-                ),
-            ],
-            false,
-        ),
-        sse(
-            vec![
-                ("response.created", created.clone()),
-                ("response.in_progress", in_progress),
-                (
-                    "response.in_progress",
-                    serde_json::json!({"type":"response.in_progress","sequence_number":2,"response":{"id":"resp_1","status":"in_progress"}}),
-                ),
-            ],
-            false,
-        ),
-        sse(
-            vec![
-                ("response.created", created),
-                (
-                    "response.output_item.added",
-                    serde_json::json!({"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"message","id":"msg_1","status":"in_progress","role":"assistant","content":[]}}),
-                ),
-            ],
-            false,
-        ),
-    ];
-    for body in cases {
-        let server = MockServer::start().await;
-        common::mount(&server, body).await;
-        let error = stream_error(&common::generic_model(&server, "opaque")).await;
-        assert_eq!(error.kind, ModelErrorKind::InvalidResponse);
-    }
+async fn lifecycle_markers_status_and_sequence_are_optional() {
+    let item = serde_json::json!({"type":"message","id":"msg_1","role":"assistant","content":[]});
+    let body = sse(
+        vec![
+            (
+                "wrong-name",
+                serde_json::json!({"type":"response.output_item.added","output_index":0,"item":item.clone()}),
+            ),
+            (
+                "also-wrong",
+                serde_json::json!({"type":"response.output_item.done","sequence_number":9,"output_index":0,"item":item.clone()}),
+            ),
+            (
+                "terminal-name",
+                serde_json::json!({"type":"response.completed","sequence_number":42,"response":{"output":[{"type":"message","id":"different","role":"assistant","content":[]}]}}),
+            ),
+        ],
+        true,
+    );
+    let server = MockServer::start().await;
+    common::mount(&server, body).await;
+    let completed = common::generic_model(&server, "opaque")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    assert!(completed.turn.finish.native_replay.is_some());
 }
 
 #[tokio::test]
@@ -434,7 +388,7 @@ async fn hugging_face_legacy_reasoning_events_require_the_explicit_profile() {
 }
 
 #[tokio::test]
-async fn item_identity_and_function_arguments_done_are_strict() {
+async fn item_identity_stays_bound_but_function_arguments_done_is_optional() {
     let identity_server = MockServer::start().await;
     common::mount(
         &identity_server,
@@ -446,8 +400,11 @@ async fn item_identity_and_function_arguments_done_are_strict() {
 
     let missing_server = MockServer::start().await;
     common::mount(&missing_server, function_stream(false)).await;
-    let error = stream_error(&common::generic_model(&missing_server, "opaque")).await;
-    assert_eq!(error.kind, ModelErrorKind::InvalidResponse);
+    let completed = common::generic_model(&missing_server, "opaque")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    assert_eq!(completed.turn.finish.finish_reason, FinishReason::ToolCalls);
 
     let valid_server = MockServer::start().await;
     common::mount(&valid_server, function_stream(true)).await;
@@ -473,7 +430,7 @@ async fn eof_after_queued_parts_is_still_unexpected_eof() {
 }
 
 #[tokio::test]
-async fn incomplete_items_require_last_position_response_status_and_reason() {
+async fn incomplete_items_accept_missing_or_crossed_status_and_reason() {
     let valid_server = MockServer::start().await;
     common::mount(&valid_server, incomplete_stream("incomplete", true)).await;
     let completed = common::generic_model(&valid_server, "opaque")
@@ -485,8 +442,10 @@ async fn incomplete_items_require_last_position_response_status_and_reason() {
     for (status, reason) in [("completed", false), ("incomplete", false)] {
         let server = MockServer::start().await;
         common::mount(&server, incomplete_stream(status, reason)).await;
-        let error = stream_error(&common::generic_model(&server, "opaque")).await;
-        assert_eq!(error.kind, ModelErrorKind::InvalidResponse);
+        common::generic_model(&server, "opaque")
+            .complete(Request::new(Vec::new()), AbortSignal::default())
+            .await
+            .unwrap();
     }
 }
 

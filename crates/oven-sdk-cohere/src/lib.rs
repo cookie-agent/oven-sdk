@@ -878,17 +878,36 @@ fn normalized_assistant(
     let mut inline_results = Vec::new();
     for part in parts {
         match part {
-            AssistantPart::Text(text) => content.push(serde_json::json!({"type":"text","text":text.text})),
+            AssistantPart::Text(text) => {
+                content.push(serde_json::json!({"type":"text","text":text.text}))
+            }
             AssistantPart::Reasoning(reasoning) => {
-                if reasoning.metadata.as_ref().and_then(|value| value.get("cohere.kind")).and_then(JsonValue::as_str) == Some("tool_plan") {
+                if reasoning
+                    .metadata
+                    .as_ref()
+                    .and_then(|value| value.get("cohere.kind"))
+                    .and_then(JsonValue::as_str)
+                    == Some("tool_plan")
+                {
                     tool_plan.push_str(&reasoning.text);
                 } else if include_thinking {
                     content.push(serde_json::json!({"type":"thinking","thinking":reasoning.text}));
                 }
             }
-            AssistantPart::ToolCall(call) => tool_calls.push(serde_json::json!({
-                "id":call.id,"type":"function","function":{"name":call.name,"arguments":call.raw_input.clone().unwrap_or_else(|| call.input.to_string())}
-            })),
+            AssistantPart::ToolCall(call) => {
+                let mut value = serde_json::json!({
+                    "id":call.id,"type":"function","function":{"arguments":call.raw_input.clone().unwrap_or_else(|| call.input.to_string())}
+                });
+                if call
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("cohere.name_missing"))
+                    != Some(&JsonValue::Bool(true))
+                {
+                    value["function"]["name"] = call.name.clone().into();
+                }
+                tool_calls.push(value);
+            }
             AssistantPart::Source(source) => {
                 let metadata = source.metadata.as_ref().ok_or_else(|| {
                     ModelError::invalid_request(
@@ -899,15 +918,21 @@ fn normalized_assistant(
             }
             AssistantPart::ToolResult(result) => inline_results.push(tool_result(result)?),
             AssistantPart::Custom(part) if part.kind == REPLAY_FINGERPRINT_KIND => {}
-            AssistantPart::File(_) => return Err(ModelError::unsupported(
-                "Cohere cannot encode assistant file parts",
-            )),
-            AssistantPart::ToolApproval(_) => return Err(ModelError::unsupported(
-                "Cohere cannot encode tool-approval parts in assistant history",
-            )),
-            AssistantPart::Custom(_) => return Err(ModelError::unsupported(
-                "Cohere cannot encode custom assistant parts",
-            )),
+            AssistantPart::File(_) => {
+                return Err(ModelError::unsupported(
+                    "Cohere cannot encode assistant file parts",
+                ));
+            }
+            AssistantPart::ToolApproval(_) => {
+                return Err(ModelError::unsupported(
+                    "Cohere cannot encode tool-approval parts in assistant history",
+                ));
+            }
+            AssistantPart::Custom(_) => {
+                return Err(ModelError::unsupported(
+                    "Cohere cannot encode custom assistant parts",
+                ));
+            }
         }
     }
     let mut message = serde_json::json!({"role":"assistant"});
@@ -996,13 +1021,6 @@ async fn read_live(live: &mut Live) -> Result<(), ModelError> {
                 .with_bytes_received(live.count)
         })?;
         let kind = value.get("type").and_then(JsonValue::as_str).unwrap_or("");
-        if !event.name.is_empty() && event.name != kind {
-            return Err(ModelError::invalid_response(
-                "Cohere SSE event field does not match payload type",
-            )
-            .with_stage(ErrorStage::StreamEvent)
-            .with_bytes_received(live.count));
-        }
         if live.include_raw {
             live.queue.push_back(Ok(StreamPart::Raw {
                 value: value.clone(),
@@ -1058,7 +1076,7 @@ struct ContentState {
 #[derive(Default)]
 struct ToolState {
     id: String,
-    name: String,
+    name: Option<String>,
     arguments: String,
     open: bool,
 }
@@ -1241,14 +1259,12 @@ impl CohereState {
                     .pointer("/delta/message/tool_calls/id")
                     .and_then(JsonValue::as_str)
                     .filter(|value| !value.is_empty())
-                    .ok_or_else(|| event_error("Cohere tool call is missing ID", bytes))?
-                    .to_owned();
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("google-call-{index}"));
                 let name = value
                     .pointer("/delta/message/tool_calls/function/name")
                     .and_then(JsonValue::as_str)
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| event_error("Cohere tool call is missing name", bytes))?
-                    .to_owned();
+                    .map(str::to_owned);
                 let arguments = value
                     .pointer("/delta/message/tool_calls/function/arguments")
                     .and_then(JsonValue::as_str)
@@ -1256,7 +1272,7 @@ impl CohereState {
                     .to_owned();
                 queue.push_back(Ok(StreamPart::ToolCallStart {
                     id: id.clone(),
-                    name: name.clone(),
+                    name: name.clone().unwrap_or_default(),
                     metadata: None,
                 }));
                 if !arguments.is_empty() {
@@ -1329,8 +1345,18 @@ impl CohereState {
                     id: state.id.clone(),
                     metadata: None,
                 }));
-                let mut call = oven_sdk::ToolCallPart::new(&state.id, &state.name, parsed);
+                let mut call = oven_sdk::ToolCallPart::new(
+                    &state.id,
+                    state.name.clone().unwrap_or_default(),
+                    parsed,
+                );
                 call.raw_input = Some(state.arguments.clone());
+                if state.name.is_none() {
+                    call.metadata = Some(BTreeMap::from([(
+                        "cohere.name_missing".into(),
+                        JsonValue::Bool(true),
+                    )]));
+                }
                 queue.push_back(Ok(StreamPart::ToolCall { tool_call: call }));
             }
             "citation-start" => {
@@ -1479,7 +1505,17 @@ impl CohereState {
                 }
             })
             .collect::<Vec<_>>();
-        let tools = self.tools.values().map(|state| serde_json::json!({"id":state.id,"type":"function","function":{"name":state.name,"arguments":state.arguments}})).collect::<Vec<_>>();
+        let tools = self
+            .tools
+            .values()
+            .map(|state| {
+                let mut call = serde_json::json!({"id":state.id,"type":"function","function":{"arguments":state.arguments}});
+                if let Some(name) = &state.name {
+                    call["function"]["name"] = name.clone().into();
+                }
+                call
+            })
+            .collect::<Vec<_>>();
         let mut message = serde_json::json!({"role":"assistant"});
         if !content.is_empty() {
             message["content"] = JsonValue::Array(content);

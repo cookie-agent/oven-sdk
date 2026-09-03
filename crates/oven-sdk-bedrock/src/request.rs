@@ -1407,21 +1407,17 @@ fn validate_native_content(
                 let text = value
                     .as_object()
                     .ok_or("Bedrock replay reasoningText block is invalid")?;
-                let expected = if signed_reasoning {
-                    &["signature", "text"][..]
-                } else {
-                    &["text"][..]
-                };
-                if !exact_keys(text, expected) {
+                if !text
+                    .keys()
+                    .all(|key| matches!(key.as_str(), "signature" | "text"))
+                    || !text.contains_key("text")
+                {
                     return Err("Bedrock replay reasoningText shape is invalid");
                 }
                 let visible = text
                     .get("text")
                     .and_then(JsonValue::as_str)
                     .ok_or("Bedrock replay reasoning text is invalid")?;
-                if signed_reasoning && nonempty_string(text.get("signature")).is_none() {
-                    return Err("Bedrock replay signed reasoning signature is invalid");
-                }
                 semantics.push(serde_json::json!({"type":"reasoning","text":visible}));
                 continue;
             }
@@ -1508,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn adversarial_replay_blocks_fail_closed() {
+    fn replay_rejects_integrity_violations_but_accepts_unsigned_reasoning() {
         let capabilities = replay_capabilities();
         let tool = vec![AssistantPart::ToolCall(oven_sdk::ToolCallPart::new(
             "call",
@@ -1524,9 +1520,6 @@ mod tests {
             serde_json::json!([{"toolUse":{"toolUseId":"call","name":"","input":{}}}]),
             serde_json::json!([{"toolUse":{"toolUseId":"call","name":"lookup","input":[]}}]),
             serde_json::json!([{"toolUse":{"toolUseId":"call","name":"lookup","input":{},"extra":true}}]),
-            serde_json::json!([{"reasoningContent":{"reasoningText":{"text":"think"}}}]),
-            serde_json::json!([{"reasoningContent":{"reasoningText":{"text":"think","signature":""}}}]),
-            serde_json::json!([{"reasoningContent":{"reasoningText":{"text":"think","signature":"sig","extra":true}}}]),
             serde_json::json!([{"reasoningContent":{"reasoningText":{"text":"think","signature":"sig"},"redactedContent":"opaque"}}]),
             serde_json::json!([{"reasoningContent":{"redactedContent":""}}]),
             serde_json::json!([{"reasoningContent":{"unknown":"value"}}]),
@@ -1547,6 +1540,17 @@ mod tests {
             assert!(decode_replay(&payload, normalized, &capabilities, true).is_err());
         }
 
+        for content in [
+            serde_json::json!([{"reasoningContent":{"reasoningText":{"text":"think"}}}]),
+            serde_json::json!([{"reasoningContent":{"reasoningText":{"text":"think","signature":""}}}]),
+        ] {
+            let payload = serde_json::json!({
+                "format":REPLAY_FORMAT,
+                "assistant_content":content,
+            });
+            assert!(decode_replay(&payload, &reasoning, &capabilities, true).is_ok());
+        }
+
         let valid_redacted = serde_json::json!({
             "format":REPLAY_FORMAT,
             "assistant_content":[{"reasoningContent":{"redactedContent":"opaque"}}],
@@ -1556,16 +1560,24 @@ mod tests {
         let unsigned_reasoning = vec![AssistantPart::Reasoning(oven_sdk::ReasoningPart::new(
             "think",
         ))];
-        for content in [
-            serde_json::json!([{"reasoningContent":{"reasoningText":{"text":"think","signature":"unexpected"}}}]),
-            serde_json::json!([{"reasoningContent":{"redactedContent":"opaque"}}]),
-        ] {
-            let payload = serde_json::json!({
-                "format":REPLAY_FORMAT,
-                "assistant_content":content,
-            });
-            assert!(decode_replay(&payload, &unsigned_reasoning, &capabilities, false).is_err());
-        }
+        let signed_payload = serde_json::json!({
+            "format":REPLAY_FORMAT,
+            "assistant_content":[{"reasoningContent":{"reasoningText":{"text":"think","signature":"unexpected"}}}],
+        });
+        assert!(decode_replay(&signed_payload, &unsigned_reasoning, &capabilities, false).is_ok());
+        let unsupported_redacted = serde_json::json!({
+            "format":REPLAY_FORMAT,
+            "assistant_content":[{"reasoningContent":{"redactedContent":"opaque"}}],
+        });
+        assert!(
+            decode_replay(
+                &unsupported_redacted,
+                &unsigned_reasoning,
+                &capabilities,
+                false
+            )
+            .is_err()
+        );
         let valid_unsigned = serde_json::json!({
             "format":REPLAY_FORMAT,
             "assistant_content":[{"reasoningContent":{"reasoningText":{"text":"think"}}}],

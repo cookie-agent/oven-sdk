@@ -47,6 +47,46 @@ async fn fragmented_parallel_tools_finalize_only_at_done() {
 }
 
 #[tokio::test]
+async fn repeated_tool_index_and_missing_identity_finalize_with_stable_ids() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"a\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_b\",\"function\":{\"name\":\"b\",\"arguments\":\"{}\"}},{\"index\":2,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    common::mount(&server, "/chat/completions", body.into()).await;
+    let completed = common::official_chat(&server, "gpt-4o-mini")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let calls = completed
+        .turn
+        .message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            oven_sdk::AssistantPart::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.id.as_str())
+            .collect::<Vec<_>>(),
+        ["call_a", "call_b", "google-call-2"]
+    );
+    assert_eq!(calls[2].name, "");
+    let replay = completed.turn.finish.native_replay.unwrap();
+    assert!(
+        replay
+            .payload()
+            .pointer("/message/tool_calls/2/function/name")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn malformed_and_empty_final_arguments_are_invalid_response() {
     for arguments in ["", "["] {
         let server = MockServer::start().await;
@@ -62,7 +102,7 @@ async fn malformed_and_empty_final_arguments_are_invalid_response() {
 }
 
 #[tokio::test]
-async fn clean_eof_requires_finish_reason() {
+async fn clean_eof_without_finish_reason_is_unknown() {
     let server = MockServer::start().await;
     common::mount(
         &server,
@@ -70,11 +110,11 @@ async fn clean_eof_requires_finish_reason() {
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n".into(),
     )
     .await;
-    let error = common::official_chat(&server, "gpt-4o-mini")
+    let completed = common::official_chat(&server, "gpt-4o-mini")
         .complete(Request::new(Vec::new()), AbortSignal::default())
         .await
-        .unwrap_err();
-    assert_eq!(error.kind, ModelErrorKind::UnexpectedEof);
+        .unwrap();
+    assert_eq!(completed.turn.finish.finish_reason, FinishReason::Unknown);
 }
 
 #[tokio::test]
