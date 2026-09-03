@@ -3742,7 +3742,6 @@ pub trait LanguageModel: Send + Sync {
                             || reasoning.contains_key(&id)
                             || tool.contains_key(&id)
                             || ended_tool.contains_key(&id)
-                            || finalized_tool_ids.contains(&id)
                         {
                             return Err(ModelError::invalid_response(
                                 "duplicate or mismatched block start",
@@ -3827,6 +3826,7 @@ pub trait LanguageModel: Send + Sync {
                             || reasoning.contains_key(&id)
                             || tool.contains_key(&id)
                             || ended_tool.contains_key(&id)
+                            || finalized_tool_ids.contains(&id)
                         {
                             return Err(ModelError::invalid_response(
                                 "duplicate or mismatched block start",
@@ -4431,6 +4431,31 @@ mod tests {
             },
             finish(FinishReason::ToolCalls),
         ]);
+    }
+
+    #[test]
+    fn collector_allows_text_to_share_a_completed_tool_id() {
+        let turn = collect(vec![
+            StreamPart::ToolCall {
+                tool_call: ToolCallPart::new("shared", "tool", serde_json::json!({})),
+            },
+            StreamPart::TextStart {
+                id: "shared".into(),
+                metadata: None,
+            },
+            StreamPart::TextDelta {
+                id: "shared".into(),
+                delta: "text".into(),
+                metadata: None,
+            },
+            StreamPart::TextEnd {
+                id: "shared".into(),
+                metadata: None,
+            },
+            finish(FinishReason::ToolCalls),
+        ])
+        .expect("cross-kind ID reuse is representable");
+        assert_eq!(turn.message.content.len(), 2);
     }
 
     #[test]
