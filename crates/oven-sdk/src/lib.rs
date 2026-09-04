@@ -378,6 +378,12 @@ impl HeaderOverrides {
     pub fn as_map(&self) -> &HeaderMap {
         &self.headers
     }
+
+    /// Consumes the overrides and returns the configured header map.
+    #[must_use]
+    pub fn into_map(self) -> HeaderMap {
+        self.headers
+    }
 }
 
 impl fmt::Debug for HeaderOverrides {
@@ -4082,6 +4088,16 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn header_overrides_can_return_the_owned_map() {
+        let headers = HeaderMap::from_iter([(
+            http::header::HeaderName::from_static("x-test"),
+            http::header::HeaderValue::from_static("value"),
+        )]);
+
+        assert_eq!(HeaderOverrides::new(headers.clone()).into_map(), headers);
+    }
 
     struct TestStream(VecDeque<StreamItem>);
 
