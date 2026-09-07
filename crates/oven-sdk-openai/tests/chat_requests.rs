@@ -228,6 +228,49 @@ async fn explicit_settings_use_developer_and_max_completion_tokens() {
 }
 
 #[tokio::test]
+async fn chat_tool_choice_requires_advertised_tools() {
+    for (has_tools, choice, expected_choice) in [
+        (false, ToolChoice::Auto, None),
+        (false, ToolChoice::None, None),
+        (true, ToolChoice::None, None),
+        (true, ToolChoice::Auto, Some(serde_json::json!("auto"))),
+        (
+            true,
+            ToolChoice::Required,
+            Some(serde_json::json!("required")),
+        ),
+        (
+            true,
+            ToolChoice::Tool("lookup".into()),
+            Some(serde_json::json!({"type":"function","function":{"name":"lookup"}})),
+        ),
+    ] {
+        let server = MockServer::start().await;
+        common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+        let mut request = Request::new(Vec::new()).with_tool_choice(choice);
+        if has_tools {
+            request.tools.push(ToolDefinition::new(
+                "lookup",
+                "find",
+                JsonSchema::new(serde_json::json!({"type":"object"})).unwrap(),
+            ));
+        }
+        common::official_chat(&server, "gpt-4o-mini")
+            .complete(request, AbortSignal::default())
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+        assert_eq!(body.get("tool_choice"), expected_choice.as_ref());
+        assert_eq!(body.get("tools").is_some(), expected_choice.is_some());
+        if expected_choice.is_some() {
+            assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+            assert_eq!(body["tools"][0]["function"]["name"], "lookup");
+        }
+    }
+}
+
+#[tokio::test]
 async fn chat_encodes_tools_choice_strict_and_json_schema() {
     let server = MockServer::start().await;
     common::mount(&server, "/chat/completions", common::chat_document("{}")).await;

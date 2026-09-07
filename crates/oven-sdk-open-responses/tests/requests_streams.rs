@@ -2,7 +2,8 @@ mod common;
 
 use oven_sdk::{
     AbortSignal, FilePart, FileSource, HeaderOverrides, HistoryTurn, InferenceOptions, InputPart,
-    JsonSchema, LanguageModel, Request, ResponseFormat, TextPart, ToolDefinition, UserMessage,
+    JsonSchema, LanguageModel, Request, ResponseFormat, TextPart, ToolChoice, ToolDefinition,
+    UserMessage,
 };
 use oven_sdk_open_responses::{
     OpenResponsesModel, OpenResponsesRequestExt, OpenResponsesRequestOptions,
@@ -28,6 +29,52 @@ async fn caller_cookie_suppresses_open_responses_bearer_injection() {
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests[0].headers["cookie"], "caller-session=value");
     assert!(requests[0].headers.get("authorization").is_none());
+}
+
+#[tokio::test]
+async fn tool_choice_requires_advertised_tools() {
+    for (has_tools, choice, expected_choice) in [
+        (false, ToolChoice::Auto, None),
+        (false, ToolChoice::None, None),
+        (true, ToolChoice::None, None),
+        (true, ToolChoice::Auto, Some(serde_json::json!("auto"))),
+        (
+            true,
+            ToolChoice::Required,
+            Some(serde_json::json!("required")),
+        ),
+        (
+            true,
+            ToolChoice::Tool("lookup".into()),
+            Some(serde_json::json!({"type":"function","name":"lookup"})),
+        ),
+    ] {
+        let server = MockServer::start().await;
+        common::mount(&server, common::text_stream("ok")).await;
+        let mut request = Request::new(Vec::new()).with_tool_choice(choice);
+        if has_tools {
+            request.tools.push(ToolDefinition::new(
+                "lookup",
+                "find",
+                JsonSchema::new(serde_json::json!({
+                    "type":"object","properties":{},"additionalProperties":false
+                }))
+                .unwrap(),
+            ));
+        }
+        common::generic_model(&server, "opaque")
+            .complete(request, AbortSignal::default())
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+        assert_eq!(body.get("tool_choice"), expected_choice.as_ref());
+        assert_eq!(body.get("tools").is_some(), expected_choice.is_some());
+        assert_eq!(
+            body.get("parallel_tool_calls").is_some(),
+            expected_choice.is_some()
+        );
+    }
 }
 
 #[tokio::test]

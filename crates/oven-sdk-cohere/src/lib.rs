@@ -762,11 +762,10 @@ fn encode_request(
         if settings.strict_tools {
             body["strict_tools"] = true.into();
         }
-    }
-    match &request.tool_choice {
-        ToolChoice::Required | ToolChoice::Tool(_) => body["tool_choice"] = "REQUIRED".into(),
-        ToolChoice::None if !request.tools.is_empty() => body["tool_choice"] = "NONE".into(),
-        _ => {}
+        match &request.tool_choice {
+            ToolChoice::Required | ToolChoice::Tool(_) => body["tool_choice"] = "REQUIRED".into(),
+            _ => {}
+        }
     }
     match &request.response_format {
         ResponseFormat::Text => {}

@@ -165,6 +165,49 @@ async fn responses_rejects_oversized_prompt_cache_keys() {
 }
 
 #[tokio::test]
+async fn responses_tool_choice_requires_advertised_tools() {
+    for (has_tools, choice, expected_choice) in [
+        (false, ToolChoice::Auto, None),
+        (false, ToolChoice::None, None),
+        (true, ToolChoice::None, None),
+        (true, ToolChoice::Auto, Some(serde_json::json!("auto"))),
+        (
+            true,
+            ToolChoice::Required,
+            Some(serde_json::json!("required")),
+        ),
+        (
+            true,
+            ToolChoice::Tool("lookup".into()),
+            Some(serde_json::json!({"type":"function","name":"lookup"})),
+        ),
+    ] {
+        let server = MockServer::start().await;
+        common::mount(&server, "/responses", common::responses_document("ok")).await;
+        let mut request = Request::new(Vec::new()).with_tool_choice(choice);
+        if has_tools {
+            request.tools.push(ToolDefinition::new(
+                "lookup",
+                "find",
+                JsonSchema::new(serde_json::json!({"type":"object"})).unwrap(),
+            ));
+        }
+        common::official_responses(&server, "gpt-5-mini")
+            .complete(request, AbortSignal::default())
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+        assert_eq!(body.get("tool_choice"), expected_choice.as_ref());
+        assert_eq!(body.get("tools").is_some(), expected_choice.is_some());
+        if expected_choice.is_some() {
+            assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+            assert_eq!(body["tools"][0]["name"], "lookup");
+        }
+    }
+}
+
+#[tokio::test]
 async fn responses_maps_system_media_tools_and_structured_output() {
     let server = MockServer::start().await;
     common::mount(&server, "/responses", common::responses_document("{}")).await;

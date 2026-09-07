@@ -783,16 +783,16 @@ fn encode_request(
     if let Some(value) = &options.prompt_cache_key {
         body["prompt_cache_key"] = value.clone().into();
     }
-    if !request.tools.is_empty() {
+    if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {
         body["tools"]=JsonValue::Array(request.tools.iter().map(|tool|serde_json::json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.input_schema.as_value(),"strict":settings.strict_tools})).collect());
         body["parallel_tool_calls"] = settings.parallel_tool_calls.into();
+        body["tool_choice"] = match &request.tool_choice {
+            ToolChoice::Auto => "auto".into(),
+            ToolChoice::Required => "required".into(),
+            ToolChoice::None => "none".into(),
+            ToolChoice::Tool(name) => serde_json::json!({"type":"function","name":name}),
+        };
     }
-    body["tool_choice"] = match &request.tool_choice {
-        ToolChoice::Auto => "auto".into(),
-        ToolChoice::Required => "required".into(),
-        ToolChoice::None => "none".into(),
-        ToolChoice::Tool(name) => serde_json::json!({"type":"function","name":name}),
-    };
     match &request.response_format {
         ResponseFormat::Text => {
             if let Some(verbosity) = &options.text_verbosity {

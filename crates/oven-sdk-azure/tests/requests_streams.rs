@@ -201,6 +201,68 @@ async fn azure_chat_rejects_video_before_dispatch() {
 }
 
 #[tokio::test]
+async fn tool_choice_requires_advertised_tools() {
+    for chat in [true, false] {
+        for (has_tools, choice, expected_choice) in [
+            (false, ToolChoice::Auto, None),
+            (false, ToolChoice::None, None),
+            (true, ToolChoice::None, None),
+            (true, ToolChoice::Auto, Some(serde_json::json!("auto"))),
+            (
+                true,
+                ToolChoice::Required,
+                Some(serde_json::json!("required")),
+            ),
+            (
+                true,
+                ToolChoice::Tool("lookup".into()),
+                Some(if chat {
+                    serde_json::json!({"type":"function","function":{"name":"lookup"}})
+                } else {
+                    serde_json::json!({"type":"function","name":"lookup"})
+                }),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let (path, document) = if chat {
+                ("/openai/v1/chat/completions", common::chat_document("ok"))
+            } else {
+                ("/openai/v1/responses", common::responses_document("ok"))
+            };
+            common::mount(&server, path, document).await;
+            let mut request = Request::new(Vec::new()).with_tool_choice(choice);
+            if has_tools {
+                request.tools.push(ToolDefinition::new(
+                    "lookup",
+                    "find",
+                    JsonSchema::new(serde_json::json!({"type":"object"})).unwrap(),
+                ));
+            }
+            let provider = common::provider(&server, AzureApiRoute::V1);
+            if chat {
+                provider
+                    .chat("deployment", common::gpt4o())
+                    .unwrap()
+                    .complete(request, AbortSignal::default())
+                    .await
+                    .unwrap();
+            } else {
+                provider
+                    .responses("deployment", common::gpt5())
+                    .unwrap()
+                    .complete(request, AbortSignal::default())
+                    .await
+                    .unwrap();
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+            assert_eq!(body.get("tool_choice"), expected_choice.as_ref());
+            assert_eq!(body.get("tools").is_some(), expected_choice.is_some());
+        }
+    }
+}
+
+#[tokio::test]
 async fn chat_encodes_tools_structured_output_media_usage_and_open_labels() {
     let server = MockServer::start().await;
     common::mount(

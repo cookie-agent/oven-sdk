@@ -2,7 +2,7 @@ mod common;
 
 use oven_sdk::{
     AbortSignal, FilePart, FileSource, HeaderOverrides, HistoryTurn, InputPart, JsonSchema,
-    LanguageModel, Request, StreamPart, TextPart, ToolDefinition, UserMessage,
+    LanguageModel, Request, StreamPart, TextPart, ToolChoice, ToolDefinition, UserMessage,
 };
 use oven_sdk_cohere::{CohereModel, CohereSettings};
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -67,6 +67,47 @@ async fn encodes_exact_images_and_collects_citations_usage() {
             .unwrap()
             .starts_with("data:image/png;base64,")
     );
+}
+
+#[tokio::test]
+async fn tool_choice_requires_advertised_tools() {
+    for (has_tools, choice, advertised, expected_choice) in [
+        (false, ToolChoice::Auto, false, None),
+        (false, ToolChoice::None, false, None),
+        (true, ToolChoice::None, false, None),
+        (true, ToolChoice::Auto, true, None),
+        (
+            true,
+            ToolChoice::Required,
+            true,
+            Some(serde_json::json!("REQUIRED")),
+        ),
+        (
+            true,
+            ToolChoice::Tool("lookup".into()),
+            true,
+            Some(serde_json::json!("REQUIRED")),
+        ),
+    ] {
+        let server = MockServer::start().await;
+        common::mount(&server, common::text_stream("ok")).await;
+        let mut request = Request::new(Vec::new()).with_tool_choice(choice);
+        if has_tools {
+            request.tools.push(ToolDefinition::new(
+                "lookup",
+                "find",
+                JsonSchema::new(serde_json::json!({"type":"object"})).unwrap(),
+            ));
+        }
+        common::model(&server, "opaque")
+            .complete(request, AbortSignal::default())
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+        assert_eq!(body.get("tool_choice"), expected_choice.as_ref());
+        assert_eq!(body.get("tools").is_some(), advertised);
+    }
 }
 
 #[tokio::test]

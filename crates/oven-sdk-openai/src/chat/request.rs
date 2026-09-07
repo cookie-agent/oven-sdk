@@ -323,15 +323,15 @@ pub(crate) fn encode_request(
                 })
                 .collect(),
         );
+        body["tool_choice"] = match &request.tool_choice {
+            ToolChoice::Auto => JsonValue::String("auto".into()),
+            ToolChoice::Required => JsonValue::String("required".into()),
+            ToolChoice::None => JsonValue::String("none".into()),
+            ToolChoice::Tool(name) => {
+                serde_json::json!({"type":"function","function":{"name":name}})
+            }
+        };
     }
-    body["tool_choice"] = match &request.tool_choice {
-        ToolChoice::Auto => JsonValue::String("auto".into()),
-        ToolChoice::Required => JsonValue::String("required".into()),
-        ToolChoice::None => JsonValue::String("none".into()),
-        ToolChoice::Tool(name) => {
-            serde_json::json!({"type":"function","function":{"name":name}})
-        }
-    };
     match &request.response_format {
         ResponseFormat::Text => {}
         ResponseFormat::Json { schema: None } => {

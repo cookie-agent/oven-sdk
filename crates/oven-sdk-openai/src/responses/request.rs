@@ -369,13 +369,13 @@ fn add_tools_and_output(request: &Request, verbosity: Option<&str>, body: &mut J
             let strict = tool.provider_options.get("openai").and_then(|value| value.get("strict")).and_then(JsonValue::as_bool).unwrap_or(false);
             serde_json::json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.input_schema.as_value(),"strict":strict})
         }).collect());
+        body["tool_choice"] = match &request.tool_choice {
+            ToolChoice::Auto => JsonValue::String("auto".into()),
+            ToolChoice::Required => JsonValue::String("required".into()),
+            ToolChoice::None => JsonValue::String("none".into()),
+            ToolChoice::Tool(name) => serde_json::json!({"type":"function","name":name}),
+        };
     }
-    body["tool_choice"] = match &request.tool_choice {
-        ToolChoice::Auto => JsonValue::String("auto".into()),
-        ToolChoice::Required => JsonValue::String("required".into()),
-        ToolChoice::None => JsonValue::String("none".into()),
-        ToolChoice::Tool(name) => serde_json::json!({"type":"function","name":name}),
-    };
     match &request.response_format {
         ResponseFormat::Text => {}
         ResponseFormat::Json { schema: None } => {
