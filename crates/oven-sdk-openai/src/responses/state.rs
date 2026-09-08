@@ -387,7 +387,7 @@ impl State {
                 "incomplete_details":std::mem::take(&mut self.incomplete_details)
             });
             finish.native_replay = Some(
-                NativeReplayArtifact::new(self.adapter_id.clone(), self.scope.clone(), payload)
+                NativeReplayArtifact::capture(self.adapter_id.clone(), self.scope.clone(), payload)
                     .map_err(|_| {
                         ModelError::replay(
                             "OpenAI Responses replay artifact exceeds its size limit",

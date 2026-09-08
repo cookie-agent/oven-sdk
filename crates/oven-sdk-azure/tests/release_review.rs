@@ -32,24 +32,18 @@ fn strict_schema() -> JsonSchema {
     .unwrap()
 }
 
-fn discarded_and_reconstructed(result: &oven_sdk::CompleteResult) -> bool {
+fn replayed(result: &oven_sdk::CompleteResult) -> bool {
     matches!(
         result.request.replay.decisions.as_slice(),
-        [
-            oven_sdk::ReplayDecision {
-                disposition: ReplayDisposition::DiscardedForeignScope { .. },
-                ..
-            },
-            oven_sdk::ReplayDecision {
-                disposition: ReplayDisposition::ReconstructedNormalized,
-                ..
-            }
-        ]
+        [oven_sdk::ReplayDecision {
+            disposition: ReplayDisposition::Replayed,
+            ..
+        }]
     )
 }
 
 #[tokio::test]
-async fn replay_binds_route_shape_model_id_and_complete_caller_identity() {
+async fn standard_replay_ignores_route_model_and_revision_but_respects_wire_format() {
     let server = MockServer::start().await;
     common::mount(
         &server,
@@ -77,7 +71,7 @@ async fn replay_binds_route_shape_model_id_and_complete_caller_identity() {
         .complete(request(), AbortSignal::default())
         .await
         .unwrap();
-    assert!(discarded_and_reconstructed(&deployment_switch));
+    assert!(replayed(&deployment_switch));
 
     let route_switch = common::provider(&server, AzureApiRoute::V1Preview)
         .chat("deployment-a", common::gpt4o())
@@ -85,7 +79,7 @@ async fn replay_binds_route_shape_model_id_and_complete_caller_identity() {
         .complete(request(), AbortSignal::default())
         .await
         .unwrap();
-    assert!(discarded_and_reconstructed(&route_switch));
+    assert!(replayed(&route_switch));
 
     let version_switch = common::provider(&server, AzureApiRoute::V1)
         .chat(
@@ -96,7 +90,7 @@ async fn replay_binds_route_shape_model_id_and_complete_caller_identity() {
         .complete(request(), AbortSignal::default())
         .await
         .unwrap();
-    assert!(discarded_and_reconstructed(&version_switch));
+    assert!(replayed(&version_switch));
 
     let type_switch = common::provider(&server, AzureApiRoute::V1)
         .chat(
@@ -107,7 +101,7 @@ async fn replay_binds_route_shape_model_id_and_complete_caller_identity() {
         .complete(request(), AbortSignal::default())
         .await
         .unwrap();
-    assert!(discarded_and_reconstructed(&type_switch));
+    assert!(replayed(&type_switch));
 
     let model_switch = common::provider(&server, AzureApiRoute::V1)
         .chat("deployment-a", common::gpt5_chat())
@@ -115,7 +109,17 @@ async fn replay_binds_route_shape_model_id_and_complete_caller_identity() {
         .complete(request(), AbortSignal::default())
         .await
         .unwrap();
-    assert!(discarded_and_reconstructed(&model_switch));
+    assert!(replayed(&model_switch));
+
+    let mut missing_revision = common::gpt4o();
+    missing_revision.revision = None;
+    let no_revision = common::provider(&server, AzureApiRoute::V1)
+        .chat("deployment-a", missing_revision)
+        .unwrap()
+        .complete(request(), AbortSignal::default())
+        .await
+        .unwrap();
+    assert!(replayed(&no_revision));
 
     let shape_switch = common::provider(&server, AzureApiRoute::V1)
         .responses("deployment-a", common::gpt5())
@@ -126,10 +130,49 @@ async fn replay_binds_route_shape_model_id_and_complete_caller_identity() {
     assert!(matches!(
         shape_switch.request.replay.decisions.first(),
         Some(oven_sdk::ReplayDecision {
-            disposition: ReplayDisposition::DiscardedForeignAdapter { .. },
+            disposition: ReplayDisposition::DiscardedInvalidPayload { .. },
             ..
         })
     ));
+}
+
+#[tokio::test]
+async fn openai_standard_responses_replay_on_azure_without_deployment_revision() {
+    let server = MockServer::start().await;
+    common::mount(
+        &server,
+        "/openai/v1/responses",
+        common::responses_document("ok"),
+    )
+    .await;
+    let mut finish = oven_sdk::Finish::new(Default::default(), oven_sdk::FinishReason::Stop);
+    finish.native_replay = Some(oven_sdk::NativeReplayArtifact::new(
+        oven_sdk::AdapterId::new("some-openai-compatible-adapter"),
+        oven_sdk::NativeContextScope::new(oven_sdk::ProviderId::new("different-provider"), oven_sdk::ModelId::new("different-model"), oven_sdk::ResourceId::new("different-route").unwrap()).unwrap(),
+        serde_json::json!({"format":"oven.openai.responses.output.v1","items":[{"type":"message","id":"source-message","role":"assistant","content":[{"type":"output_text","text":"portable"}]}],"store":false,"status":"completed","incomplete_details":null}),
+    ).unwrap());
+    let turn = oven_sdk::CompletedTurn::new(
+        oven_sdk::AssistantMessage::new(vec![AssistantPart::Text(oven_sdk::TextPart::new(
+            "portable",
+        ))]),
+        finish,
+    );
+    let mut setup = common::gpt5();
+    setup.revision = None;
+    let result = common::provider(&server, AzureApiRoute::V1)
+        .responses("deployment", setup)
+        .unwrap()
+        .complete(
+            Request::new(vec![HistoryTurn::assistant(turn)]),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    assert!(replayed(&result));
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["input"][0]["id"], "source-message");
+    assert_eq!(body["model"], "deployment");
 }
 
 fn encrypted_reasoning_document(secret: &str) -> String {
@@ -146,7 +189,7 @@ fn encrypted_reasoning_document(secret: &str) -> String {
 }
 
 #[tokio::test]
-async fn encrypted_reasoning_never_crosses_caller_identity() {
+async fn encrypted_reasoning_with_same_wire_model_survives_revision_changes() {
     let server = MockServer::start().await;
     let secret = "encrypted-secret-payload";
     common::mount(
@@ -183,12 +226,12 @@ async fn encrypted_reasoning_never_crosses_caller_identity() {
         )
         .await
         .unwrap();
-    assert!(discarded_and_reconstructed(&second));
+    assert!(replayed(&second));
     let requests = server.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
-    assert!(!body.to_string().contains(secret));
+    assert!(body.to_string().contains(secret));
     assert!(
-        !body["input"].as_array().unwrap().iter().any(|item| {
+        body["input"].as_array().unwrap().iter().any(|item| {
             item.get("type").and_then(serde_json::Value::as_str) == Some("reasoning")
         })
     );

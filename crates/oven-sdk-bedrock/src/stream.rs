@@ -641,7 +641,7 @@ impl State {
                 "assistant_content":content,
             });
             finish.native_replay = Some(
-                NativeReplayArtifact::new(
+                NativeReplayArtifact::capture(
                     AdapterId::new(BEDROCK_CONVERSE_ADAPTER_ID),
                     self.native_context_scope.clone(),
                     payload,

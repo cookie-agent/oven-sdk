@@ -38,6 +38,53 @@ pub struct OpenAiCompatibleChatModel {
 impl OpenAiChatModel {
     /// Constructs one official Chat Completions model from explicit configuration.
     pub fn new(config: ModelConfig<OpenAiAuth, OpenAiChatSettings>) -> Result<Self, ModelError> {
+        let base_headers = official_base_headers(&config.provider.auth, &config.provider.headers)?;
+        let organization = config.provider.auth.organization.clone();
+        let project = config.provider.auth.project.clone();
+        Self::build(
+            ModelConfig::new(
+                oven_sdk::ProviderConfig::new(
+                    config.provider.id,
+                    config.provider.api,
+                    Authentication::Official(config.provider.auth),
+                    config.provider.headers,
+                )?,
+                config.model,
+                config.settings,
+            ),
+            base_headers,
+            organization,
+            project,
+        )
+    }
+
+    /// Constructs the official Chat codec without configured authentication.
+    /// Capture and request attribution use the official Chat adapter identity.
+    pub fn new_no_auth(config: ModelConfig<(), OpenAiChatSettings>) -> Result<Self, ModelError> {
+        let base_headers = compatible_base_headers(&config.provider.headers)?;
+        Self::build(
+            ModelConfig::new(
+                oven_sdk::ProviderConfig::new(
+                    config.provider.id,
+                    config.provider.api,
+                    Authentication::Compatible(OpenAiCompatibleAuth::none()),
+                    config.provider.headers,
+                )?,
+                config.model,
+                config.settings,
+            ),
+            base_headers,
+            None,
+            None,
+        )
+    }
+
+    fn build(
+        config: ModelConfig<Authentication, OpenAiChatSettings>,
+        base_headers: HeaderMap,
+        organization: Option<String>,
+        project: Option<String>,
+    ) -> Result<Self, ModelError> {
         config.validate()?;
         validate_chat_declaration(
             &config.model.capabilities,
@@ -47,10 +94,7 @@ impl OpenAiChatModel {
             config.settings.stream_usage,
             false,
         )?;
-        validate_routing_discriminator(
-            config.provider.headers.dynamic_headers.is_some(),
-            config.settings.routing_discriminator.as_deref(),
-        )?;
+        validate_routing_discriminator(false, config.settings.routing_discriminator.as_deref())?;
         let adapter_id = AdapterId::new(OPENAI_CHAT_ADAPTER_ID);
         let descriptor = LanguageModelDescriptor::new(
             ModelIdentity::new(config.provider.id.clone(), config.model.id.clone())?,
@@ -74,20 +118,19 @@ impl OpenAiChatModel {
                 query: &[],
                 request_id_headers: &["x-request-id".into()],
                 strict_sse_content_type: true,
-                organization: config.provider.auth.organization.as_deref(),
-                project: config.provider.auth.project.as_deref(),
+                organization: organization.as_deref(),
+                project: project.as_deref(),
                 routing_discriminator: config.settings.routing_discriminator.as_deref(),
                 static_headers: &header_scope_component(&config.provider.headers),
             },
         )?;
         let client = build_client(config.settings.client, &config.settings.timeouts)?;
-        let base_headers = official_base_headers(&config.provider.auth, &config.provider.headers)?;
         Ok(Self {
             runtime: Arc::new(Runtime {
                 descriptor,
                 scope,
                 api: config.provider.api.as_url().to_string(),
-                auth: Authentication::Official(config.provider.auth),
+                auth: config.provider.auth,
                 headers: config.provider.headers,
                 base_headers,
                 client,
@@ -130,11 +173,7 @@ impl OpenAiCompatibleChatModel {
             config.settings.stream_usage,
             true,
         )?;
-        validate_routing_discriminator(
-            config.provider.headers.dynamic_headers.is_some()
-                || config.provider.auth.header_provider.is_some(),
-            config.settings.routing_discriminator.as_deref(),
-        )?;
+        validate_routing_discriminator(false, config.settings.routing_discriminator.as_deref())?;
         let adapter_id = config.settings.adapter_id.clone();
         let descriptor = LanguageModelDescriptor::new(
             ModelIdentity::new(config.provider.id.clone(), config.model.id.clone())?,

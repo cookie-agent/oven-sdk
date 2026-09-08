@@ -431,7 +431,7 @@ impl State {
                         .collect::<Vec<_>>();
                     let payload = serde_json::json!({"format":self.protocol.replay_format(),"message":{"role":"assistant","content":content},"stop_reason":self.stop.take(),"stop_sequence":self.stop_sequence.take()});
                     finish.native_replay = Some(
-                        NativeReplayArtifact::new(
+                        NativeReplayArtifact::capture(
                             self.adapter_id.clone(),
                             self.native_context_scope.clone(),
                             payload,

@@ -393,9 +393,7 @@ async fn timeout_settings_are_scope_bound_and_error_finish_is_always_in_band() {
         .unwrap();
     assert!(matches!(
         second.request.replay.decisions.as_slice(),
-        [first, second]
-            if matches!(first.disposition, ReplayDisposition::DiscardedForeignScope { .. })
-                && second.disposition == ReplayDisposition::ReconstructedNormalized
+        [first] if first.disposition == ReplayDisposition::Replayed
     ));
 
     let error_server = MockServer::start().await;

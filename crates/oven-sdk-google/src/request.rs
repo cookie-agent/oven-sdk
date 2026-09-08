@@ -188,7 +188,7 @@ pub(crate) fn encode_request(
     parsed: &ParsedOptions,
     descriptor: &LanguageModelDescriptor,
     settings: &GoogleGenerateContentSettings,
-    native_context_scope: &NativeContextScope,
+    _native_context_scope: &NativeContextScope,
 ) -> Result<Encoded, ModelError> {
     let options = &parsed.request;
     let thinking_config = resolved_thinking_config(request, options, &settings.thinking)?;
@@ -197,7 +197,7 @@ pub(crate) fn encode_request(
     let mut warnings = Vec::new();
     let mut system_parts = Vec::new();
     let mut contents = Vec::new();
-    let mut tool_names = BTreeMap::<String, String>::new();
+    let mut tool_names = BTreeMap::<String, (String, Option<String>)>::new();
     let mut previous_tool_content = false;
     let current_turn_start = request
         .history
@@ -240,30 +240,38 @@ pub(crate) fn encode_request(
                         disposition: ReplayDisposition::ReconstructedNormalized,
                     });
                 } else if let Some(artifact) = &turn.finish.native_replay {
-                    if artifact.adapter_id() != &descriptor.adapter_id {
-                        replay.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignAdapter {
-                                found: artifact.adapter_id().clone(),
-                                expected: descriptor.adapter_id.clone(),
-                            },
-                        });
-                    } else if artifact.scope() != native_context_scope {
-                        replay.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignScope {
-                                found: artifact.scope().clone(),
-                                expected: native_context_scope.clone(),
-                            },
-                        });
-                    } else {
-                        match validated_replay_parts(artifact.payload(), &turn.message.content) {
+                    {
+                        match validated_replay_parts(artifact.payload(), &turn.message.content)
+                            .or_else(|reason| {
+                                oven_sdk::replay::generate_content_parts(
+                                    artifact,
+                                    &turn.message.content,
+                                )
+                                .ok_or(reason)
+                            }) {
                             Ok(parts) => {
                                 replay.decisions.push(ReplayDecision {
                                     history_index,
                                     disposition: ReplayDisposition::Replayed,
                                 });
-                                native = Some(parts);
+                                native = Some(oven_sdk::replay::eligible_blocks(
+                                    artifact,
+                                    &oven_sdk::ModelId::new(
+                                        settings
+                                            .model_resource
+                                            .strip_prefix("models/")
+                                            .expect("validated model resource"),
+                                    ),
+                                    oven_sdk::replay::BlockFormat::GenerateContent {
+                                        provider_tools: descriptor
+                                            .capabilities
+                                            .features
+                                            .contains(Capability::PROVIDER_TOOLS),
+                                    },
+                                    descriptor.capabilities.replay.reasoning,
+                                    parts,
+                                    &mut warnings,
+                                )?);
                             }
                             Err(reason) => replay.decisions.push(ReplayDecision {
                                 history_index,
@@ -323,9 +331,15 @@ pub(crate) fn encode_request(
                         parts
                     }
                 };
+                let mut wire_calls = parts.iter().filter_map(|part| part.get("functionCall"));
                 for part in &turn.message.content {
                     if let AssistantPart::ToolCall(call) = part {
-                        tool_names.insert(call.id.clone(), call.name.clone());
+                        let wire_id = wire_calls
+                            .next()
+                            .and_then(|call| call.get("id"))
+                            .and_then(JsonValue::as_str)
+                            .map(str::to_owned);
+                        tool_names.insert(call.id.clone(), (call.name.clone(), wire_id));
                     }
                 }
                 if !parts.is_empty() {
@@ -654,9 +668,9 @@ fn server_tool_context_field(part: &oven_sdk::CustomPart) -> Option<&'static str
 
 fn function_response(
     result: &ToolResultPart,
-    names: &BTreeMap<String, String>,
+    names: &BTreeMap<String, (String, Option<String>)>,
 ) -> Result<JsonValue, ModelError> {
-    let name = names.get(&result.tool_call_id).ok_or_else(|| {
+    let (name, wire_id) = names.get(&result.tool_call_id).ok_or_else(|| {
         ModelError::invalid_request("Google tool result could not resolve its function name")
     })?;
     let response = if result.is_error {
@@ -664,9 +678,11 @@ fn function_response(
     } else {
         serde_json::json!({"output":tool_content(&result.content)?})
     };
-    Ok(serde_json::json!({
-        "functionResponse":{"id":result.tool_call_id,"name":name,"response":response}
-    }))
+    let mut part = serde_json::json!({ "functionResponse":{"name":name,"response":response} });
+    if let Some(id) = wire_id {
+        part["functionResponse"]["id"] = id.clone().into();
+    }
+    Ok(part)
 }
 
 fn tool_content(content: &ToolContent) -> Result<JsonValue, ModelError> {

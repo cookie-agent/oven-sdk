@@ -900,7 +900,7 @@ pub(crate) fn encode_request(
     request: &Request,
     parsed: &ParsedOptions,
     descriptor: &LanguageModelDescriptor,
-    native_context_scope: &NativeContextScope,
+    _native_context_scope: &NativeContextScope,
     policy: ReplayPolicy,
     protocol: Protocol,
     compatible: bool,
@@ -987,30 +987,21 @@ pub(crate) fn encode_request(
                         disposition: ReplayDisposition::ReconstructedNormalized,
                     });
                 } else if let Some(artifact) = &turn.finish.native_replay {
-                    if artifact.adapter_id() != &descriptor.adapter_id {
-                        replay.decisions.push(ReplayDecision {
-                            history_index: index,
-                            disposition: ReplayDisposition::DiscardedForeignAdapter {
-                                found: artifact.adapter_id().clone(),
-                                expected: descriptor.adapter_id.clone(),
-                            },
-                        });
-                    } else if artifact.scope() != native_context_scope {
-                        replay.decisions.push(ReplayDecision {
-                            history_index: index,
-                            disposition: ReplayDisposition::DiscardedForeignScope {
-                                found: artifact.scope().clone(),
-                                expected: native_context_scope.clone(),
-                            },
-                        });
-                    } else {
+                    {
                         match replay::decode(artifact, &turn.message.content, protocol) {
                             Ok(decoded) => {
                                 replay.decisions.push(ReplayDecision {
                                     history_index: index,
                                     disposition: ReplayDisposition::Replayed,
                                 });
-                                content = Some(decoded);
+                                content = Some(oven_sdk::replay::eligible_blocks(
+                                    artifact,
+                                    &descriptor.identity.model_id,
+                                    oven_sdk::replay::BlockFormat::Messages,
+                                    descriptor.capabilities.replay.reasoning,
+                                    decoded,
+                                    &mut warnings,
+                                )?);
                             }
                             Err(reason) => replay.decisions.push(ReplayDecision {
                                 history_index: index,
@@ -1027,6 +1018,27 @@ pub(crate) fn encode_request(
                     });
                 }
                 if content.is_none() {
+                    if descriptor.capabilities.replay.capability
+                        == oven_sdk::ReplayCapability::Required
+                        && !request.history[index + 1..]
+                            .iter()
+                            .any(|turn| matches!(turn, HistoryTurn::User(_)))
+                        && turn
+                            .message
+                            .content
+                            .iter()
+                            .any(|part| matches!(part, AssistantPart::ToolCall(_)))
+                        && turn
+                            .message
+                            .content
+                            .iter()
+                            .any(|part| matches!(part, AssistantPart::Reasoning(_)))
+                    {
+                        return Err(ModelError::replay(format!(
+                            "{} reasoning continuation requires a valid native replay artifact at history index {index}",
+                            protocol.display_name()
+                        )));
+                    }
                     if policy != ReplayPolicy::Never {
                         replay.decisions.push(ReplayDecision {
                             history_index: index,

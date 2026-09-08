@@ -196,7 +196,7 @@ pub(crate) fn encode_request(
     request: &Request,
     options: &BedrockRequestOptions,
     descriptor: &LanguageModelDescriptor,
-    native_context_scope: &NativeContextScope,
+    _native_context_scope: &NativeContextScope,
     settings: EncodeSettings,
 ) -> Result<Encoded, ModelError> {
     let replay_policy = descriptor.capabilities.replay.policy;
@@ -241,35 +241,30 @@ pub(crate) fn encode_request(
                         disposition: ReplayDisposition::ReconstructedNormalized,
                     });
                 } else if let Some(artifact) = &turn.finish.native_replay {
-                    if artifact.adapter_id() != &descriptor.adapter_id {
-                        replay.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignAdapter {
-                                found: artifact.adapter_id().clone(),
-                                expected: descriptor.adapter_id.clone(),
-                            },
-                        });
-                    } else if artifact.scope() != native_context_scope {
-                        replay.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignScope {
-                                found: artifact.scope().clone(),
-                                expected: native_context_scope.clone(),
-                            },
-                        });
-                    } else {
+                    {
+                        let mut source_capabilities = descriptor.capabilities.clone();
+                        source_capabilities.features.insert(Capability::REASONING);
                         match decode_replay(
                             artifact.payload(),
                             &turn.message.content,
-                            &descriptor.capabilities,
-                            settings.signed_reasoning,
+                            &source_capabilities,
+                            true,
                         ) {
                             Ok(content) => {
                                 replay.decisions.push(ReplayDecision {
                                     history_index,
                                     disposition: ReplayDisposition::Replayed,
                                 });
-                                native = Some(content);
+                                native = Some(oven_sdk::replay::eligible_blocks(
+                                    artifact,
+                                    &descriptor.identity.model_id,
+                                    oven_sdk::replay::BlockFormat::Converse {
+                                        redacted_reasoning: settings.signed_reasoning,
+                                    },
+                                    descriptor.capabilities.replay.reasoning,
+                                    content,
+                                    &mut warnings,
+                                )?);
                             }
                             Err(reason) => replay.decisions.push(ReplayDecision {
                                 history_index,
@@ -1411,6 +1406,9 @@ fn validate_native_content(
                     .keys()
                     .all(|key| matches!(key.as_str(), "signature" | "text"))
                     || !text.contains_key("text")
+                    || text
+                        .get("signature")
+                        .is_some_and(|value| !value.is_string())
                 {
                     return Err("Bedrock replay reasoningText shape is invalid");
                 }

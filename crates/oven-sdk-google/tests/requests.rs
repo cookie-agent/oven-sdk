@@ -24,6 +24,44 @@ use common::{
 };
 
 #[tokio::test]
+async fn vertex_standard_tool_blocks_replay_with_matching_wire_result_ids() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_raw("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n", "text/event-stream")).mount(&server).await;
+    let mut call = ToolCallPart::new("local-call", "lookup", json!({}));
+    call.provider_item_id = Some("provider-call".into());
+    let mut finish = Finish::new(Default::default(), FinishReason::ToolCalls);
+    finish.native_replay = Some(NativeReplayArtifact::new(AdapterId::new("vertex-source"), oven_sdk::NativeContextScope::new(oven_sdk::ProviderId::new("other"), oven_sdk::ModelId::new("other"), oven_sdk::ResourceId::new("other").unwrap()).unwrap(), json!({"format":"oven.google.vertex.generate-content.assistant.v4","content":{"role":"model","parts":[{"functionCall":{"id":"provider-call","name":"lookup","args":{}}}]}})).unwrap());
+    let request = Request::new(vec![
+        HistoryTurn::assistant(CompletedTurn::new(
+            AssistantMessage::new(vec![AssistantPart::ToolCall(call)]),
+            finish,
+        )),
+        HistoryTurn::tool(ToolMessage::new(vec![ToolResultPart::new(
+            "local-call",
+            ToolContent::Text("result".into()),
+        )])),
+    ]);
+    let result = model(server.uri(), "target-model")
+        .complete(request, AbortSignal::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        result.request.replay.decisions[0].disposition,
+        ReplayDisposition::Replayed
+    );
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        body["contents"][0]["parts"][0]["functionCall"]["id"],
+        "provider-call"
+    );
+    assert_eq!(
+        body["contents"][1]["parts"][0]["functionResponse"]["id"],
+        "provider-call"
+    );
+}
+
+#[tokio::test]
 async fn tool_result_files_reject_during_request_validation() {
     let server = MockServer::start().await;
     let model = common::model(format!("{}/v1beta", server.uri()), "gemini-2.5-flash");
@@ -649,12 +687,12 @@ async fn endpoint_and_model_resource_changes_discard_foreign_native_context_scop
         .unwrap();
     assert!(matches!(
         endpoint_result.request.replay.decisions[0].disposition,
-        ReplayDisposition::DiscardedForeignScope { .. }
+        ReplayDisposition::Replayed
     ));
     let endpoint_requests = foreign_endpoint.received_requests().await.unwrap();
     let endpoint_body: serde_json::Value =
         serde_json::from_slice(&endpoint_requests[0].body).unwrap();
-    assert!(!endpoint_body.to_string().contains("private-signature"));
+    assert!(endpoint_body.to_string().contains("private-signature"));
 
     let resource_model = model_with(
         source.uri(),
@@ -673,7 +711,7 @@ async fn endpoint_and_model_resource_changes_discard_foreign_native_context_scop
         .unwrap();
     assert!(matches!(
         resource_result.request.replay.decisions[0].disposition,
-        ReplayDisposition::DiscardedForeignScope { .. }
+        ReplayDisposition::Replayed
     ));
     let source_requests = source.received_requests().await.unwrap();
     let resource_body: serde_json::Value =

@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use oven_sdk::{
     AssistantPart, Capability, ErrorStage, FilePart, FileSource, HistoryTurn, InputPart, JsonValue,
-    LanguageModelDescriptor, ModelCapabilities, ModelError, NativeContextScope, ReplayDecision,
-    ReplayDisposition, ReplayOutcome, ReplayPolicy, Request, ResponseFormat, SystemPart,
-    ToolChoice, ToolContent, ToolResultPart,
+    LanguageModelDescriptor, ModelCapabilities, ModelError, ReplayDecision, ReplayDisposition,
+    ReplayOutcome, ReplayPolicy, Request, ResponseFormat, SystemPart, ToolChoice, ToolContent,
+    ToolResultPart,
 };
 
 use crate::{
@@ -208,7 +208,7 @@ pub(crate) fn encode_request(
     descriptor: &LanguageModelDescriptor,
     replay_policy: ReplayPolicy,
     stream_function_call_arguments: bool,
-    native_context_scope: &NativeContextScope,
+    wire_model_id: &oven_sdk::ModelId,
 ) -> Result<Encoded, ModelError> {
     let options = &parsed.request;
     let mut replay = ReplayOutcome::default();
@@ -253,30 +253,34 @@ pub(crate) fn encode_request(
                         disposition: ReplayDisposition::ReconstructedNormalized,
                     });
                 } else if let Some(artifact) = &turn.finish.native_replay {
-                    if artifact.adapter_id() != &descriptor.adapter_id {
-                        replay.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignAdapter {
-                                found: artifact.adapter_id().clone(),
-                                expected: descriptor.adapter_id.clone(),
+                    {
+                        match decode_replay(artifact.payload(), &turn.message.content).or_else(
+                            |reason| {
+                                oven_sdk::replay::generate_content_parts(
+                                    artifact,
+                                    &turn.message.content,
+                                )
+                                .ok_or(reason)
                             },
-                        });
-                    } else if artifact.scope() != native_context_scope {
-                        replay.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignScope {
-                                found: artifact.scope().clone(),
-                                expected: native_context_scope.clone(),
-                            },
-                        });
-                    } else {
-                        match decode_replay(artifact.payload(), &turn.message.content) {
+                        ) {
                             Ok(parts) => {
                                 replay.decisions.push(ReplayDecision {
                                     history_index,
                                     disposition: ReplayDisposition::Replayed,
                                 });
-                                native = Some(parts);
+                                native = Some(oven_sdk::replay::eligible_blocks(
+                                    artifact,
+                                    wire_model_id,
+                                    oven_sdk::replay::BlockFormat::GenerateContent {
+                                        provider_tools: descriptor
+                                            .capabilities
+                                            .features
+                                            .contains(Capability::PROVIDER_TOOLS),
+                                    },
+                                    descriptor.capabilities.replay.reasoning,
+                                    parts,
+                                    &mut warnings,
+                                )?);
                             }
                             Err(reason) => replay.decisions.push(ReplayDecision {
                                 history_index,
@@ -295,6 +299,11 @@ pub(crate) fn encode_request(
                 let parts = match native {
                     Some(parts) => parts,
                     None => {
+                        if oven_sdk::replay::has_required_vertex_signature(&turn.message.content) {
+                            return Err(ModelError::replay(
+                                "Vertex tool continuation requires its captured native thought signature",
+                            ));
+                        }
                         if replay_policy != ReplayPolicy::Never {
                             replay.decisions.push(ReplayDecision {
                                 history_index,
@@ -320,13 +329,18 @@ pub(crate) fn encode_request(
                             .collect()
                     }
                 };
+                let mut wire_calls = parts.iter().filter_map(|part| part.get("functionCall"));
                 for part in &turn.message.content {
                     if let AssistantPart::ToolCall(call) = part {
                         tool_names.insert(
                             call.id.clone(),
                             ToolIdentity {
                                 name: call.name.clone(),
-                                provider_id: call.provider_item_id.clone(),
+                                provider_id: wire_calls
+                                    .next()
+                                    .and_then(|call| call.get("id"))
+                                    .and_then(JsonValue::as_str)
+                                    .map(str::to_owned),
                             },
                         );
                     }
@@ -1023,6 +1037,9 @@ fn decode_replay(
     }
     if native_semantics(&parts) != normalized_semantics(normalized) {
         return Err("Vertex replay payload did not match normalized content");
+    }
+    if !oven_sdk::replay::vertex_signatures_match(&parts, normalized) {
+        return Err("Vertex required thought-signature witness does not match native state");
     }
     Ok(parts)
 }

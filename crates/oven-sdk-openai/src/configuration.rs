@@ -617,6 +617,17 @@ pub(crate) fn header_scope_component(headers: &HeaderConfig) -> String {
         .join("\n")
 }
 
+pub(crate) fn header_map_scope_component(headers: &HeaderMap) -> String {
+    let mut values = std::collections::BTreeMap::<&str, Vec<&[u8]>>::new();
+    for (name, value) in headers {
+        values
+            .entry(name.as_str())
+            .or_default()
+            .push(value.as_bytes());
+    }
+    serde_json::to_string(&values).expect("header bytes serialize")
+}
+
 pub(crate) fn validate_routing_discriminator(
     has_dynamic_headers: bool,
     value: Option<&str>,
@@ -649,6 +660,30 @@ fn sha256(value: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn header_scope_ignores_name_order_but_preserves_repeated_value_order() {
+        use super::{HeaderMap, HeaderValue, header_map_scope_component};
+
+        let mut first = HeaderMap::new();
+        first.insert("x-route", HeaderValue::from_static("one"));
+        first.append("x-route", HeaderValue::from_static("two"));
+        first.insert("x-tenant", HeaderValue::from_static("tenant"));
+        let mut same = HeaderMap::new();
+        same.insert("x-tenant", HeaderValue::from_static("tenant"));
+        same.insert("x-route", HeaderValue::from_static("one"));
+        same.append("x-route", HeaderValue::from_static("two"));
+        assert_eq!(
+            header_map_scope_component(&first),
+            header_map_scope_component(&same)
+        );
+        same.insert("x-route", HeaderValue::from_static("two"));
+        same.append("x-route", HeaderValue::from_static("one"));
+        assert_ne!(
+            header_map_scope_component(&first),
+            header_map_scope_component(&same)
+        );
+    }
+
     #[test]
     fn sha256_matches_standard_vector() {
         assert_eq!(

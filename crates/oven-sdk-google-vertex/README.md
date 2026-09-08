@@ -47,6 +47,8 @@ resource ID is a versioned, non-reversible SHA-256 fingerprint of the canonical
 explicit API endpoint, project, location, and typed resource. Equivalent endpoint
 URLs produce the same scope; different private gateways do not. Raw endpoint URLs,
 headers, and authentication secrets are never serialized into replay artifacts.
+These scope values record provenance; they do not restrict standard supported
+block replay across gateways, headers, providers, or local model aliases.
 
 ## Mapping models.dev data
 
@@ -75,13 +77,21 @@ context compaction or accept native context windows.
 
 ## Current protocol behavior
 
-- Uses only private replay format
+- Captures private replay format
   `oven.google.vertex.generate-content.assistant.v4` under adapter ID
   `oven.google.vertex.generate-content`; no earlier format is decoded.
-- Replay is bound by core `NativeContextScope` to provider, model, canonical explicit API
-  endpoint, project, location, and typed resource. Provider-supplied function IDs
-  participate in semantic replay validation and remain consistent with function
-  responses.
+- Standard supported parts replay across provider, endpoint, header, model, and
+  deployment changes after source-format and semantic validation. The shared
+  Gemini/Vertex standard subset has explicit support; custom fields require
+  target support and are not guessed. Provider-supplied function IDs remain
+  consistent with function responses.
+- Opaque `thoughtSignature` state requires equal known effective wire model IDs
+  from the actual resource, not a local alias. If a captured call required that
+  state, persistence retains evidence of the requirement: dropping, corrupting,
+  or filtering the artifact fails closed, not as unsigned tool reconstruction.
+  Ordinary calls without required state can normalize; legacy missing evidence
+  does not recreate signatures. Portable sibling parts survive filtering when
+  safe. See the [core replay policy](../oven-sdk/README.md#native-replay-policy).
 - Client functions use `parametersJsonSchema` with an exact object-only root and
   validated local `#/$defs/` references.
 - Recognized cached-content resources must match the explicitly configured project
@@ -111,6 +121,6 @@ discovery, model-specific logic, and broader URL handling. Oven intentionally
 requires caller-resolved configuration and OAuth tokens, does no registry,
 environment, filesystem, or cloud-metadata lookup, accepts only declared media and
 URL schemes, never downloads URLs, emits strict lifecycle parts and structured
-errors, and captures bounded endpoint-scoped replay artifacts. Provider-executed
+errors, and captures bounded replay artifacts with endpoint provenance. Provider-executed
 tools are normalized as safe custom parts; citations become sources rather than
 executable client calls.

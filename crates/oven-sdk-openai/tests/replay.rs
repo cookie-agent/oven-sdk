@@ -33,29 +33,6 @@ fn with_payload(turn: &CompletedTurn, payload: serde_json::Value) -> CompletedTu
     forged
 }
 
-async fn assert_invalid_replay(model: &impl LanguageModel, turn: CompletedTurn) {
-    let response = model
-        .stream(
-            Request::new(vec![HistoryTurn::assistant(turn)]),
-            AbortSignal::default(),
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        response.request.replay.decisions.as_slice(),
-        [
-            oven_sdk::ReplayDecision {
-                disposition: ReplayDisposition::DiscardedInvalidPayload { .. },
-                ..
-            },
-            oven_sdk::ReplayDecision {
-                disposition: ReplayDisposition::ReconstructedNormalized,
-                ..
-            }
-        ]
-    ));
-}
-
 struct RouteHeaders;
 
 impl HeaderProvider for RouteHeaders {
@@ -156,7 +133,7 @@ async fn invalid_same_adapter_payload_discards_and_reconstructs() {
 }
 
 #[tokio::test]
-async fn same_adapter_foreign_scope_discards_and_reconstructs() {
+async fn standard_chat_replay_survives_model_changes() {
     let server = MockServer::start().await;
     common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
     let first_model = common::official_chat(&server, "model-one");
@@ -174,16 +151,10 @@ async fn same_adapter_foreign_scope_discards_and_reconstructs() {
         .unwrap();
     assert!(matches!(
         response.request.replay.decisions.as_slice(),
-        [
-            oven_sdk::ReplayDecision {
-                disposition: ReplayDisposition::DiscardedForeignScope { .. },
-                ..
-            },
-            oven_sdk::ReplayDecision {
-                disposition: ReplayDisposition::ReconstructedNormalized,
-                ..
-            }
-        ]
+        [oven_sdk::ReplayDecision {
+            disposition: ReplayDisposition::Replayed,
+            ..
+        }]
     ));
 }
 
@@ -223,24 +194,21 @@ async fn routing_discriminator_changes_versioned_cryptographic_replay_scope() {
         .unwrap();
     assert!(matches!(
         response.request.replay.decisions.as_slice(),
-        [
-            oven_sdk::ReplayDecision {
-                disposition: ReplayDisposition::DiscardedForeignScope { .. },
-                ..
-            },
-            oven_sdk::ReplayDecision {
-                disposition: ReplayDisposition::ReconstructedNormalized,
-                ..
-            }
-        ]
+        [oven_sdk::ReplayDecision {
+            disposition: ReplayDisposition::Replayed,
+            ..
+        }]
     ));
 }
 
 #[tokio::test]
-async fn dynamic_routing_headers_require_explicit_discriminator() {
+async fn dynamic_routing_headers_require_discriminator_only_for_native_compaction() {
     let server = MockServer::start().await;
     let mut config = common::official_responses_config(&server, "same-model");
     config.provider.headers.dynamic_headers = Some(Arc::new(RouteHeaders));
+    assert!(oven_sdk_openai::OpenAiResponsesModel::new(config.clone()).is_ok());
+    config.model.capabilities.compaction = oven_sdk::CompactionCapability::Native;
+    config.settings.compaction = oven_sdk_openai::OpenAiResponsesCompaction::V1;
     let error = oven_sdk_openai::OpenAiResponsesModel::new(config)
         .err()
         .expect("dynamic routing without discriminator must fail");
@@ -392,7 +360,22 @@ async fn responses_replay_rejects_reorder_merge_split_stripping_and_unknown_extr
         unknown_field,
         unknown_item,
     ] {
-        assert_invalid_replay(&model, with_payload(&first.turn, payload)).await;
+        let before = server.received_requests().await.unwrap().len();
+        let response = model
+            .stream(
+                Request::new(vec![HistoryTurn::assistant(with_payload(
+                    &first.turn,
+                    payload,
+                ))]),
+                AbortSignal::default(),
+            )
+            .await
+            .expect("standard normalized text survives invalid non-tool reasoning state");
+        assert!(matches!(
+            response.request.replay.decisions[0].disposition,
+            ReplayDisposition::DiscardedInvalidPayload { .. }
+        ));
+        assert_eq!(server.received_requests().await.unwrap().len(), before + 1);
     }
 }
 

@@ -320,6 +320,8 @@ fn member_prefix(
 }
 
 pub(crate) struct State {
+    required_reasoning: bool,
+    wire_model_id: Option<oven_sdk::ModelId>,
     policy: ReplayPolicy,
     native_context_scope: NativeContextScope,
     stream_function_call_arguments: bool,
@@ -342,6 +344,8 @@ impl State {
         stream_function_call_arguments: bool,
     ) -> Self {
         Self {
+            required_reasoning: false,
+            wire_model_id: None,
             policy,
             native_context_scope,
             stream_function_call_arguments,
@@ -360,6 +364,16 @@ impl State {
 
     pub(crate) fn response_metadata(&self) -> &BTreeMap<String, JsonValue> {
         &self.response_metadata
+    }
+
+    pub(crate) fn with_wire_model_id(mut self, id: oven_sdk::ModelId) -> Self {
+        self.wire_model_id = Some(id);
+        self
+    }
+
+    pub(crate) fn with_required_reasoning(mut self, required: bool) -> Self {
+        self.required_reasoning = required;
+        self
     }
 
     pub(crate) fn set_request_id(&mut self, request_id: Option<String>) {
@@ -748,6 +762,9 @@ impl State {
         );
         tool_call.provider_item_id = partial.provider_id;
         tool_call.raw_input = Some(raw);
+        if self.required_reasoning {
+            oven_sdk::replay::mark_required_vertex_signature(&mut tool_call, &native);
+        }
         parts.push(StreamPart::ToolCall { tool_call });
         self.native_parts.push(native);
         Ok(())
@@ -795,6 +812,9 @@ impl State {
         let mut tool_call = ToolCallPart::new(id, name, input);
         tool_call.provider_item_id = provider_id;
         tool_call.raw_input = Some(raw);
+        if self.required_reasoning {
+            oven_sdk::replay::mark_required_vertex_signature(&mut tool_call, &native);
+        }
         parts.push(StreamPart::ToolCall { tool_call });
         self.native_parts.push(native);
         Ok(())
@@ -859,6 +879,10 @@ impl State {
                     self.native_context_scope.clone(),
                     payload,
                 )
+                .and_then(|artifact| match &self.wire_model_id {
+                    Some(id) => artifact.with_source_wire_model_id(id.clone()),
+                    None => Ok(artifact),
+                })
                 .map_err(|_| {
                     ModelError::replay("Vertex native replay artifact exceeds its size limit")
                         .with_stage(ErrorStage::ReplayEncode)
@@ -1110,8 +1134,10 @@ pub(crate) fn normalize_single(
     request_id: Option<String>,
     include_raw: bool,
     bytes: u64,
+    required_reasoning: bool,
 ) -> Result<(Vec<StreamPart>, BTreeMap<String, JsonValue>), ModelError> {
-    let mut state = State::new(policy, native_context_scope, false);
+    let mut state =
+        State::new(policy, native_context_scope, false).with_required_reasoning(required_reasoning);
     state.set_request_id(request_id);
     let mut parts = vec![StreamPart::StreamStart {
         warnings: Vec::new(),
@@ -1650,6 +1676,7 @@ mod tests {
             None,
             false,
             1,
+            false,
         )
         .unwrap();
         let sources = parts

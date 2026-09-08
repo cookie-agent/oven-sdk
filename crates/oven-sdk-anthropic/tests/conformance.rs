@@ -25,11 +25,10 @@ use oven_sdk_conformance::{
     CapabilityProbe, ToolResultFileKind, ToolResultFilePolicy, UserTurnVideoPolicy,
     assert_capability_honesty, assert_capability_honesty_with,
     assert_compaction_unsupported_before_io, assert_complete_drain, assert_declaration_honesty,
-    assert_error_taxonomy, assert_foreign_replay_is_reported, assert_history_round_trip,
-    assert_invalid_replay_reconstructs, assert_malformed_payload_returns_error,
-    assert_replay_artifact, assert_replay_round_trip, assert_stream_contract,
-    assert_stream_lifecycle, assert_tool_result_file_policy, assert_user_turn_video_policy,
-    assert_validate_for_consistency,
+    assert_error_taxonomy, assert_history_round_trip, assert_invalid_replay_reconstructs,
+    assert_malformed_payload_returns_error, assert_replay_artifact, assert_replay_round_trip,
+    assert_stream_contract, assert_stream_lifecycle, assert_tool_result_file_policy,
+    assert_user_turn_video_policy, assert_validate_for_consistency,
     sse::{ChunkPattern, chunk_bytes},
 };
 use tokio::{
@@ -394,7 +393,7 @@ async fn full_anthropic_conformance_suite() {
         serde_json::json!({}),
     )
     .unwrap();
-    assert_foreign_replay_is_reported(
+    assert_invalid_replay_reconstructs(
         &model,
         &native_context_scope,
         Request::new(vec![oven_sdk::HistoryTurn::assistant(completed(Some(

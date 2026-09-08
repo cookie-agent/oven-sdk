@@ -10,9 +10,9 @@ use oven_sdk::{
 use oven_sdk_conformance::{
     ToolResultFileKind, ToolResultFilePolicy, UserTurnVideoPolicy, assert_capability_honesty,
     assert_compaction_unsupported_before_io, assert_complete_drain,
-    assert_foreign_replay_is_reported, assert_invalid_replay_reconstructs, assert_replay_artifact,
-    assert_replay_round_trip, assert_stream_contract, assert_stream_lifecycle,
-    assert_tool_result_file_policy, assert_user_turn_video_policy,
+    assert_invalid_replay_reconstructs, assert_replay_artifact, assert_replay_round_trip,
+    assert_stream_contract, assert_stream_lifecycle, assert_tool_result_file_policy,
+    assert_user_turn_video_policy,
 };
 use wiremock::MockServer;
 
@@ -183,7 +183,7 @@ async fn invalid_and_foreign_replay_conformance_sequences_continue() {
         serde_json::json!({}),
     )
     .unwrap();
-    assert_foreign_replay_is_reported(
+    assert_invalid_replay_reconstructs(
         &model,
         &scope,
         Request::new(vec![HistoryTurn::assistant(completed(foreign))]),

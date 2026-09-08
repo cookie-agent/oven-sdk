@@ -48,7 +48,8 @@ impl std::fmt::Debug for AzureOpenAiAuth {
     }
 }
 
-/// Complete caller-known Azure deployment revision used to scope native replay.
+/// Complete caller-known Azure deployment revision retained as provenance.
+/// Required for native compaction, not ordinary native replay.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AzureOpenAiRevision {
@@ -152,7 +153,7 @@ pub struct AzureOpenAiCompletionsConfig {
 pub struct AzureOpenAiChatSettings {
     /// Typed Azure route family.
     pub route: AzureApiRoute,
-    /// Complete caller-known revision required whenever native replay is enabled.
+    /// Optional caller-known revision retained as provenance; ordinary replay does not require it.
     pub revision: Option<AzureOpenAiRevision>,
     /// Transport phase timeouts.
     pub timeouts: AzureOpenAiTimeouts,
@@ -176,7 +177,7 @@ impl Default for AzureOpenAiChatSettings {
 pub struct AzureOpenAiResponsesSettings {
     /// Typed Azure route family.
     pub route: AzureApiRoute,
-    /// Complete caller-known revision required whenever replay or native compaction is enabled.
+    /// Caller-known revision required for native compaction; optional for ordinary replay.
     pub revision: Option<AzureOpenAiRevision>,
     /// Transport phase timeouts.
     pub timeouts: AzureOpenAiTimeouts,
@@ -548,16 +549,17 @@ fn validate_replay_and_compaction(
     route: &AzureApiRoute,
     endpoint: Endpoint,
 ) -> Result<(), ModelError> {
-    if capabilities.replay.capability != ReplayCapability::Unsupported
-        || capabilities.compaction == CompactionCapability::Native
-    {
+    if capabilities.compaction == CompactionCapability::Native {
         revision
             .ok_or_else(|| {
                 ModelError::invalid_request(
-                    "Azure native replay requires a complete explicit deployment revision",
+                    "Azure native compaction requires a complete explicit deployment revision",
                 )
             })?
             .validate()?;
+    }
+    if let Some(revision) = revision {
+        revision.validate()?;
     }
     match compaction {
         AzureOpenAiResponsesCompaction::Unsupported => {}

@@ -187,28 +187,30 @@ access key IDs remain non-secret strings.
 
 ## Native replay
 
-Replay uses only current scope-aware private formats:
+Capture uses these current private formats:
 
 - direct Anthropic: `oven.anthropic.messages.assistant.v3`
-- compatible Anthropic Messages: `oven.anthropic.messages.assistant.v3`, scoped to the caller adapter ID
+- compatible Anthropic Messages: `oven.anthropic.messages.assistant.v3`, with caller adapter provenance
 - MiniMax: `oven.minimax.messages.assistant.v3`
 - Claude Platform on AWS: `oven.anthropic.aws.messages.assistant.v3`
 
-Each `NativeReplayArtifact` carries adapter identity plus a `NativeContextScope` made
-from the configured provider ID, exact model/resource ID, and an internally
-derived versioned SHA-256 `ResourceId`. Direct Anthropic and MiniMax hash the
-canonical endpoint and concrete Messages surface. Claude Platform on AWS also
-hashes region and workspace. An optional caller `native_context_discriminator` is
-combined into the hash but is never trusted as the complete resource identity.
-Endpoints, workspaces, discriminators, headers, and secrets are never copied
-into replay metadata. Foreign adapters and foreign scopes are reported
-separately and fall back to normalized reconstruction according to the declared
-replay policy. There is no legacy replay decoder.
+Artifacts retain source identity and routing provenance, but standard supported
+Messages blocks do not require matching providers, headers, endpoints, model
+IDs, or resource fingerprints. The target validates the supported source format
+and normalized semantics before deciding block eligibility; unknown custom
+formats are not guessed.
 
-Provider reasoning is replayed only from a matching, semantically valid current
-artifact. Normalized reconstruction never invents
-provider-authoritative reasoning state. Replay payloads remain bounded and
-omit model identity because identity now belongs to the core native-context scope.
+Signed visible `thinking` is distinct from encrypted `redacted_thinking`.
+Supported signed thinking can cross wire-model changes; redacted state requires
+equal known effective wire model IDs and target support. Portable siblings are
+retained when safe to separate. If a tool continuation needs omitted or missing
+native reasoning, it fails closed instead of reconstructing an invalid request.
+Ordinary tool history without required opaque state can normalize. The target
+can reject signatures or ciphertext even when local eligibility passes; there
+is no automatic HTTP 400 retry that removes reasoning. See the
+[core replay policy](../oven-sdk/README.md#native-replay-policy) for legacy
+evidence, format boundaries, and cache independence.
+
 Compatible endpoints use the same capture path: streamed thinking blocks are
 retained in the terminal artifact and replayed during tool-use continuations
 when the caller declares native replay support. Signature values, including an

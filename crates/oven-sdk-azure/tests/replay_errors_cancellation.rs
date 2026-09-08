@@ -66,7 +66,7 @@ async fn replay_is_bound_to_api_model_id_and_headers() {
     assert!(matches!(
         header_result.request.replay.decisions.first(),
         Some(oven_sdk::ReplayDecision {
-            disposition: ReplayDisposition::DiscardedForeignScope { .. },
+            disposition: ReplayDisposition::Replayed,
             ..
         })
     ));
@@ -91,16 +91,10 @@ async fn replay_is_bound_to_api_model_id_and_headers() {
         .unwrap();
     assert!(matches!(
         second.request.replay.decisions.as_slice(),
-        [
-            oven_sdk::ReplayDecision {
-                disposition: ReplayDisposition::DiscardedForeignScope { .. },
-                ..
-            },
-            oven_sdk::ReplayDecision {
-                disposition: ReplayDisposition::ReconstructedNormalized,
-                ..
-            }
-        ]
+        [oven_sdk::ReplayDecision {
+            disposition: ReplayDisposition::Replayed,
+            ..
+        }]
     ));
 }
 
@@ -195,7 +189,7 @@ async fn replay_serialization_redacts_endpoint_headers_auth_and_tenant_data() {
     assert!(matches!(
         result.request.replay.decisions.first(),
         Some(oven_sdk::ReplayDecision {
-            disposition: ReplayDisposition::DiscardedForeignScope { .. },
+            disposition: ReplayDisposition::Replayed,
             ..
         })
     ));

@@ -224,7 +224,7 @@ pub(crate) fn encode_compaction_request(
 fn encode_input(
     request: &Request,
     descriptor: &LanguageModelDescriptor,
-    scope: &NativeContextScope,
+    _scope: &NativeContextScope,
     policy: ReplayPolicy,
 ) -> Result<(Vec<JsonValue>, ReplayOutcome, Vec<String>), ModelError> {
     let mut input = request
@@ -309,33 +309,23 @@ fn encode_input(
                         disposition: ReplayDisposition::ReconstructedNormalized,
                     });
                 } else if let Some(artifact) = &turn.finish.native_replay {
-                    if artifact.adapter_id() != &descriptor.adapter_id {
-                        replay_outcome.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignAdapter {
-                                found: artifact.adapter_id().clone(),
-                                expected: descriptor.adapter_id.clone(),
-                            },
-                        });
-                    } else if artifact.scope() != scope {
-                        replay_outcome.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignScope {
-                                found: artifact.scope().clone(),
-                                expected: scope.clone(),
-                            },
-                        });
-                    } else if let Some(items) = replay::decode(artifact, &turn.message.content) {
+                    if let Some(items) = replay::decode(artifact, &turn.message.content) {
                         replay_outcome.decisions.push(ReplayDecision {
                             history_index,
                             disposition: ReplayDisposition::Replayed,
                         });
-                        replayed = Some(items);
+                        replayed = Some(oven_sdk::replay::eligible_responses_items(
+                            artifact,
+                            &descriptor.identity.model_id,
+                            descriptor.capabilities.replay.reasoning,
+                            items,
+                            &mut warnings,
+                        )?);
                     } else {
                         replay_outcome.decisions.push(ReplayDecision {
                             history_index,
                             disposition: ReplayDisposition::DiscardedInvalidPayload {
-                                reason: "Responses replay payload did not match normalized content"
+                                reason: "unsupported Responses replay format or payload does not match normalized content"
                                     .into(),
                             },
                         });
@@ -615,6 +605,11 @@ fn normalized_assistant(
     parts: &[AssistantPart],
     warnings: &mut Vec<String>,
 ) -> Result<Vec<JsonValue>, ModelError> {
+    if parts.iter().any(|part| matches!(part, AssistantPart::ToolCall(_)))
+        && parts.iter().any(|part| matches!(part, AssistantPart::Custom(custom) if matches!(custom.kind.as_str(), "openai.responses.reasoning_continuation" | "azure.openai.responses.reasoning_continuation")))
+    {
+        return Err(ModelError::replay("Responses tool continuation requires valid native reasoning state"));
+    }
     let mut output = Vec::new();
     let text = parts
         .iter()
@@ -641,6 +636,13 @@ fn normalized_assistant(
                 output.push(item);
             }
             AssistantPart::ToolResult(result) => output.push(function_output(result)?),
+            AssistantPart::Custom(part)
+                if part.kind == "openai.responses.reasoning_continuation" =>
+            {
+                warnings.push(
+                    "encrypted reasoning is unavailable for normalized reconstruction".into(),
+                );
+            }
             AssistantPart::Reasoning(_) => warnings.push(
                 "Responses normalized fallback omitted reasoning without encrypted replay state"
                     .into(),

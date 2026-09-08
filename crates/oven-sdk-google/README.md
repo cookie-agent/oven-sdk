@@ -71,8 +71,8 @@ GoogleModel::new(ModelConfig::new(
 
 The adapter never reads credentials or model metadata from the environment. It
 does not contain a Google model registry, exact-name catalog, prefix matcher, or
-generation inference. Changing only `ModelDeclaration.id` changes identity and
-replay compatibility, not capabilities, request validation, thinking mode, tool
+generation inference. Changing only `ModelDeclaration.id` changes local identity,
+not standard-block replay eligibility, capabilities, request validation, thinking mode, tool
 mode, media support, limits, or endpoint routing. `model_resource` explicitly
 controls the REST resource used on the wire.
 
@@ -111,11 +111,15 @@ behavior.
 - Provider server tools normalize to safe `CustomPart` values and grounding
   normalizes to `SourcePart`; opaque thought signatures remain private.
 - Native replay artifacts contain the exact Google model `Content` payload
-  directly in the current core 0.4 format. Their `NativeContextScope` contains a
-  versioned SHA-256 `ResourceId` derived internally from the canonical endpoint,
-  `generateContent` surface, and `model_resource`; raw scope inputs and credentials
-  are never exposed or trusted from caller data. There is no legacy replay decoder
-  or private format-version fallback.
+  in the supported current format. Source scope records provenance, not a
+  provider/header/model/endpoint gate for standard supported parts. Shared
+  Gemini/Vertex standard subsets are validated explicitly; unsupported custom
+  parts are not guessed. `thoughtSignature` carries opaque encrypted state and
+  requires equal known effective wire model IDs, derived from the actual
+  resource rather than a local declaration alias. Portable siblings remain when
+  safe to separate; required native tool continuations fail closed if that state
+  is missing or excluded. There is no legacy decoder or invented signature
+  recovery. See the [core replay policy](../oven-sdk/README.md#native-replay-policy).
 - Provider-native compaction is unsupported. A model declaration claiming
   `CompactionCapability::Native` is rejected during construction.
 - Every successful stream ends in exactly one `Finish`; EOF is not success.

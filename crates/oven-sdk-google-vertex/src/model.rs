@@ -225,6 +225,7 @@ pub struct GoogleVertexSettings {
 
 #[derive(Clone)]
 struct Config {
+    wire_model_id: ModelId,
     provider: ProviderConfig<VertexAuth>,
     settings: GoogleVertexSettings,
     descriptor: LanguageModelDescriptor,
@@ -339,6 +340,10 @@ impl GoogleVertexModel {
         base_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(Self {
             config: Arc::new(Config {
+                wire_model_id: ModelId::new(match &config.settings.resource {
+                    GoogleVertexResource::PublisherModel { model, .. } => model.clone(),
+                    GoogleVertexResource::Endpoint { endpoint } => endpoint.clone(),
+                }),
                 provider: config.provider,
                 settings: config.settings,
                 descriptor,
@@ -417,7 +422,7 @@ impl GoogleVertexModel {
                 descriptor,
                 descriptor.capabilities.replay.policy,
                 stream_function_call_arguments,
-                &self.config.settings.native_context_scope,
+                &self.config.wire_model_id,
             )?;
             let body = serde_json::to_vec(&encoded.body).map_err(|_| {
                 ModelError::invalid_request("could not serialize Vertex Gemini request")
@@ -520,9 +525,27 @@ impl GoogleVertexModel {
                     request_id,
                     request.stream_options.include_raw,
                     count,
+                    descriptor.capabilities.replay.capability
+                        == oven_sdk::ReplayCapability::Required
+                        && descriptor.capabilities.replay.reasoning,
                 )?;
                 if let Some(StreamPart::StreamStart { warnings }) = parts.first_mut() {
                     *warnings = encoded.warnings;
+                }
+                for part in &mut parts {
+                    if let StreamPart::Finish { finish } = part {
+                        finish.native_replay = finish
+                            .native_replay
+                            .take()
+                            .map(|artifact| {
+                                artifact
+                                    .with_source_wire_model_id(self.config.wire_model_id.clone())
+                            })
+                            .transpose()
+                            .map_err(|_| {
+                                ModelError::replay("invalid source wire model identity")
+                            })?;
+                    }
                 }
                 head.response_metadata.extend(metadata);
                 return Ok(StreamResponse::new(Box::pin(futures_util::stream::iter(
@@ -538,6 +561,12 @@ impl GoogleVertexModel {
                     descriptor.capabilities.replay.policy,
                     self.config.settings.native_context_scope.clone(),
                     stream_function_call_arguments,
+                )
+                .with_wire_model_id(self.config.wire_model_id.clone())
+                .with_required_reasoning(
+                    descriptor.capabilities.replay.capability
+                        == oven_sdk::ReplayCapability::Required
+                        && descriptor.capabilities.replay.reasoning,
                 ),
                 queue: VecDeque::from([Ok(StreamPart::StreamStart {
                     warnings: encoded.warnings,

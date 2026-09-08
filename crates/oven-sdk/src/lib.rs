@@ -10,6 +10,7 @@
 
 /// Runtime-neutral implementation helpers shared by provider adapters.
 pub mod provider_support;
+pub mod replay;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -3255,6 +3256,8 @@ pub enum NativeContextPayloadError {
 pub struct NativeReplayArtifact {
     adapter_id: AdapterId,
     scope: NativeContextScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_wire_model_id: Option<ModelId>,
     payload: JsonValue,
 }
 
@@ -3286,8 +3289,37 @@ impl NativeReplayArtifact {
         Ok(Self {
             adapter_id,
             scope,
+            source_wire_model_id: None,
             payload,
         })
+    }
+
+    /// Captures native state from a request whose scope records its actual wire model ID.
+    pub fn capture(
+        adapter_id: AdapterId,
+        scope: NativeContextScope,
+        payload: JsonValue,
+    ) -> Result<Self, ReplayPayloadError> {
+        let source_wire_model_id = scope.model_id.clone();
+        Self::new(adapter_id, scope, payload)?.with_source_wire_model_id(source_wire_model_id)
+    }
+
+    /// Attaches known request provenance. Omission is not evidence of model equality.
+    pub fn with_source_wire_model_id(
+        mut self,
+        model_id: ModelId,
+    ) -> Result<Self, ReplayPayloadError> {
+        model_id
+            .validate()
+            .map_err(|error| ReplayPayloadError::InvalidIdentity(error.to_string()))?;
+        self.source_wire_model_id = Some(model_id);
+        Ok(self)
+    }
+
+    /// Returns the actual source request model ID, when capture recorded it.
+    #[must_use]
+    pub fn source_wire_model_id(&self) -> Option<&ModelId> {
+        self.source_wire_model_id.as_ref()
     }
 
     /// Parses a JSON payload and creates a bounded artifact.
@@ -3346,10 +3378,14 @@ impl<'de> Deserialize<'de> for NativeReplayArtifact {
         struct WireArtifact {
             adapter_id: AdapterId,
             scope: NativeContextScope,
+            source_wire_model_id: Option<ModelId>,
             payload: JsonValue,
         }
         let wire = WireArtifact::deserialize(deserializer)?;
-        Self::new(wire.adapter_id, wire.scope, wire.payload).map_err(serde::de::Error::custom)
+        let mut artifact = Self::new(wire.adapter_id, wire.scope, wire.payload)
+            .map_err(serde::de::Error::custom)?;
+        artifact.source_wire_model_id = wire.source_wire_model_id;
+        Ok(artifact)
     }
 }
 

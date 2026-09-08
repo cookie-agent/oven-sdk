@@ -1,9 +1,9 @@
 # oven-sdk-openai
 
-Version 0.4.0 provides registry-free adapters for official OpenAI Chat
+This source tree provides registry-free adapters for official OpenAI Chat
 Completions, official OpenAI Responses, and explicitly configured
-OpenAI-compatible Chat endpoints, including explicitly declared official
-Responses provider-native compaction.
+OpenAI-compatible Chat and Responses endpoints. Provider-native compaction is
+available only through an explicitly declared official Responses surface.
 
 ```text
 cargo add oven-sdk-openai@0.4.0
@@ -11,11 +11,25 @@ cargo add oven-sdk-openai@0.4.0
 
 ## Registry-free construction
 
-Each concrete API surface has exactly one constructor:
+Construct the protocol and authentication surface explicitly:
 
 - `OpenAiChatModel::new(ModelConfig<OpenAiAuth, OpenAiChatSettings>)`
+- `OpenAiChatModel::new_no_auth(ModelConfig<(), OpenAiChatSettings>)`
 - `OpenAiResponsesModel::new(ModelConfig<OpenAiAuth, OpenAiResponsesSettings>)`
+- `OpenAiResponsesModel::new_compatible(ModelConfig<OpenAiCompatibleAuth, OpenAiResponsesSettings>, AdapterId)`
 - `OpenAiCompatibleChatModel::new(ModelConfig<OpenAiCompatibleAuth, OpenAiCompatibleChatSettings>)`
+
+`new_compatible` and `new_no_auth` are source-tree additions, not claims about the published
+0.4.0 version in the install command above. Depend on a committed revision
+containing them until a release includes them. For `new_compatible`, the caller supplies the adapter ID,
+provider/model identity, base endpoint, and capability declarations. Bearer,
+header-provider, and no-auth endpoints use the same Responses encoder and SSE
+decoder, including declared tool calls and block-aware native replay. The server must
+actually implement that protocol; construction does not probe feature support.
+
+`new_no_auth` constructs the official Chat codec directly with unit auth. Its
+requests and captured artifacts retain the official Chat adapter identity;
+there is no attribution-rewriting wrapper or fake credential.
 
 There is no OpenAI factory, default `model()` surface, registry, model catalog,
 compatible baseline, provider preset, endpoint inference, credential discovery,
@@ -62,14 +76,15 @@ adapter ID, query parameters, request-ID headers, and SSE strictness.
 `ModelCapabilities.compaction` is also required. Chat and compatible Chat reject
 `Native` at construction. Official Responses requires the capability to agree
 exactly with `OpenAiResponsesSettings.compaction`: `Unsupported` or the explicit
-`OpenAiResponsesCompaction::V1` standalone surface.
+`OpenAiResponsesCompaction::V1` standalone surface. Compatible Responses requires
+both declarations to be unsupported and rejects native compaction at construction.
 
 Authentication and endpoints are explicit. The crate never reads environment
 variables. Official OpenAI authentication uses `OpenAiAuth`; compatible
 endpoints use `OpenAiCompatibleAuth` for no auth, Bearer auth, or a caller-owned
 header provider. Dynamic header/auth providers require a non-secret
-`routing_discriminator` in the surface settings so replay cannot cross a
-caller-defined backend or account boundary. Protected transport/auth headers
+`routing_discriminator` in the surface settings to record routing provenance.
+It is not an identity gate for standard supported replay blocks. Protected transport/auth headers
 cannot be overridden through ordinary provider headers.
 
 ## Mapping from models.dev
@@ -100,7 +115,9 @@ by the declared capabilities.
 
 Official endpoint options share `provider_options["openai"]`, with nested
 `chat` and `responses` members. Compatible extra fields use
-`provider_options["openai_compatible"]`. Provider-defined scalar labels such as
+`provider_options["openai_compatible"]` on compatible Chat. Compatible Responses
+uses the typed `openai.responses` options, not compatible Chat's `extra_body`.
+Provider-defined scalar labels such as
 reasoning effort/mode, service tier, verbosity, and truncation remain `String`
 values and are forwarded unchanged. Compatible `extra_body` is extension-only:
 it rejects every normalized or structural request key, including model,
@@ -121,22 +138,25 @@ text/reasoning/tool lifecycles, finalized calls exactly once, and one terminal
 errors are typed stream errors. Responses requires a terminal completed or
 incomplete event and treats terminal `response.output` as authoritative.
 
-Replay artifacts use only the current private formats:
+Capture uses the current private formats:
 
 - `oven.openai.chat.assistant.v1`
 - `oven.openai.responses.output.v1`
 
-Replay compatibility requires both the adapter ID and the full provider/model/
-resource scope. Resource IDs use a versioned SHA-256 fingerprint over the
-canonical endpoint, official organization/project, static routing headers,
-structural settings, and explicit dynamic-routing discriminator; secrets are
-never serialized into the scope. Foreign adapters/scopes, malformed payloads,
-and semantic mismatches are reported and reconstructed from normalized history;
-no legacy or scope-less format is decoded. Responses replay validates an exact
-ordered allow-list of message, reasoning, and function-call items. Part
-boundaries, order, required fields, and encrypted reasoning continuation hashes
-must match normalized content; merge/split/reorder, stripped or replaced
-encrypted state, unknown fields, and unknown items are rejected.
+Standard supported Chat and Responses blocks are selected by target codec
+support, not source adapter identity or provider/model/header/endpoint scope
+equality. The supported OpenAI and Azure formats can exchange their standard
+subsets; unknown custom formats are not guessed. Source payload integrity,
+ordered content, and normalized semantics must still validate.
+
+Responses `encrypted_content` requires equal known effective wire model IDs and
+target reasoning support. Portable message siblings can survive exclusion of
+ineligible encrypted reasoning when no required continuation is lost. Ordinary
+tool-only history can normalize without an artifact; required native reasoning
+or signature state cannot. Missing source identity or legacy missing evidence
+does not provide magic recovery. The target can reject eligible crypto even for
+the same wire ID, and the SDK never retries an HTTP 400 by stripping reasoning.
+See the [core replay policy](../oven-sdk/README.md#native-replay-policy).
 
 ## Provider-native Responses compaction
 
@@ -145,7 +165,7 @@ When an official Responses declaration explicitly sets both
 `OpenAiResponsesModel` implements the core
 `validate_compaction`, `supports_compaction`, and `compact` contract with one
 `POST /responses/compact` call. Unsupported declarations fail before I/O.
-Chat and compatible Chat never expose native compaction.
+Chat, compatible Chat, and compatible Responses never expose native compaction.
 
 Compaction translates the complete normalized history using the same strict
 Responses replay rules and accepts typed `OpenAiResponsesCompactionOptions` on
@@ -219,7 +239,7 @@ especially:
   [`streaming-tool-call-tracker.ts`](https://github.com/vercel/ai/blob/e84b8bc8154030cdb7469b0e0b8cd8b9354f19a0/packages/provider-utils/src/streaming-tool-call-tracker.ts)
 
 **Coverage gaps.** Hosted tools may be captured from terminal Responses output,
-but strict same-adapter replay accepts only the normalized message, reasoning,
+but the supported Responses replay subset accepts only normalized message, reasoning,
 and function-call allow-list. Logprobs, conversations, `store: true`, background
 mode, realtime, embeddings, image/speech APIs, automatic capability probes,
 catalog integration, and provider presets are out of scope. Vercel's compared

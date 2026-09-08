@@ -9,7 +9,7 @@ modalities, exact media rules, replay/cancellation/compaction declarations, and
 provider-specific structural settings. Model names never infer behavior.
 
 The SDK owns normalized contracts, typed streaming, strict completion,
-structured errors, cancellation, opaque scope-aware replay, and bounded
+structured errors, cancellation, validated block-aware replay, and bounded
 provider-native context compaction. The calling
 harness owns persistence, routing, retries, fallback, environment lookup,
 permissions, approvals, tool execution, and the agent loop.
@@ -37,6 +37,21 @@ contract and compile together. OpenAI Responses and Azure OpenAI Responses V1
 implement provider-native compaction; other provider surfaces explicitly
 declare native compaction unsupported and reject it before provider I/O.
 
+The current source tree also provides
+`OpenAiResponsesModel::new_compatible(config, adapter_id)` for explicitly
+configured Responses-protocol endpoints using bearer, caller-provided headers,
+or no authentication. It supports declared tools and block-aware native replay, but
+not native compaction. This constructor is not part of the historical release
+matrix above; see the [OpenAI crate README](crates/oven-sdk-openai/README.md).
+
+`OpenAiChatModel::new_no_auth(config)` directly constructs the official Chat
+codec without configured authentication. No attribution wrapper is needed.
+Current replay preserves standard supported blocks across routing and identity
+changes; encrypted reasoning additionally requires equal known effective wire
+model IDs. Required continuation state cannot silently normalize away. See the
+[native replay policy](crates/oven-sdk/README.md#native-replay-policy) for format
+support, legacy evidence, target rejection, and separate compaction scopes.
+
 ## Architecture
 
 - One configured `LanguageModel` represents one exact provider offering.
@@ -46,9 +61,9 @@ declare native compaction unsupported and reject it before provider I/O.
   MIME/source media rules, cancellation, compaction, and replay semantics.
 - `Request::validate_for` checks tool, sampling, output, reasoning, structured
   output, history, media, and capability dependencies before network I/O.
-- `NativeReplayArtifact` and 32 MiB `NativeContextWindow` values are bounded,
-  payload-redacted, and tied to an exact `NativeContextScope` containing
-  provider, model, and resource identity.
+- `NativeReplayArtifact` records source provenance and wire identity for bounded,
+  payload-redacted block replay. The separate 32 MiB `NativeContextWindow`
+  retains exact provider/model/resource scope checks for compaction.
 - `LanguageModel::compact` is object-safe; default validation rejects
   unsupported compaction before I/O, and conformance covers cancellation and
   native-context round trips.
@@ -56,12 +71,13 @@ declare native compaction unsupported and reject it before provider I/O.
   lookup, automatic catalog access, or model-name inference.
 - `oven-sdk-cohere` implements native v2 Chat tools, parallel calls, tool plans,
   thinking, citations, exact image rules, structured output, strict tools, SSE,
-  usage/errors, cancellation, and scoped replay.
+  usage/errors, cancellation, and validated native replay.
 - `oven-sdk-open-responses` implements only the standardized item/event
   protocol over a caller-supplied bearer endpoint; its Hugging Face profile does
   not add a catalog, probes, model rewriting, or OpenAI-only hosted tools.
 - `StreamPart::ApprovalRequested` remains assistant output and is collected as
   `AssistantPart::ToolApproval`; the harness owns approval decisions.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the normative contract and provider
-construction matrix.
+See the [core contract](crates/oven-sdk/README.md) and individual provider crate
+READMEs, including [OpenAI construction](crates/oven-sdk-openai/README.md#registry-free-construction),
+for explicit configuration and constructor requirements.

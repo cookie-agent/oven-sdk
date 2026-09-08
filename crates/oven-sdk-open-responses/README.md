@@ -70,16 +70,16 @@ and
   arguments-done event before item completion; URL annotations become ordered
   `Source` parts; assistant `phase` is retained in part metadata; unknown
   unprefixed events are rejected; and native replay captures only the current
-  private `open.responses.items.v2` format, tied to an exact cryptographic
-  `NativeContextScope`. The explicitly selected
+   private `open.responses.items.v2` format with source provenance, not an exact
+   origin-scope eligibility gate. The explicitly selected
   `HuggingFace` transport additionally accepts the router's pinned legacy
   `response.reasoning_text.delta/done` events and `reasoning_summary` content;
   the generic transport never accepts those variants.
 
-Replay resource IDs use the current
-`open.responses.native_context_scope.v2` namespace and are versioned SHA-256
-fingerprints over the full endpoint, provider/model identity, declared
-capabilities, transport/profile/routing, wire settings, resolved
-authentication, and caller headers. Raw secrets never appear in descriptors,
-resource IDs, diagnostics, or debug output. Legacy v1 private replay payloads
-are not decoded.
+Standard supported replay blocks are not restricted by origin provider, model,
+endpoint, header, or deployment fingerprints. Only explicitly supported formats
+are decoded; this is not a promise to translate arbitrary OpenAI or custom
+reasoning codecs. Integrity and continuation requirements remain mandatory;
+see the [core replay policy](../oven-sdk/README.md#native-replay-policy).
+Raw secrets never appear in diagnostics or debug output. Legacy v1 private
+replay payloads are not decoded.

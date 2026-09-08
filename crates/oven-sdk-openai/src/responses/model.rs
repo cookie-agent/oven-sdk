@@ -11,9 +11,11 @@ use oven_sdk::{
 
 use crate::{
     configuration::{
-        OpenAiAuth, OpenAiResponsesSettings, build_client, canonical_endpoint,
-        header_scope_component, official_base_headers, official_headers, replay_resource_id,
-        validate_responses_declaration, validate_routing_discriminator,
+        OpenAiAuth, OpenAiCompatibleAuth, OpenAiResponsesSettings, build_client,
+        canonical_endpoint, compatible_base_headers, compatible_headers,
+        header_map_scope_component, header_scope_component, official_base_headers,
+        official_headers, replay_resource_id, validate_responses_declaration,
+        validate_routing_discriminator,
     },
     error::classify_error,
     responses::{compaction, request, state::State},
@@ -39,7 +41,9 @@ impl OpenAiResponsesModel {
         config.validate()?;
         validate_responses_declaration(&config.model.capabilities, config.settings.compaction)?;
         validate_routing_discriminator(
-            config.provider.headers.dynamic_headers.is_some(),
+            config.provider.headers.dynamic_headers.is_some()
+                && config.settings.compaction
+                    == crate::configuration::OpenAiResponsesCompaction::V1,
             config.settings.routing_discriminator.as_deref(),
         )?;
         let adapter_id = AdapterId::new(OPENAI_RESPONSES_ADAPTER_ID);
@@ -78,7 +82,60 @@ impl OpenAiResponsesModel {
                 descriptor,
                 scope,
                 api: config.provider.api.as_url().to_string(),
-                auth: config.provider.auth,
+                auth: Authentication::Official(config.provider.auth),
+                headers: config.provider.headers,
+                base_headers,
+                client,
+                timeouts: config.settings.timeouts,
+            }),
+        })
+    }
+
+    /// Constructs a Responses-protocol compatible endpoint with caller-owned identity
+    /// and bearer, header-provider, or no authentication. Native compaction is not supported.
+    pub fn new_compatible(
+        config: ModelConfig<OpenAiCompatibleAuth, OpenAiResponsesSettings>,
+        adapter_id: AdapterId,
+    ) -> Result<Self, ModelError> {
+        config.validate()?;
+        if config.settings.compaction
+            != crate::configuration::OpenAiResponsesCompaction::Unsupported
+        {
+            return Err(ModelError::invalid_request(
+                "compatible Responses does not support native compaction",
+            ));
+        }
+        validate_responses_declaration(&config.model.capabilities, config.settings.compaction)?;
+        validate_routing_discriminator(false, config.settings.routing_discriminator.as_deref())?;
+        let descriptor = LanguageModelDescriptor::new(
+            ModelIdentity::new(config.provider.id.clone(), config.model.id.clone())?,
+            adapter_id.clone(),
+            config.model.capabilities.clone(),
+        )?;
+        let resource_id = replay_resource_id(&[
+            &canonical_endpoint(config.provider.api.as_url()),
+            adapter_id.as_str(),
+            config
+                .settings
+                .routing_discriminator
+                .as_deref()
+                .unwrap_or(""),
+            &header_scope_component(&config.provider.headers),
+            "compatible_responses",
+        ])?;
+        let scope = NativeContextScope::new(
+            descriptor.identity.provider_id.clone(),
+            descriptor.identity.model_id.clone(),
+            resource_id,
+        )?;
+        let client = build_client(config.settings.client, &config.settings.timeouts)?;
+        let base_headers = compatible_base_headers(&config.provider.headers)?;
+        Ok(Self {
+            runtime: Arc::new(Runtime {
+                descriptor,
+                scope,
+                api: config.provider.api.as_url().to_string(),
+                auth: Authentication::Compatible(config.provider.auth),
                 headers: config.provider.headers,
                 base_headers,
                 client,
@@ -99,11 +156,47 @@ struct Runtime {
     descriptor: LanguageModelDescriptor,
     scope: NativeContextScope,
     api: String,
-    auth: OpenAiAuth,
+    auth: Authentication,
     headers: oven_sdk::HeaderConfig,
     base_headers: HeaderMap,
     client: reqwest::Client,
     timeouts: OpenAiTimeouts,
+}
+
+#[derive(Clone)]
+enum Authentication {
+    Official(OpenAiAuth),
+    Compatible(OpenAiCompatibleAuth),
+}
+
+impl Runtime {
+    fn request_replay_scope(&self, headers: &HeaderMap) -> Result<NativeContextScope, ModelError> {
+        if matches!(self.auth, Authentication::Official(_)) {
+            return Ok(self.scope.clone());
+        }
+        // Resolve routing/auth callbacks once, then bind replay to the exact headers sent.
+        let resource_id = replay_resource_id(&[
+            "compatible-responses-effective-headers-v1",
+            self.scope.resource_id.as_str(),
+            &header_map_scope_component(headers),
+        ])?;
+        NativeContextScope::new(
+            self.scope.provider_id.clone(),
+            self.scope.model_id.clone(),
+            resource_id,
+        )
+    }
+
+    fn request_headers(&self, context: &oven_sdk::HeaderContext) -> Result<HeaderMap, ModelError> {
+        match &self.auth {
+            Authentication::Official(auth) => {
+                official_headers(auth, &self.base_headers, &self.headers, context)
+            }
+            Authentication::Compatible(auth) => {
+                compatible_headers(auth, &self.base_headers, &self.headers, context)
+            }
+        }
+    }
 }
 
 impl LanguageModel for OpenAiResponsesModel {
@@ -165,19 +258,12 @@ impl LanguageModel for OpenAiResponsesModel {
             }
             let descriptor = self.runtime.descriptor.clone();
             let policy = descriptor.capabilities.replay.policy;
-            let encoded = request::encode_request(
-                &request_value,
-                &options,
-                &descriptor,
-                &self.runtime.scope,
-                policy,
-            )?;
-            let headers = official_headers(
-                &self.runtime.auth,
-                &self.runtime.base_headers,
-                &self.runtime.headers,
-                &request_value.header_context,
-            )?;
+            let headers = self
+                .runtime
+                .request_headers(&request_value.header_context)?;
+            let scope = self.runtime.request_replay_scope(&headers)?;
+            let encoded =
+                request::encode_request(&request_value, &options, &descriptor, &scope, policy)?;
             let send = self
                 .runtime
                 .client
@@ -227,11 +313,7 @@ impl LanguageModel for OpenAiResponsesModel {
                 bytes: Box::pin(response.bytes_stream()),
                 parser: crate::sse::Parser::new("OpenAI SSE contains invalid UTF-8")
                     .clear_name_on_empty_event(),
-                state: State::new(
-                    descriptor.adapter_id.clone(),
-                    self.runtime.scope.clone(),
-                    policy,
-                ),
+                state: State::new(descriptor.adapter_id.clone(), scope, policy),
                 queue: VecDeque::from([Ok(StreamPart::StreamStart {
                     warnings: encoded.warnings,
                 })]),
@@ -319,12 +401,9 @@ impl LanguageModel for OpenAiResponsesModel {
                     .with_stage(ErrorStage::NativeContextEncode)
             })?;
             compaction::validate_request_size(body.len())?;
-            let headers = official_headers(
-                &self.runtime.auth,
-                &self.runtime.base_headers,
-                &self.runtime.headers,
-                &compaction_request.request.header_context,
-            )?;
+            let headers = self
+                .runtime
+                .request_headers(&compaction_request.request.header_context)?;
             let send = self
                 .runtime
                 .client

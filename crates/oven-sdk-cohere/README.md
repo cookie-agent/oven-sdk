@@ -41,8 +41,8 @@ and
   IDs never select behavior; stream EOF before `message-end` is an error;
   provider failures use structured `ModelError`; every successful stream ends
   in exactly one `Finish`; cancellation is explicitly local-only; and native
-  assistant-message replay is bounded and bound to an exact
-  `NativeContextScope`. Cohere declares `CompactionCapability::Unsupported`,
+  assistant-message replay is bounded and validated by supported format and
+  semantics, not source scope equality. Cohere declares `CompactionCapability::Unsupported`,
   rejects native-context requests before network I/O, and rejects model
   declarations that claim native compaction. Normalized
   `reasoning_effort` values are accepted only through caller-configured
@@ -58,10 +58,10 @@ and
   replay is not declared, thinking blocks remain normalized output but are
   omitted from native capture and exact native replay.
 
-Replay resource IDs are versioned SHA-256 fingerprints over the exact endpoint,
-provider/model identity, capabilities, all Cohere settings including transport
-timeouts and reasoning-effort mappings, and resolved caller
-headers/authentication. Raw tokens and header values are never exposed in
-descriptors, resource IDs, diagnostics, or debug output. Optional replay
+Replay scope retains provenance, but standard supported blocks are not rejected
+because provider/model IDs, endpoints, headers, or resource fingerprints differ.
+Unknown custom formats need explicit target support. Raw tokens and header
+values are not exposed in diagnostics or debug output. See the
+[core replay policy](../oven-sdk/README.md#native-replay-policy). Optional replay
 capture discards an oversized artifact with a safe provider decision while
 preserving `Finish`; required replay capture fails closed.

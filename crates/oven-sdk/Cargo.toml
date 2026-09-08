@@ -12,6 +12,8 @@ readme = "README.md"
 name = "oven_sdk"
 
 [dependencies]
+base64.workspace = true
+sha2.workspace = true
 bitflags.workspace = true
 bytes.workspace = true
 futures-core.workspace = true

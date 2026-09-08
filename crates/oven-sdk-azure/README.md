@@ -147,7 +147,7 @@ native encoding and decoding failures use `NativeContextEncode` and
 
 ## Scope and replay
 
-Core 0.4 `NativeContextScope` is shared by native replay and compaction. For V1
+`NativeContextScope` records provenance for replay and scopes compaction. For V1
 native compaction the versioned resource fingerprint binds the provider,
 deployment, canonical endpoint, exact V1 route and Responses surface, revision,
 capabilities, static routing headers, compaction settings, and the explicit
@@ -155,16 +155,32 @@ routing discriminator. Resolved credentials and dynamic header values are not
 serialized or fingerprinted; the caller-supplied discriminator represents any
 behavior-affecting dynamic route.
 
-Private replay formats are current positive allow lists only:
+Ordinary Azure replay does not require `AzureOpenAiRevision`. Supplied revision
+metadata is still validated, and complete deployment metadata remains mandatory
+for native compaction. Azure Chat supports native text/tool replay, but rejects
+provider-authoritative reasoning replay declarations.
+
+Capture uses current positive allow-list formats:
 
 - `oven.azure.openai.chat.assistant.v4`
 - `oven.azure.openai.responses.output.v4`
 
-The native compact-window format is
-`oven.azure.openai.responses.compaction.v1`. No legacy, scope-less, v3 replay,
-or alternate compact-window shape is decoded. Foreign adapters/scopes, malformed
-payloads, unknown items/fields, duplicate IDs, semantic mismatches, and forged
-fingerprints fail closed or reconstruct only normalized replay history.
+Standard supported Chat/Responses blocks can replay across providers, headers,
+endpoints, model identities, and changed or absent deployment revisions. These
+scope differences are not eligibility gates. OpenAI and Azure standard formats
+are decoded explicitly; unknown custom formats are not inferred.
+Responses encrypted reasoning requires equal known effective wire model IDs
+and target format support. Integrity checks remain mandatory. An ordinary
+fingerprint or tool call does not imply required encrypted continuation state:
+tool-only history may normalize, but missing or altered required state fails
+closed. See the [core replay policy](../oven-sdk/README.md#native-replay-policy).
+
+The native compact-window format remains
+`oven.azure.openai.responses.compaction.v1`, with exact adapter/scope validation.
+No alternate compact-window shape is decoded. Ordinary replay portability does
+not relax compaction, cache, or request-route constraints. Equal wire IDs do not
+guarantee that another endpoint accepts encrypted state, and provider rejection
+does not trigger a hidden reasoning-stripping retry.
 
 ## Validation, media, and lifecycle
 

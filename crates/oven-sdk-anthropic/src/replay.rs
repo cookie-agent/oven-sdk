@@ -8,10 +8,17 @@ use crate::wire::Protocol;
 pub(crate) fn decode(
     artifact: &NativeReplayArtifact,
     normalized: &[AssistantPart],
-    protocol: Protocol,
+    _protocol: Protocol,
 ) -> Result<Vec<JsonValue>, &'static str> {
     let root = artifact.payload();
-    if root.get("format").and_then(JsonValue::as_str) != Some(protocol.replay_format()) {
+    if !matches!(
+        root.get("format").and_then(JsonValue::as_str),
+        Some(
+            "oven.anthropic.messages.assistant.v3"
+                | "oven.anthropic.aws.messages.assistant.v3"
+                | "oven.minimax.messages.assistant.v3"
+        )
+    ) {
         return Err("Messages replay format is invalid");
     }
     if root.pointer("/message/role").and_then(JsonValue::as_str) != Some("assistant")
@@ -41,7 +48,10 @@ pub(crate) fn decode(
 fn authoritative_reasoning_is_well_formed(content: &[JsonValue]) -> bool {
     content.iter().all(
         |block| match block.get("type").and_then(JsonValue::as_str) {
-            Some("thinking") => block.get("thinking").and_then(JsonValue::as_str).is_some(),
+            Some("thinking") => {
+                block.get("thinking").and_then(JsonValue::as_str).is_some()
+                    && block.get("signature").is_none_or(JsonValue::is_string)
+            }
             Some("redacted_thinking") => block.get("data").is_some(),
             _ => true,
         },

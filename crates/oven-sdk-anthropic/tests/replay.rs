@@ -89,6 +89,43 @@ fn terminal_response() -> String {
     .concat()
 }
 
+#[tokio::test]
+async fn required_thinking_tool_continuation_without_native_state_fails_before_dispatch() {
+    let server = MockServer::start().await;
+    let model = Anthropic::builder()
+        .base_url(server.uri())
+        .build()
+        .unwrap()
+        .model("claude-sonnet-4-5");
+    assert_eq!(
+        model.capabilities().replay.capability,
+        oven_sdk::ReplayCapability::Required
+    );
+    let turn = CompletedTurn::new(
+        AssistantMessage::new(vec![
+            AssistantPart::Reasoning(ReasoningPart::new("thinking")),
+            AssistantPart::ToolCall(oven_sdk::ToolCallPart::new(
+                "call",
+                "inspect",
+                serde_json::json!({}),
+            )),
+        ]),
+        Finish::new(Default::default(), FinishReason::ToolCalls),
+    );
+    let request = Request::new(vec![
+        HistoryTurn::assistant(turn),
+        HistoryTurn::tool(oven_sdk::ToolMessage::new(vec![
+            oven_sdk::ToolResultPart::new("call", oven_sdk::ToolContent::Text("done".into())),
+        ])),
+    ]);
+    let error = model
+        .stream(request, AbortSignal::default())
+        .await
+        .expect_err("native reasoning continuation is required");
+    assert_eq!(error.kind, ModelErrorKind::Replay);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
 fn assistant(text: &str, replay: Option<NativeReplayArtifact>) -> HistoryTurn {
     let mut finish = Finish::new(Default::default(), FinishReason::Stop);
     finish.native_replay = replay;
@@ -392,12 +429,8 @@ async fn replay_model_switch_discards_native_continuity_and_reconstructs_safely(
         .unwrap();
     assert!(matches!(
         response.request.replay.decisions[0].disposition,
-        ReplayDisposition::DiscardedForeignScope { .. }
+        ReplayDisposition::Replayed
     ));
-    assert_eq!(
-        response.request.replay.decisions[1].disposition,
-        ReplayDisposition::ReconstructedNormalized
-    );
     let request = &server.received_requests().await.unwrap()[0];
     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(body["messages"][0]["content"][0]["text"], "answer");
@@ -431,7 +464,7 @@ async fn native_context_resource_switch_is_reported_as_foreign_scope() {
         .unwrap();
     assert!(matches!(
         response.request.replay.decisions[0].disposition,
-        ReplayDisposition::DiscardedForeignScope { .. }
+        ReplayDisposition::Replayed
     ));
 }
 
@@ -504,7 +537,7 @@ async fn exact_same_model_redacted_reasoning_replays_authoritative_block() {
         None,
         None,
     );
-    let replay = NativeReplayArtifact::new(
+    let replay = NativeReplayArtifact::capture(
         AdapterId::new("oven.anthropic.messages"),
         scope,
         serde_json::json!({

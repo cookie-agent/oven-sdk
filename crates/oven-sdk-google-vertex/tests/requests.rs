@@ -29,6 +29,49 @@ fn publisher_resource() -> GoogleVertexResource {
 }
 
 #[tokio::test]
+async fn google_standard_tool_blocks_replay_with_matching_wire_result_ids() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_raw("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n", "text/event-stream")).mount(&server).await;
+    let call = ToolCallPart::new("native-call", "lookup", json!({}));
+    let mut finish = Finish::new(Default::default(), FinishReason::ToolCalls);
+    finish.native_replay = Some(NativeReplayArtifact::new(AdapterId::new("google-source"), NativeContextScope::new(oven_sdk::ProviderId::new("other"), oven_sdk::ModelId::new("other"), ResourceId::new("other").unwrap()).unwrap(), json!({"role":"model","parts":[{"functionCall":{"id":"native-call","name":"lookup","args":{}}}]})).unwrap());
+    let request = Request::new(vec![
+        HistoryTurn::assistant(CompletedTurn::new(
+            AssistantMessage::new(vec![AssistantPart::ToolCall(call)]),
+            finish,
+        )),
+        HistoryTurn::tool(ToolMessage::new(vec![ToolResultPart::new(
+            "native-call",
+            ToolContent::Text("result".into()),
+        )])),
+    ]);
+    let model = support::full_model(
+        &server.uri(),
+        "descriptor-alias",
+        publisher_resource(),
+        true,
+    );
+    let result = model
+        .complete(request, AbortSignal::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        result.request.replay.decisions[0].disposition,
+        ReplayDisposition::Replayed
+    );
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        body["contents"][0]["parts"][0]["functionCall"]["id"],
+        "native-call"
+    );
+    assert_eq!(
+        body["contents"][1]["parts"][0]["functionResponse"]["id"],
+        "native-call"
+    );
+}
+
+#[tokio::test]
 async fn tool_result_files_reject_during_request_validation() {
     let server = MockServer::start().await;
     let model = support::full_model(&server.uri(), "gemini-future", publisher_resource(), true);
@@ -499,12 +542,7 @@ async fn native_context_scope_and_provider_ids_are_authoritative() {
             .replay
             .decisions
             .iter()
-            .any(|decision| {
-                matches!(
-                    decision.disposition,
-                    ReplayDisposition::DiscardedForeignScope { .. }
-                )
-            })
+            .any(|decision| { matches!(decision.disposition, ReplayDisposition::Replayed) })
     );
     let requests = server.received_requests().await.unwrap();
     for request in &requests[1..] {
@@ -593,7 +631,7 @@ async fn replay_from_a_foreign_endpoint_is_reconstructed() {
     assert!(matches!(
         second.request.replay.decisions.first(),
         Some(oven_sdk::ReplayDecision {
-            disposition: ReplayDisposition::DiscardedForeignScope { .. },
+            disposition: ReplayDisposition::Replayed,
             ..
         })
     ));

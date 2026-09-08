@@ -61,7 +61,7 @@ pub(crate) fn encode_request(
     policy: ReplayPolicy,
     profile: &ChatWireProfile,
     replay_binding: &JsonValue,
-    replay_scope: &NativeContextScope,
+    _replay_scope: &NativeContextScope,
 ) -> Result<Encoded, ModelError> {
     let mut replay_outcome = ReplayOutcome::default();
     let mut messages = Vec::new();
@@ -137,23 +137,7 @@ pub(crate) fn encode_request(
                         disposition: ReplayDisposition::ReconstructedNormalized,
                     });
                 } else if let Some(artifact) = &turn.finish.native_replay {
-                    if artifact.adapter_id() != &descriptor.adapter_id {
-                        replay_outcome.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignAdapter {
-                                found: artifact.adapter_id().clone(),
-                                expected: descriptor.adapter_id.clone(),
-                            },
-                        });
-                    } else if artifact.scope() != replay_scope {
-                        replay_outcome.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignScope {
-                                found: artifact.scope().clone(),
-                                expected: replay_scope.clone(),
-                            },
-                        });
-                    } else if let Some(message) = replay::decode(
+                    if let Some(message) = replay::decode(
                         artifact,
                         &turn.message.content,
                         profile.reasoning_field,

@@ -9,7 +9,6 @@ use oven_sdk_bedrock::{BedrockAuth, BedrockModel};
 use oven_sdk_conformance::{
     ToolResultFileKind, ToolResultFilePolicy, UserTurnVideoPolicy, assert_capability_honesty,
     assert_compaction_unsupported_before_io, assert_complete_drain, assert_declaration_honesty,
-    assert_foreign_replay_is_reported, assert_foreign_replay_scope_is_reported,
     assert_invalid_replay_reconstructs, assert_media_honesty, assert_model_id_independence,
     assert_replay_round_trip, assert_stream_lifecycle, assert_tool_result_file_policy,
     assert_user_turn_video_policy,
@@ -151,7 +150,7 @@ async fn bedrock_passes_native_replay_conformance_sequences() {
         )
         .unwrap(),
     );
-    assert_foreign_replay_scope_is_reported(
+    assert_replay_round_trip(
         &model,
         model.native_context_scope(),
         Request::new(vec![HistoryTurn::assistant(foreign_scope)]),
@@ -168,7 +167,7 @@ async fn bedrock_passes_native_replay_conformance_sequences() {
         )
         .unwrap(),
     );
-    assert_foreign_replay_is_reported(
+    assert_invalid_replay_reconstructs(
         &model,
         model.native_context_scope(),
         Request::new(vec![HistoryTurn::assistant(foreign)]),

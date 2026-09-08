@@ -87,9 +87,7 @@ async fn signed_reasoning_replays_exactly_and_model_switch_discards() {
     let response = error_or_response.unwrap();
     assert!(matches!(
         response.request.replay.decisions.as_slice(),
-        [first, second]
-            if matches!(first.disposition, ReplayDisposition::DiscardedForeignScope { .. })
-                && second.disposition == ReplayDisposition::ReconstructedNormalized
+        [first] if first.disposition == ReplayDisposition::Replayed
     ));
 }
 

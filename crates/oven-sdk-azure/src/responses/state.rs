@@ -472,6 +472,13 @@ impl State {
         };
         let mut finish = Finish::new(std::mem::take(&mut self.usage), finish_reason);
         finish.response_metadata = std::mem::take(&mut self.response_metadata);
+        for part in self
+            .items
+            .values()
+            .filter_map(oven_sdk::replay::azure_responses_continuation)
+        {
+            parts.push(StreamPart::Custom { part });
+        }
         if self.policy != ReplayPolicy::Never {
             let items = std::mem::take(&mut self.items)
                 .into_values()
@@ -500,7 +507,7 @@ impl State {
                 "fingerprint":fingerprint
             });
             finish.native_replay = Some(
-                NativeReplayArtifact::new(
+                NativeReplayArtifact::capture(
                     self.adapter_id.clone(),
                     self.replay_scope.clone(),
                     payload,

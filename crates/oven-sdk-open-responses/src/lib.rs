@@ -647,11 +647,11 @@ fn encode_request(
     descriptor: &LanguageModelDescriptor,
     settings: &OpenResponsesSettings,
     binding: &JsonValue,
-    scope: &NativeContextScope,
+    _scope: &NativeContextScope,
 ) -> Result<Encoded, ModelError> {
     let mut input = Vec::new();
     let mut replay = ReplayOutcome::default();
-    let warnings = Vec::new();
+    let mut warnings = Vec::new();
     for (history_index, turn) in request.history.iter().enumerate() {
         match turn {
             HistoryTurn::System(message) => {
@@ -685,26 +685,6 @@ fn encode_request(
                         });
                         None
                     }
-                    Some(artifact) if artifact.adapter_id() != &descriptor.adapter_id => {
-                        replay.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignAdapter {
-                                found: artifact.adapter_id().clone(),
-                                expected: descriptor.adapter_id.clone(),
-                            },
-                        });
-                        None
-                    }
-                    Some(artifact) if artifact.scope() != scope => {
-                        replay.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignScope {
-                                found: artifact.scope().clone(),
-                                expected: scope.clone(),
-                            },
-                        });
-                        None
-                    }
                     Some(artifact) => match decode_replay(artifact, &turn.message.content, binding)
                     {
                         Some(items) => {
@@ -712,7 +692,13 @@ fn encode_request(
                                 history_index,
                                 disposition: ReplayDisposition::Replayed,
                             });
-                            Some(items)
+                            Some(oven_sdk::replay::eligible_responses_items(
+                                artifact,
+                                &descriptor.identity.model_id,
+                                descriptor.capabilities.replay.reasoning,
+                                items,
+                                &mut warnings,
+                            )?)
                         }
                         None => {
                             replay.decisions.push(ReplayDecision{history_index,disposition:ReplayDisposition::DiscardedInvalidPayload{reason:"Open Responses replay payload did not match normalized content".into()}});
@@ -2082,7 +2068,7 @@ impl State {
             let fingerprint = replay_fingerprint(&items)
                 .ok_or_else(|| event_error("could not fingerprint replay items", bytes))?;
             let payload = serde_json::json!({"format":REPLAY_FORMAT,"binding":self.binding,"items":items,"fingerprint":fingerprint});
-            match NativeReplayArtifact::new(self.adapter.clone(), self.scope.clone(), payload) {
+            match NativeReplayArtifact::capture(self.adapter.clone(), self.scope.clone(), payload) {
                 Ok(artifact) => {
                     finish.native_replay = Some(artifact);
                     finish.provider_metadata.insert(
@@ -3109,7 +3095,7 @@ fn normalized_semantics(parts: &[AssistantPart]) -> Option<JsonValue> {
 fn decode_replay(
     artifact: &NativeReplayArtifact,
     normalized: &[AssistantPart],
-    binding: &JsonValue,
+    _binding: &JsonValue,
 ) -> Option<Vec<JsonValue>> {
     let object = artifact.payload().as_object()?;
     let keys = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
@@ -3118,10 +3104,12 @@ fn decode_replay(
             .into_iter()
             .collect()
         || object.get("format")?.as_str()? != REPLAY_FORMAT
-        || object.get("binding")? != binding
     {
         return None;
     }
+    let binding = object.get("binding")?;
+    binding.get("version")?.as_str()?;
+    binding.get("sha256")?.as_str()?;
     let items = object.get("items")?.as_array()?.clone();
     let fingerprint = object.get("fingerprint")?.as_str()?;
     if replay_fingerprint(&items)?.as_str() != fingerprint {

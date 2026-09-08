@@ -366,7 +366,7 @@ impl State {
                 "finish_reason":self.finish_reason
             });
             finish.native_replay = Some(
-                NativeReplayArtifact::new(self.adapter_id.clone(), self.scope.clone(), payload)
+                NativeReplayArtifact::capture(self.adapter_id.clone(), self.scope.clone(), payload)
                     .map_err(|_| {
                         ModelError::replay("OpenAI Chat replay artifact exceeds its size limit")
                             .with_stage(ErrorStage::ReplayEncode)

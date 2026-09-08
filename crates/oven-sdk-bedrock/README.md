@@ -175,14 +175,19 @@ then `Finish(Error)`, then EOF. Transport, CRC, JSON, event-order, cancellation,
 and truncation failures never fabricate success.
 
 Native replay uses only the current `oven.bedrock.converse.assistant.v2` private
-format. The artifact's `NativeContextScope` binds provider identity, exact
-model ID, and a safe fingerprint of endpoint,
-region, reasoning wire format, signed-reasoning setting, and structured-output
-setting. The payload contains only strictly decoded assistant text, tool-use,
-and reasoning blocks. Extra, malformed, or ambiguous unions are rejected.
-Foreign adapter/scope and invalid payloads reconstruct normalized text/tools,
-omit authoritative reasoning, and record complete replay decisions. Earlier
-scope-less and `assistant.scoped.v1` replay formats are not decoded.
+format. Standard supported text, tool-use, and signed visible reasoning blocks
+are not restricted by origin provider, model, endpoint, header, region, or
+resource fingerprint. Redacted encrypted reasoning requires equal known
+effective wire model IDs and explicit target support. Signed and redacted
+reasoning are not interchangeable. Extra, malformed, or ambiguous unions fail
+validation, and unknown custom codecs are not guessed.
+
+Portable siblings survive safe filtering, but a required tool continuation
+cannot silently lose native reasoning. Ordinary text/tool history may normalize
+when native data is unavailable. Earlier scope-less and `assistant.scoped.v1`
+formats are not decoded. See the
+[core replay policy](../oven-sdk/README.md#native-replay-policy); matching wire
+IDs do not guarantee acceptance of encrypted state by another provider.
 Assistant-contained tool results are encoded independently of replay selection,
 so successful native replay preserves the following ordered user-role tool
 results instead of dropping them.
@@ -200,7 +205,7 @@ double-encoding vectors, temporary credentials, every-byte EventStream framing,
 CRC/length/header/truncation failures, huge decoder feeds, bounded partial
 frames, request translation, media boundaries, structured output,
 text/tool/reasoning streams, terminal draining, usage/request IDs, error
-taxonomy, strict native-context-scoped replay, safe reconstruction,
+taxonomy, validated block-aware replay, safe reconstruction,
 cancellation, conformance,
 and model-name independence including anthropic-looking opaque IDs.
 
@@ -246,15 +251,16 @@ Intentional divergences:
   post-terminal EventStream data is an error.
 - oven-sdk uses typed `ModelError` stages, byte counts, request IDs,
   retry-after, bounded sanitized bodies, explicit declarations,
-  native-context-scoped replay,
+  validated block-aware replay,
   phase timeouts, and local cancellation semantics.
 - oven-sdk performs no retry or fallback, including no automatic retry for
   `ModelNotReadyException`.
 - oven-sdk never auto-downloads URLs and rejects non-S3 media URLs locally.
 - Native structured output is explicit and never injects JSON instructions or
   creates a synthetic `json` tool.
-- Signed/redacted reasoning is replay-only authoritative state bound to the
-  exact provider/model/resource scope.
+- Signed/redacted reasoning is replay-only authoritative state. Signed visible
+  blocks and encrypted redacted blocks have distinct eligibility; only the
+  latter requires equal known effective wire model IDs.
 
 Normalization differences:
 

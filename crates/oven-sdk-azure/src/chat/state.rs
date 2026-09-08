@@ -384,7 +384,7 @@ impl State {
                 "message":message
             });
             finish.native_replay = Some(
-                NativeReplayArtifact::new(
+                NativeReplayArtifact::capture(
                     self.adapter_id.clone(),
                     self.replay_scope.clone(),
                     payload,

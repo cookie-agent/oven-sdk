@@ -19,6 +19,67 @@ use wiremock::MockServer;
 
 struct ContextHeaders(Arc<Mutex<Vec<HeaderContext>>>);
 
+#[tokio::test]
+async fn no_auth_chat_captures_official_identity_and_does_not_rebrand_invalid_formats() {
+    let server = MockServer::start().await;
+    common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+    let config = common::official_chat_config(&server, "wire-model");
+    let model = oven_sdk_openai::OpenAiChatModel::new_no_auth(oven_sdk::ModelConfig::new(
+        oven_sdk::ProviderConfig::new(
+            oven_sdk::ProviderId::new("custom-provider"),
+            config.provider.api,
+            (),
+            config.provider.headers,
+        )
+        .unwrap(),
+        config.model,
+        config.settings,
+    ))
+    .unwrap();
+    let first = model
+        .complete(Request::new(vec![]), AbortSignal::default())
+        .await
+        .unwrap()
+        .turn;
+    let artifact = first.finish.native_replay.as_ref().unwrap();
+    assert_eq!(artifact.adapter_id(), &model.descriptor().adapter_id);
+    assert_eq!(artifact.adapter_id().as_str(), "oven.openai.chat");
+    assert_eq!(
+        artifact.source_wire_model_id().unwrap().as_str(),
+        "wire-model"
+    );
+    let mut payload = artifact.payload().clone();
+    payload["format"] = "unsupported.format".into();
+    let mut changed = first.clone();
+    changed.finish.native_replay = Some(
+        oven_sdk::NativeReplayArtifact::new(
+            artifact.adapter_id().clone(),
+            artifact.scope().clone(),
+            payload,
+        )
+        .unwrap(),
+    );
+    let result = model
+        .complete(
+            Request::new(vec![HistoryTurn::assistant(changed)]),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        result.request.replay.decisions[0].disposition,
+        oven_sdk::ReplayDisposition::DiscardedInvalidPayload { .. }
+    ));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| !request.headers.contains_key("authorization"))
+    );
+}
+
 impl HeaderProvider for ContextHeaders {
     fn headers(&self, context: &HeaderContext) -> Result<HeaderOverrides, ModelError> {
         self.0.lock().unwrap().push(context.clone());

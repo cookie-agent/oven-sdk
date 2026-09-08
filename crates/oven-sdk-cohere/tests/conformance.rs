@@ -7,7 +7,6 @@ use oven_sdk::{
 use oven_sdk_conformance::{
     ToolResultFileKind, ToolResultFilePolicy, UserTurnVideoPolicy,
     assert_compaction_unsupported_before_io, assert_complete_drain, assert_declaration_honesty,
-    assert_foreign_replay_is_reported, assert_foreign_replay_scope_is_reported,
     assert_invalid_replay_reconstructs, assert_media_honesty, assert_model_id_independence,
     assert_replay_artifact, assert_replay_round_trip, assert_tool_result_file_policy,
     assert_user_turn_video_policy,
@@ -92,7 +91,7 @@ async fn core_04_declaration_media_lifecycle_compaction_and_replay_conformance()
         )
         .unwrap(),
     );
-    assert_foreign_replay_is_reported(
+    assert_replay_round_trip(
         &first,
         &scope,
         Request::new(vec![HistoryTurn::assistant(foreign_adapter_turn)]),
@@ -115,7 +114,7 @@ async fn core_04_declaration_media_lifecycle_compaction_and_replay_conformance()
         )
         .unwrap(),
     );
-    assert_foreign_replay_scope_is_reported(
+    assert_replay_round_trip(
         &first,
         &scope,
         Request::new(vec![HistoryTurn::assistant(foreign_scope_turn)]),

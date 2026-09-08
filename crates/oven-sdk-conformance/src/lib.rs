@@ -1590,7 +1590,13 @@ fn validate_replay_log(
                 )?;
                 require_reconstruction(decisions, &mut cursor, index)?;
             }
-            Some(artifact) if artifact.adapter_id() != adapter_id => {
+            Some(artifact)
+                if artifact.adapter_id() != adapter_id
+                    && matches!(
+                        decisions.get(cursor).map(|decision| &decision.disposition),
+                        Some(ReplayDisposition::DiscardedForeignAdapter { .. })
+                    ) =>
+            {
                 require_replay_decision(
                     decisions,
                     &mut cursor,
@@ -1606,7 +1612,13 @@ fn validate_replay_log(
                 )?;
                 require_reconstruction(decisions, &mut cursor, index)?;
             }
-            Some(artifact) if artifact.scope() != expected_scope => {
+            Some(artifact)
+                if artifact.scope() != expected_scope
+                    && matches!(
+                        decisions.get(cursor).map(|decision| &decision.disposition),
+                        Some(ReplayDisposition::DiscardedForeignScope { .. })
+                    ) =>
+            {
                 require_replay_decision(
                     decisions,
                     &mut cursor,

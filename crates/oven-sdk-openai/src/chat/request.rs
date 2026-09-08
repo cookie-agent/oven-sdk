@@ -118,7 +118,7 @@ pub(crate) fn encode_request(
     request: &Request,
     options: &ParsedOptions,
     descriptor: &LanguageModelDescriptor,
-    scope: &NativeContextScope,
+    _scope: &NativeContextScope,
     policy: ReplayPolicy,
     profile: &ChatWireProfile,
 ) -> Result<Encoded, ModelError> {
@@ -198,23 +198,7 @@ pub(crate) fn encode_request(
                         disposition: ReplayDisposition::ReconstructedNormalized,
                     });
                 } else if let Some(artifact) = &turn.finish.native_replay {
-                    if artifact.adapter_id() != &descriptor.adapter_id {
-                        replay_outcome.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignAdapter {
-                                found: artifact.adapter_id().clone(),
-                                expected: descriptor.adapter_id.clone(),
-                            },
-                        });
-                    } else if artifact.scope() != scope {
-                        replay_outcome.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignScope {
-                                found: artifact.scope().clone(),
-                                expected: scope.clone(),
-                            },
-                        });
-                    } else if let Some(message) =
+                    if let Some(message) =
                         replay::decode(artifact, &turn.message.content, profile.reasoning_field)
                     {
                         replay_outcome.decisions.push(ReplayDecision {

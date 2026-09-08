@@ -18,6 +18,7 @@ use url::Url;
 use crate::{GOOGLE_GENERATE_CONTENT_ADAPTER_ID, error::classify_error};
 
 pub(crate) struct State {
+    wire_model_id: Option<oven_sdk::ModelId>,
     policy: ReplayPolicy,
     native_context_scope: NativeContextScope,
     native_parts: Vec<JsonValue>,
@@ -34,6 +35,7 @@ pub(crate) struct State {
 impl State {
     pub(crate) fn new(policy: ReplayPolicy, native_context_scope: NativeContextScope) -> Self {
         Self {
+            wire_model_id: None,
             policy,
             native_context_scope,
             native_parts: Vec::new(),
@@ -50,6 +52,11 @@ impl State {
 
     pub(crate) fn response_metadata(&self) -> &BTreeMap<String, JsonValue> {
         &self.response_metadata
+    }
+
+    pub(crate) fn with_wire_model_id(mut self, id: oven_sdk::ModelId) -> Self {
+        self.wire_model_id = Some(id);
+        self
     }
 
     pub(crate) fn set_request_id(&mut self, request_id: Option<String>) {
@@ -339,6 +346,10 @@ impl State {
                     self.native_context_scope.clone(),
                     payload,
                 )
+                .and_then(|artifact| match &self.wire_model_id {
+                    Some(id) => artifact.with_source_wire_model_id(id.clone()),
+                    None => Ok(artifact),
+                })
                 .map_err(|_| {
                     ModelError::replay("Google native replay artifact exceeds its size limit")
                         .with_stage(ErrorStage::ReplayEncode)

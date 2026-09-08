@@ -561,7 +561,7 @@ fn encode_request(
     descriptor: &LanguageModelDescriptor,
     settings: &CohereSettings,
     binding: &JsonValue,
-    scope: &NativeContextScope,
+    _scope: &NativeContextScope,
 ) -> Result<Encoded, ModelError> {
     let mut messages = Vec::new();
     let mut replay = ReplayOutcome::default();
@@ -629,26 +629,6 @@ fn encode_request(
                         replay.decisions.push(ReplayDecision {
                             history_index,
                             disposition: ReplayDisposition::NoArtifact,
-                        });
-                        None
-                    }
-                    Some(artifact) if artifact.adapter_id() != &descriptor.adapter_id => {
-                        replay.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignAdapter {
-                                found: artifact.adapter_id().clone(),
-                                expected: descriptor.adapter_id.clone(),
-                            },
-                        });
-                        None
-                    }
-                    Some(artifact) if artifact.scope() != scope => {
-                        replay.decisions.push(ReplayDecision {
-                            history_index,
-                            disposition: ReplayDisposition::DiscardedForeignScope {
-                                found: artifact.scope().clone(),
-                                expected: scope.clone(),
-                            },
                         });
                         None
                     }
@@ -1460,7 +1440,7 @@ impl CohereState {
             let fingerprint = replay_fingerprint(&message)
                 .ok_or_else(|| event_error("could not fingerprint Cohere replay message", bytes))?;
             let payload = serde_json::json!({"format":REPLAY_FORMAT,"binding":self.binding,"message":message,"fingerprint":fingerprint});
-            match NativeReplayArtifact::new(self.adapter.clone(), self.scope.clone(), payload) {
+            match NativeReplayArtifact::capture(self.adapter.clone(), self.scope.clone(), payload) {
                 Ok(artifact) => {
                     queue.push_back(Ok(StreamPart::Custom {
                         part: CustomPart::new(REPLAY_FINGERPRINT_KIND, fingerprint.into()),
@@ -1672,7 +1652,7 @@ fn reserve_tool_id(
 fn decode_replay(
     artifact: &NativeReplayArtifact,
     normalized: &[AssistantPart],
-    binding: &JsonValue,
+    _binding: &JsonValue,
     replay_reasoning: bool,
 ) -> Option<JsonValue> {
     let object = artifact.payload().as_object()?;
@@ -1682,10 +1662,12 @@ fn decode_replay(
             .into_iter()
             .collect()
         || object.get("format")?.as_str()? != REPLAY_FORMAT
-        || object.get("binding")? != binding
     {
         return None;
     }
+    let binding = object.get("binding")?;
+    binding.get("version")?.as_str()?;
+    binding.get("sha256")?.as_str()?;
     let message = object.get("message")?.clone();
     let fingerprint = object.get("fingerprint")?.as_str()?;
     if replay_fingerprint(&message)?.as_str() != fingerprint {
@@ -1703,11 +1685,16 @@ fn decode_replay(
     if normalized_fingerprint.as_slice() != [fingerprint] {
         return None;
     }
-    let normalized_messages = normalized_assistant(normalized, replay_reasoning).ok()?;
-    if normalized_messages.as_slice() != [message.clone()] {
+    let full = normalized_assistant(normalized, true).ok()?;
+    let without_reasoning = normalized_assistant(normalized, false).ok()?;
+    if full.as_slice() != [message.clone()] && without_reasoning.as_slice() != [message.clone()] {
         return None;
     }
-    Some(message)
+    if replay_reasoning {
+        Some(message)
+    } else {
+        without_reasoning.into_iter().next()
+    }
 }
 
 fn validate_endpoint(endpoint: &ApiEndpoint) -> Result<(), ModelError> {

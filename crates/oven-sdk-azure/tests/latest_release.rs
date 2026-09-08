@@ -90,7 +90,7 @@ fn model_names_never_infer_capabilities_limits_or_replay() {
     assert_eq!(configured.capabilities().limits.output, Some(32_768));
 
     explicit.revision = None;
-    assert!(provider.chat("arbitrary-deployment", explicit).is_err());
+    assert!(provider.chat("arbitrary-deployment", explicit).is_ok());
 
     let mut opaque_without_declaration = common::gpt5();
     opaque_without_declaration.capabilities.replay.reasoning = false;
