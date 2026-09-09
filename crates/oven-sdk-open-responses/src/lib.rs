@@ -3469,46 +3469,29 @@ fn classify_error(
     if let Some(delay) = parse_retry_after(headers, &[]) {
         error = error.with_retry_after(delay);
     }
-    if let Some(body) = sanitized_error_body(&value, body) {
+    if let Some(body) = oven_sdk::provider_support::sanitize_error_body(body, bytes, stage) {
         error = error.with_sanitized_body(body);
     }
     error
 }
 
-fn sanitized_error_body(value: &JsonValue, raw: &[u8]) -> Option<SanitizedBody> {
-    let error = value.get("error").unwrap_or(value);
-    if let Some(object) = error.as_object() {
-        let mut safe = serde_json::Map::new();
-        for key in ["type", "code", "param", "message"] {
-            if let Some(text) = object.get(key).and_then(JsonValue::as_str) {
-                safe.insert(key.into(), sanitize_provider_text(text).into());
-            }
-        }
-        if !safe.is_empty() {
-            return serde_json::to_string(&JsonValue::Object(safe))
-                .ok()
-                .map(SanitizedBody::new);
-        }
-    }
-    (!raw.is_empty()).then(|| SanitizedBody::new("[non-JSON provider error body omitted]"))
-}
-
-fn sanitize_provider_text(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_control() && !matches!(character, '\n' | '\r' | '\t') {
-                '\u{fffd}'
-            } else {
-                character
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_body_diagnostics() {
+        oven_sdk_conformance::assert_error_body_diagnostics(|status, body, stage, bytes| {
+            classify_error(
+                Some(status),
+                body,
+                Some("req-1".into()),
+                stage,
+                bytes,
+                &HeaderMap::new(),
+            )
+        });
+    }
     #[test]
     fn parser_requires_event_and_preserves_utf8() {
         let mut parser =

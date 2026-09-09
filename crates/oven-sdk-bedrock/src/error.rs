@@ -1,8 +1,8 @@
 //! Bedrock error-envelope classification.
 
 use oven_sdk::{
-    ErrorStage, JsonValue, ModelError, ModelErrorKind, SanitizedBody,
-    provider_support::parse_retry_after,
+    ErrorStage, JsonValue, ModelError, ModelErrorKind,
+    provider_support::{parse_retry_after, sanitize_error_body},
 };
 use reqwest::header::HeaderMap;
 
@@ -75,10 +75,8 @@ pub fn classify_error(
     if let Some(delay) = parse_retry_after(headers, &[]) {
         error = error.with_retry_after(delay);
     }
-    if !code.is_empty() {
-        error = error.with_sanitized_body(SanitizedBody::new(
-            serde_json::json!({"code":code}).to_string(),
-        ));
+    if let Some(body) = sanitize_error_body(body, bytes, stage) {
+        error = error.with_sanitized_body(body);
     }
     error
 }
@@ -146,6 +144,55 @@ fn safe_identifier(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_body_diagnostics() {
+        oven_sdk_conformance::assert_error_body_diagnostics(|status, body, stage, bytes| {
+            classify_error(
+                status,
+                body,
+                Some("req-1".into()),
+                stage,
+                bytes,
+                &HeaderMap::new(),
+            )
+        });
+    }
+
+    #[test]
+    fn stream_exceptions_preserve_scrubbed_messages_and_details() {
+        let payload = serde_json::json!({"message":"unsupported dimension; Bearer stream-secret", "detail":{"reason":"use 1024", "sessionToken":"nested-secret"}});
+        for error in [
+            classify_stream_exception(
+                "validationException",
+                &payload,
+                Some("req-1".into()),
+                100_000,
+            ),
+            classify_stream_error(
+                "ValidationException",
+                "unsupported dimension; Bearer stream-secret",
+                Some("req-1".into()),
+                100_000,
+            ),
+        ] {
+            assert_eq!(error.kind, ModelErrorKind::InvalidRequest);
+            assert_eq!(error.diagnostics.stage, ErrorStage::StreamEvent);
+            let body = error.diagnostics.sanitized_body.as_ref().unwrap();
+            assert!(body.text().contains("unsupported dimension"));
+            assert!(!body.truncated());
+            let wire = serde_json::to_string(&error).unwrap();
+            assert!(!wire.contains("stream-secret"));
+            assert!(!wire.contains("nested-secret"));
+        }
+        let payload = serde_json::json!({"message":format!("unsupported dimension token={}", "x".repeat(70_000))});
+        let error = classify_stream_exception("validationException", &payload, None, 100_000);
+        let body = error.diagnostics.sanitized_body.unwrap();
+        assert!(body.truncated());
+        assert!(body.len_bytes() <= oven_sdk::SanitizedBody::MAX_BYTES);
+        assert!(body.text().contains("unsupported dimension"));
+        assert!(!body.text().contains("xxxx"));
+    }
 
     #[test]
     fn common_aws_errors_are_typed_and_redacted() {

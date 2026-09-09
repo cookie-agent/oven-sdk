@@ -81,3 +81,8 @@ support, legacy evidence, target rejection, and separate compaction scopes.
 See the [core contract](crates/oven-sdk/README.md) and individual provider crate
 READMEs, including [OpenAI construction](crates/oven-sdk-openai/README.md#registry-free-construction),
 for explicit configuration and constructor requirements.
+
+## Provider diagnostics
+
+Provider errors retain bounded, credential-scrubbed response bodies in
+`ModelError.diagnostics.sanitized_body`. See [the retention policy and limits](DIAGNOSTICS.md).

@@ -1,8 +1,8 @@
 //! OpenAI error-envelope parsing and classification.
 
 use oven_sdk::{
-    ErrorStage, JsonValue, ModelError, ModelErrorKind, SanitizedBody,
-    provider_support::parse_retry_after,
+    ErrorStage, JsonValue, ModelError, ModelErrorKind,
+    provider_support::{parse_retry_after, sanitize_error_body},
 };
 use reqwest::header::HeaderMap;
 
@@ -15,7 +15,6 @@ pub(crate) fn classify_error(
     bytes: u64,
     headers: &HeaderMap,
 ) -> ModelError {
-    let text = String::from_utf8_lossy(body).into_owned();
     let value: JsonValue = serde_json::from_slice(body).unwrap_or(JsonValue::Null);
     let code_value = value
         .pointer("/error/code")
@@ -65,8 +64,10 @@ pub(crate) fn classify_error(
     error = error
         .with_http_status(status)
         .with_stage(stage)
-        .with_bytes_received(bytes)
-        .with_sanitized_body(SanitizedBody::new(text));
+        .with_bytes_received(bytes);
+    if let Some(body) = sanitize_error_body(body, bytes, stage) {
+        error = error.with_sanitized_body(body);
+    }
     if let Some(code) = code {
         error = error.with_vendor_code(code);
     }
@@ -114,6 +115,19 @@ mod tests {
     use reqwest::header::HeaderValue;
     use std::time::{Duration, SystemTime};
 
+    #[test]
+    fn provider_body_diagnostics() {
+        oven_sdk_conformance::assert_error_body_diagnostics(|status, body, stage, bytes| {
+            classify_error(
+                status,
+                body,
+                Some("req-1".into()),
+                stage,
+                bytes,
+                &HeaderMap::new(),
+            )
+        });
+    }
     #[test]
     fn model_not_found_code_overrides_server_status() {
         let error = classify_error(

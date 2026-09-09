@@ -32,6 +32,9 @@ use std::{
 };
 
 use futures_core::Stream;
+
+mod diagnostic_body;
+pub use diagnostic_body::assert_error_body_diagnostics;
 use oven_sdk::{
     AbortSignal, AdapterId, AssistantMessage, AssistantPart, BoxFuture, BoxStream,
     CancellationCapability, Capability, CompactionCapability, CompactionRequest, CompactionResult,

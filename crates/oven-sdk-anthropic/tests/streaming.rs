@@ -1018,7 +1018,7 @@ async fn ordinary_in_band_error_becomes_error_and_finish_error() {
 async fn first_overloaded_error_rejects_stream_creation() {
     let model = scripted_model(event(
         "error",
-        r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"}}"#,
+        r#"{"type":"error","error":{"type":"overloaded_error","message":"all workers busy; Bearer stream-secret"}}"#,
     ))
     .await;
     let error = model
@@ -1027,6 +1027,14 @@ async fn first_overloaded_error_rejects_stream_creation() {
         .unwrap_err();
     assert_eq!(error.kind, ModelErrorKind::Overload);
     assert_eq!(error.diagnostics.http_status, Some(529));
+    let body = error.diagnostics.sanitized_body.as_ref().unwrap();
+    assert!(body.text().contains("all workers busy"));
+    assert!(!body.truncated());
+    assert!(
+        !serde_json::to_string(&error)
+            .unwrap()
+            .contains("stream-secret")
+    );
     assert!(error.retryable);
 }
 mod common;

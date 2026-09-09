@@ -1878,6 +1878,9 @@ impl SanitizedBody {
     pub const MAX_BYTES: usize = 64 * 1024;
 
     /// Creates a body, truncating at a valid UTF-8 boundary when necessary.
+    ///
+    /// This container does not redact its input. Provider adapters should use
+    /// [`provider_support::sanitize_error_body`] before exposing response bodies.
     #[must_use]
     pub fn new(text: impl Into<String>) -> Self {
         let mut text = text.into();

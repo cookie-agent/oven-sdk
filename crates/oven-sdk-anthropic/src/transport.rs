@@ -33,7 +33,7 @@ pub(crate) async fn read_error_body(
         response.bytes_stream(),
         abort,
         oven_sdk::provider_support::BodyReadConfig {
-            cap: oven_sdk::SanitizedBody::MAX_BYTES,
+            cap: oven_sdk::SanitizedBody::MAX_BYTES + 1,
             limit: oven_sdk::provider_support::BodyLimit::StopAtCap,
             stage: ErrorStage::ResponseBody,
             timeout_message: "error response body idle timeout",

@@ -7,6 +7,31 @@ use wiremock::{
 };
 
 #[tokio::test]
+async fn stream_error_preserves_scrubbed_provider_reason() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "event: message-end\ndata: {\"type\":\"message-end\",\"delta\":{\"finish_reason\":\"ERROR\"},\"message\":\"unsupported dimension; Bearer stream-secret\"}\n\n",
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+    let error = common::model(&server, "opaque")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.diagnostics.stage, oven_sdk::ErrorStage::StreamEvent);
+    let body = error.diagnostics.sanitized_body.as_ref().unwrap();
+    assert!(body.text().contains("unsupported dimension"));
+    assert!(!body.truncated());
+    assert!(
+        !serde_json::to_string(&error)
+            .unwrap()
+            .contains("stream-secret")
+    );
+}
+
+#[tokio::test]
 async fn errors_and_predispatch_cancellation_are_typed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

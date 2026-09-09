@@ -1,7 +1,8 @@
 //! Anthropic error-envelope classification.
 
 use oven_sdk::{
-    ErrorStage, JsonValue, ModelError, ModelErrorKind, provider_support::parse_retry_after,
+    ErrorStage, JsonValue, ModelError, ModelErrorKind,
+    provider_support::{parse_retry_after, sanitize_error_body},
 };
 use reqwest::header::HeaderMap;
 
@@ -104,7 +105,7 @@ pub(crate) fn classify_error_for(
         .with_http_status(status)
         .with_stage(stage)
         .with_bytes_received(bytes);
-    if let Some(body) = positive_sanitized_body(&value) {
+    if let Some(body) = sanitize_error_body(body, bytes, stage) {
         error = error.with_sanitized_body(body);
     }
     if let Some(code) = safe_identifier(code) {
@@ -128,15 +129,6 @@ fn safe_identifier(value: &str) -> Option<String> {
     .then(|| value.to_owned())
 }
 
-fn positive_sanitized_body(value: &JsonValue) -> Option<oven_sdk::SanitizedBody> {
-    let code = value
-        .pointer("/error/type")
-        .or_else(|| value.get("type"))
-        .and_then(JsonValue::as_str)
-        .and_then(safe_identifier)?;
-    let body = serde_json::json!({"type":"error","error":{"type":code}}).to_string();
-    Some(oven_sdk::SanitizedBody::new(body))
-}
 fn has_model_code(value: &JsonValue) -> bool {
     match value {
         JsonValue::String(value) => [
@@ -158,6 +150,19 @@ mod tests {
     use reqwest::header::HeaderValue;
     use std::time::Duration;
 
+    #[test]
+    fn provider_body_diagnostics() {
+        oven_sdk_conformance::assert_error_body_diagnostics(|status, body, stage, bytes| {
+            classify_error(
+                status,
+                body,
+                Some("req-1".into()),
+                stage,
+                bytes,
+                &HeaderMap::new(),
+            )
+        });
+    }
     #[test]
     fn error_classification_prefers_model_not_found_over_500() {
         let error = classify_error_for(

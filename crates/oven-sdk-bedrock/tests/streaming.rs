@@ -96,7 +96,10 @@ async fn eventstream_error_headers_are_typed_and_sanitized() {
         &[
             (":message-type", "error"),
             (":error-code", "ThrottlingException"),
-            (":error-message", "SECRET_PROVIDER_DETAIL"),
+            (
+                ":error-message",
+                "daily request limit reached; token=SECRET_PROVIDER_DETAIL",
+            ),
         ],
         Vec::new(),
     );
@@ -114,6 +117,20 @@ async fn eventstream_error_headers_are_typed_and_sanitized() {
         Some("ThrottlingException")
     );
     assert!(!error.to_string().contains("SECRET_PROVIDER_DETAIL"));
+    assert!(
+        error
+            .diagnostics
+            .sanitized_body
+            .as_ref()
+            .unwrap()
+            .text()
+            .contains("daily request limit reached")
+    );
+    assert!(
+        !serde_json::to_string(&error)
+            .unwrap()
+            .contains("SECRET_PROVIDER_DETAIL")
+    );
     assert!(
         !error
             .diagnostics

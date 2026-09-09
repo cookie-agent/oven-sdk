@@ -15,6 +15,44 @@ use oven_sdk_azure::{
 };
 use wiremock::MockServer;
 
+#[tokio::test]
+async fn chat_and_responses_stream_errors_preserve_scrubbed_reasons() {
+    for responses in [false, true] {
+        let server = MockServer::start().await;
+        let route = if responses {
+            "/openai/v1/responses"
+        } else {
+            "/openai/v1/chat/completions"
+        };
+        common::mount(&server, route, "data: {\"type\":\"error\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"unsupported dimension; Bearer stream-secret\"}}\n\n".into()).await;
+        let provider = common::provider(&server, AzureApiRoute::V1);
+        let error = if responses {
+            provider
+                .responses("deployment", common::gpt5())
+                .unwrap()
+                .complete(Request::new(Vec::new()), AbortSignal::default())
+                .await
+                .unwrap_err()
+        } else {
+            provider
+                .chat("deployment", common::gpt4o())
+                .unwrap()
+                .complete(Request::new(Vec::new()), AbortSignal::default())
+                .await
+                .unwrap_err()
+        };
+        assert_eq!(error.diagnostics.stage, oven_sdk::ErrorStage::StreamEvent);
+        let body = error.diagnostics.sanitized_body.as_ref().unwrap();
+        assert!(body.text().contains("unsupported dimension"));
+        assert!(!body.truncated());
+        assert!(
+            !serde_json::to_string(&error)
+                .unwrap()
+                .contains("stream-secret")
+        );
+    }
+}
+
 fn tool_result_request(file: FilePart) -> Request {
     tool_result_request_with_content(ToolContent::Mixed(vec![
         ContentValue::Text("caption".into()),

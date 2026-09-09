@@ -1,8 +1,8 @@
 //! Azure OpenAI error-envelope parsing and classification.
 
 use oven_sdk::{
-    ErrorStage, JsonValue, ModelError, ModelErrorKind, SanitizedBody,
-    provider_support::parse_retry_after,
+    ErrorStage, JsonValue, ModelError, ModelErrorKind,
+    provider_support::{parse_retry_after, sanitize_error_body},
 };
 use reqwest::header::HeaderMap;
 
@@ -77,8 +77,8 @@ pub(crate) fn classify_error(
         .with_http_status(status)
         .with_stage(stage)
         .with_bytes_received(bytes);
-    if let Some(safe_body) = safe_diagnostic_body(&value) {
-        error = error.with_sanitized_body(SanitizedBody::new(safe_body));
+    if let Some(body) = sanitize_error_body(body, bytes, stage) {
+        error = error.with_sanitized_body(body);
     }
     if let Some(code) = code.as_deref().and_then(safe_code) {
         error = error.with_vendor_code(code);
@@ -90,22 +90,6 @@ pub(crate) fn classify_error(
         error = error.with_retry_after(delay);
     }
     error
-}
-
-fn safe_diagnostic_body(value: &JsonValue) -> Option<String> {
-    let codes = [
-        value.pointer("/error/code"),
-        value.pointer("/error/type"),
-        value.pointer("/error/inner_error/code"),
-        value.pointer("/code"),
-        value.pointer("/type"),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(JsonValue::as_str)
-    .filter_map(safe_code)
-    .collect::<Vec<_>>();
-    (!codes.is_empty()).then(|| serde_json::json!({"codes":codes}).to_string())
 }
 
 fn safe_code(value: &str) -> Option<String> {
@@ -171,6 +155,19 @@ mod tests {
     use reqwest::header::HeaderValue;
     use std::time::{Duration, SystemTime};
 
+    #[test]
+    fn provider_body_diagnostics() {
+        oven_sdk_conformance::assert_error_body_diagnostics(|status, body, stage, bytes| {
+            classify_error(
+                status,
+                body,
+                Some("req-1".into()),
+                stage,
+                bytes,
+                &HeaderMap::new(),
+            )
+        });
+    }
     #[test]
     fn model_not_found_code_overrides_server_status() {
         let error = classify_error(
@@ -251,12 +248,12 @@ mod tests {
     }
 
     #[test]
-    fn arbitrary_error_text_and_codes_are_never_retained() {
+    fn credential_text_is_scrubbed_while_provider_reason_survives() {
         let secret = "sk-secret-value";
         let error = classify_error(
             400,
             format!(
-                r#"{{"error":{{"code":"{secret}","message":"token {secret}","details":{{"raw":"{secret}"}}}}}}"#
+                r#"{{"error":{{"code":"{secret}","message":"unsupported dimension; token {secret}","details":{{"raw":"{secret}"}}}}}}"#
             )
             .as_bytes(),
             None,
@@ -272,14 +269,21 @@ mod tests {
             assert!(!rendered.contains(secret));
         }
         assert!(error.diagnostics.vendor_code.is_none());
-        assert!(error.diagnostics.sanitized_body.is_none());
+        assert!(
+            error
+                .diagnostics
+                .sanitized_body
+                .unwrap()
+                .text()
+                .contains("unsupported dimension")
+        );
     }
 
     #[test]
-    fn diagnostics_retain_only_allow_listed_codes() {
+    fn diagnostics_retain_codes_and_scrubbed_message() {
         let error = classify_error(
             429,
-            br#"{"error":{"code":"insufficient_quota","type":"rate_limit_error","message":"secret"}}"#,
+            br#"{"error":{"code":"insufficient_quota","type":"rate_limit_error","message":"daily budget exhausted; token=secret"}}"#,
             None,
             ErrorStage::ResponseBody,
             0,
@@ -288,6 +292,7 @@ mod tests {
         let rendered = serde_json::to_string(&error).unwrap();
         assert!(rendered.contains("insufficient_quota"));
         assert!(rendered.contains("rate_limit_error"));
+        assert!(rendered.contains("daily budget exhausted"));
         assert!(!rendered.contains("secret"));
     }
 }

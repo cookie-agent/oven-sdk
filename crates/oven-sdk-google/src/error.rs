@@ -1,7 +1,8 @@
 //! Google error-envelope classification.
 
 use oven_sdk::{
-    ErrorStage, JsonValue, ModelError, ModelErrorKind, provider_support::parse_retry_after,
+    ErrorStage, JsonValue, ModelError, ModelErrorKind,
+    provider_support::{parse_retry_after, sanitize_error_body},
 };
 use reqwest::header::HeaderMap;
 
@@ -82,10 +83,8 @@ pub fn classify_error(
     if let Some(delay) = parse_retry_after(headers, &[]) {
         error = error.with_retry_after(delay);
     }
-    if !code.is_empty() {
-        error = error.with_sanitized_body(oven_sdk::SanitizedBody::new(
-            serde_json::json!({"error":{"status":code}}).to_string(),
-        ));
+    if let Some(body) = sanitize_error_body(body, bytes, stage) {
+        error = error.with_sanitized_body(body);
     }
     error
 }
@@ -105,6 +104,19 @@ mod tests {
     use reqwest::header::HeaderValue;
     use std::time::Duration;
 
+    #[test]
+    fn provider_body_diagnostics() {
+        oven_sdk_conformance::assert_error_body_diagnostics(|status, body, stage, bytes| {
+            classify_error(
+                status,
+                body,
+                Some("req-1".into()),
+                stage,
+                bytes,
+                &HeaderMap::new(),
+            )
+        });
+    }
     #[test]
     fn auth_model_context_and_quota_errors_are_typed() {
         let headers = HeaderMap::new();

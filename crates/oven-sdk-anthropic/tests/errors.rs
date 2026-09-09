@@ -25,7 +25,7 @@ async fn write_chunk(socket: &mut tokio::net::TcpStream, body: &[u8]) {
 }
 
 #[tokio::test]
-async fn http_error_body_read_stops_at_the_cap_without_retaining_unstructured_data() {
+async fn http_error_body_read_stops_at_the_cap_and_retains_bounded_text() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let model = model(listener.local_addr().unwrap());
     let chunks = [
@@ -52,7 +52,10 @@ async fn http_error_body_read_stops_at_the_cap_without_retaining_unstructured_da
     assert_eq!(error.diagnostics.stage, ErrorStage::ResponseBody);
     assert!(error.diagnostics.bytes_received >= SanitizedBody::MAX_BYTES as u64);
     assert!(error.diagnostics.bytes_received < expected);
-    assert!(error.diagnostics.sanitized_body.is_none());
+    let body = error.diagnostics.sanitized_body.unwrap();
+    assert!(body.truncated());
+    assert_eq!(body.len_bytes(), SanitizedBody::MAX_BYTES);
+    assert!(body.text().starts_with("aaaa"));
 }
 
 #[tokio::test]
@@ -193,7 +196,7 @@ async fn nested_model_code_overrides_server_status() {
 fn display_redacts_api_keys_and_tokens() {
     let error = classify_error(
         400,
-        br#"{"error":{"type":"invalid_request_error","message":"key sk-ant-secret-token and token=very-secret leaked"}}"#,
+        br#"{"error":{"type":"invalid_request_error","message":"unsupported dimension; key sk-ant-secret-token and token=very-secret leaked"}}"#,
         None,
         ErrorStage::ResponseBody,
         0,
@@ -206,6 +209,7 @@ fn display_redacts_api_keys_and_tokens() {
     assert!(!serialized.contains("sk-ant-secret-token"));
     assert!(!serialized.contains("very-secret"));
     assert!(serialized.contains("invalid_request_error"));
+    assert!(serialized.contains("unsupported dimension"));
 }
 
 #[test]
@@ -232,16 +236,24 @@ fn request_too_large_is_not_misclassified_as_context_length() {
 }
 
 #[test]
-fn unstructured_error_bodies_are_not_retained() {
+fn unstructured_error_bodies_preserve_reason_and_scrub_secrets() {
     let error = classify_error(
         500,
-        b"secret=do-not-retain",
+        b"gateway rejected dimension secret=do-not-retain",
         None,
         ErrorStage::ResponseBody,
         20,
         &HeaderMap::new(),
     );
-    assert!(error.diagnostics.sanitized_body.is_none());
+    assert!(
+        error
+            .diagnostics
+            .sanitized_body
+            .as_ref()
+            .unwrap()
+            .text()
+            .contains("gateway rejected dimension")
+    );
     assert!(
         !serde_json::to_string(&error)
             .unwrap()

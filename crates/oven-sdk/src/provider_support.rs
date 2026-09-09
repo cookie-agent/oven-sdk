@@ -9,6 +9,9 @@ use http::HeaderMap;
 
 use crate::{AbortSignal, AbortWait, ErrorStage, ModelError};
 
+mod diagnostic_body;
+pub use diagnostic_body::{sanitize_error_body, sanitize_error_body_with_secrets};
+
 /// Result of waiting for the next streaming transport item.
 pub enum StreamRead<T> {
     /// Cancellation won the biased wait.

@@ -2204,6 +2204,9 @@ fn classify_error(
     .with_http_status(status)
     .with_stage(stage)
     .with_bytes_received(bytes);
+    if let Some(body) = oven_sdk::provider_support::sanitize_error_body(body, bytes, stage) {
+        error = error.with_sanitized_body(body);
+    }
     if let Some(id) = request_id {
         error = error.with_request_id(id);
     }
@@ -2221,6 +2224,19 @@ mod tests {
         ModelDeclaration, ModelLimits, ProviderId, ReplayCapability, ReplayDeclaration,
     };
 
+    #[test]
+    fn provider_body_diagnostics() {
+        oven_sdk_conformance::assert_error_body_diagnostics(|status, body, stage, bytes| {
+            classify_error(
+                status,
+                body,
+                Some("req-1".into()),
+                stage,
+                bytes,
+                &HeaderMap::new(),
+            )
+        });
+    }
     fn capabilities() -> ModelCapabilities {
         let mut media = MediaCapabilities::default();
         media.input.insert(

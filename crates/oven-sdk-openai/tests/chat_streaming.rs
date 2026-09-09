@@ -162,7 +162,7 @@ async fn in_band_error_preserves_http_response_headers() {
     let server = MockServer::start().await;
     let body = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"started\"},\"finish_reason\":null}]}\n\n",
-        "data: {\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow\"}}\n\n"
+        "data: {\"error\":{\"type\":\"rate_limit_error\",\"message\":\"daily request limit reached; Bearer stream-secret\"}}\n\n"
     );
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -181,6 +181,14 @@ async fn in_band_error_preserves_http_response_headers() {
     while let Some(item) = response.stream.next().await {
         if let StreamPart::Error { error } = item.unwrap() {
             assert_eq!(error.diagnostics.request_id.as_deref(), Some("req_in_band"));
+            let body = error.diagnostics.sanitized_body.as_ref().unwrap();
+            assert!(body.text().contains("daily request limit reached"));
+            assert!(!body.truncated());
+            assert!(
+                !serde_json::to_string(&error)
+                    .unwrap()
+                    .contains("stream-secret")
+            );
             assert_eq!(
                 error.diagnostics.retry_after,
                 Some(std::time::Duration::from_millis(125))

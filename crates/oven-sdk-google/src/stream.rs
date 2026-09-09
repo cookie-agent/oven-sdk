@@ -896,6 +896,28 @@ fn reserve_tool_id(
 mod tests {
     use super::*;
 
+    #[test]
+    fn stream_error_preserves_scrubbed_provider_reason() {
+        let mut state = State::new(ReplayPolicy::IfValid, native_context_scope("opaque"));
+        let mut parts = Vec::new();
+        state.apply(serde_json::json!({"error":{"code":400,"message":"unsupported dimension; Bearer stream-secret"}}), &mut parts, 100_000).unwrap();
+        let error = parts
+            .iter()
+            .find_map(|part| match part {
+                StreamPart::Error { error } => Some(error),
+                _ => None,
+            })
+            .unwrap();
+        let body = error.diagnostics.sanitized_body.as_ref().unwrap();
+        assert!(body.text().contains("unsupported dimension"));
+        assert!(!body.truncated());
+        assert!(
+            !serde_json::to_string(error)
+                .unwrap()
+                .contains("stream-secret")
+        );
+    }
+
     fn native_context_scope(model: &str) -> NativeContextScope {
         NativeContextScope::new(
             oven_sdk::ProviderId::new("google"),

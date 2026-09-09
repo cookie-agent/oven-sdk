@@ -64,8 +64,8 @@ async fn streaming_errors_are_classified_without_fabricated_http_status() {
         &server,
         concat!(
             "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\",\"model\":\"opaque\"}}\n\n",
-            "event: error\ndata: {\"type\":\"error\",\"sequence_number\":1,\"error\":{\"type\":\"not_found\",\"code\":\"model_not_found\",\"message\":\"missing\"}}\n\n",
-            "event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":2,\"response\":{\"id\":\"resp_1\",\"status\":\"failed\",\"model\":\"opaque\",\"error\":{\"code\":\"model_not_found\",\"message\":\"missing\"},\"usage\":null}}\n\n",
+            "event: error\ndata: {\"type\":\"error\",\"sequence_number\":1,\"error\":{\"type\":\"not_found\",\"code\":\"model_not_found\",\"message\":\"model missing; Bearer stream-secret\"}}\n\n",
+            "event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":2,\"response\":{\"id\":\"resp_1\",\"status\":\"failed\",\"model\":\"opaque\",\"error\":{\"code\":\"model_not_found\",\"message\":\"model missing; Bearer stream-secret\"},\"usage\":null}}\n\n",
             "data: [DONE]\n\n"
         )
         .into(),
@@ -85,6 +85,14 @@ async fn streaming_errors_are_classified_without_fabricated_http_status() {
     assert_eq!(error.kind, ModelErrorKind::ModelNotFound);
     assert_eq!(error.diagnostics.http_status, None);
     assert!(error.diagnostics.sanitized_body.is_some());
+    let body = error.diagnostics.sanitized_body.as_ref().unwrap();
+    assert!(body.text().contains("model missing"));
+    assert!(!body.truncated());
+    assert!(
+        !serde_json::to_string(&error)
+            .unwrap()
+            .contains("stream-secret")
+    );
 }
 
 #[tokio::test]
