@@ -33,6 +33,26 @@ fn with_payload(turn: &CompletedTurn, payload: serde_json::Value) -> CompletedTu
     forged
 }
 
+fn responses_message_document(
+    phase: serde_json::Value,
+    annotations: serde_json::Value,
+    logprobs: serde_json::Value,
+) -> String {
+    let item = serde_json::json!({
+        "type":"message",
+        "id":"msg-1",
+        "status":"completed",
+        "role":"assistant",
+        "phase":phase,
+        "content":[{"type":"output_text","text":"ok","annotations":annotations,"logprobs":logprobs}]
+    });
+    format!(
+        "data: {}\n\ndata: {}\n\n",
+        serde_json::json!({"type":"response.output_item.done","output_index":0,"item":item}),
+        serde_json::json!({"type":"response.completed","response":{"status":"completed","output":[item]}})
+    )
+}
+
 struct RouteHeaders;
 
 impl HeaderProvider for RouteHeaders {
@@ -264,6 +284,245 @@ async fn responses_encrypted_items_round_trip() {
     assert!(matches!(
         response.request.replay.decisions[0].disposition,
         ReplayDisposition::Replayed
+    ));
+}
+
+#[tokio::test]
+async fn responses_message_phase_and_metadata_round_trip_with_integrity_witness() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg-1\",\"status\":\"completed\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[],\"logprobs\":[]}]}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg-1\",\"status\":\"completed\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[],\"logprobs\":[]}]}]}}\n\n"
+    );
+    common::mount(&server, "/responses", body.into()).await;
+    let model = common::official_responses(&server, "gpt-6-astra");
+    let first = model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    assert!(matches!(
+        first.turn.message.content.as_slice(),
+        [AssistantPart::Text(_), AssistantPart::Custom(part)]
+            if part.kind == "openai.responses.message_continuation"
+    ));
+    let original_turn = first.turn.clone();
+    let original_payload = original_turn
+        .finish
+        .native_replay
+        .as_ref()
+        .unwrap()
+        .payload()
+        .clone();
+
+    let replayed = model
+        .stream(
+            Request::new(vec![HistoryTurn::assistant(first.turn)]),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        replayed.request.replay.decisions.as_slice(),
+        [oven_sdk::ReplayDecision {
+            disposition: ReplayDisposition::Replayed,
+            ..
+        }]
+    ));
+    let requests = server.received_requests().await.unwrap();
+    let replay_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(replay_body["input"][0], original_payload["items"][0]);
+
+    let mut changed_phase = original_payload.clone();
+    changed_phase["items"][0]["phase"] = "commentary".into();
+    let mut changed_annotations = original_payload;
+    changed_annotations["items"][0]["content"][0]["annotations"] =
+        serde_json::json!([{"type":"url_citation","url":"https://example.invalid"}]);
+    for payload in [changed_phase, changed_annotations] {
+        let response = model
+            .stream(
+                Request::new(vec![HistoryTurn::assistant(with_payload(
+                    &original_turn,
+                    payload,
+                ))]),
+                AbortSignal::default(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            response.request.replay.decisions.as_slice(),
+            [
+                oven_sdk::ReplayDecision {
+                    disposition: ReplayDisposition::DiscardedInvalidPayload { .. },
+                    ..
+                },
+                oven_sdk::ReplayDecision {
+                    disposition: ReplayDisposition::ReconstructedNormalized,
+                    ..
+                }
+            ]
+        ));
+    }
+}
+
+#[tokio::test]
+async fn responses_nullable_phase_and_logprobs_round_trip_together_and_separately() {
+    for (phase, logprobs) in [
+        (serde_json::Value::Null, serde_json::Value::Null),
+        (serde_json::Value::Null, serde_json::json!([])),
+        (serde_json::json!("final_answer"), serde_json::Value::Null),
+    ] {
+        let server = MockServer::start().await;
+        common::mount(
+            &server,
+            "/responses",
+            responses_message_document(phase, serde_json::json!([]), logprobs),
+        )
+        .await;
+        let model = common::official_responses(&server, "gpt-6-astra");
+        let first = model
+            .complete(Request::new(Vec::new()), AbortSignal::default())
+            .await
+            .unwrap();
+        assert!(matches!(
+            first.turn.message.content.as_slice(),
+            [AssistantPart::Text(_), AssistantPart::Custom(part)]
+                if part.kind == "openai.responses.message_continuation"
+        ));
+        let original =
+            first.turn.finish.native_replay.as_ref().unwrap().payload()["items"][0].clone();
+        let replayed = model
+            .stream(
+                Request::new(vec![HistoryTurn::assistant(first.turn)]),
+                AbortSignal::default(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            replayed.request.replay.decisions.as_slice(),
+            [oven_sdk::ReplayDecision {
+                disposition: ReplayDisposition::Replayed,
+                ..
+            }]
+        ));
+        let requests = server.received_requests().await.unwrap();
+        let replay_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(replay_body["input"][0], original);
+    }
+}
+
+#[tokio::test]
+async fn responses_nonempty_message_metadata_round_trips_and_missing_witness_reconstructs() {
+    let server = MockServer::start().await;
+    common::mount(
+        &server,
+        "/responses",
+        responses_message_document(
+            serde_json::json!("commentary"),
+            serde_json::json!([{
+                "type":"url_citation",
+                "start_index":0,
+                "end_index":2,
+                "url":"https://example.invalid/source",
+                "title":"Source"
+            }]),
+            serde_json::json!([{
+                "token":"ok",
+                "logprob":-0.25,
+                "bytes":[111,107],
+                "top_logprobs":[]
+            }]),
+        ),
+    )
+    .await;
+    let model = common::official_responses(&server, "gpt-6-astra");
+    let first = model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let original_turn = first.turn.clone();
+    let original = original_turn
+        .finish
+        .native_replay
+        .as_ref()
+        .unwrap()
+        .payload()["items"][0]
+        .clone();
+    let replayed = model
+        .stream(
+            Request::new(vec![HistoryTurn::assistant(first.turn)]),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        replayed.request.replay.decisions.as_slice(),
+        [oven_sdk::ReplayDecision {
+            disposition: ReplayDisposition::Replayed,
+            ..
+        }]
+    ));
+    let requests = server.received_requests().await.unwrap();
+    let replay_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(replay_body["input"][0], original);
+
+    let mut historical = original_turn;
+    historical.message.content.retain(|part| {
+        !matches!(part, AssistantPart::Custom(part) if part.kind == "openai.responses.message_continuation")
+    });
+    let reconstructed = model
+        .stream(
+            Request::new(vec![HistoryTurn::assistant(historical)]),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        reconstructed.request.replay.decisions.as_slice(),
+        [
+            oven_sdk::ReplayDecision {
+                disposition: ReplayDisposition::DiscardedInvalidPayload { .. },
+                ..
+            },
+            oven_sdk::ReplayDecision {
+                disposition: ReplayDisposition::ReconstructedNormalized,
+                ..
+            }
+        ]
+    ));
+}
+
+#[tokio::test]
+async fn responses_replay_never_omits_message_witness() {
+    let server = MockServer::start().await;
+    common::mount(
+        &server,
+        "/responses",
+        responses_message_document(
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::Value::Null,
+        ),
+    )
+    .await;
+    let mut config = common::official_responses_config(&server, "gpt-6-astra");
+    config.model.capabilities.replay.policy = ReplayPolicy::Never;
+    config.model.capabilities.replay.capability = oven_sdk::ReplayCapability::Unsupported;
+    config.model.capabilities.replay.reasoning = false;
+    config
+        .model
+        .capabilities
+        .features
+        .remove(oven_sdk::Capability::REASONING);
+    let model = oven_sdk_openai::OpenAiResponsesModel::new(config).unwrap();
+    let completed = model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    assert!(completed.turn.finish.native_replay.is_none());
+    assert!(matches!(
+        completed.turn.message.content.as_slice(),
+        [AssistantPart::Text(_)]
     ));
 }
 

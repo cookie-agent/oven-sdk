@@ -459,6 +459,11 @@ impl State {
             });
             parts.push(StreamPart::TextEnd { id, metadata: None });
         }
+        if self.policy != ReplayPolicy::Never
+            && let Some(part) = replay::message_continuation_part(item)
+        {
+            parts.push(StreamPart::Custom { part });
+        }
     }
 
     fn validate_streamed_item(
@@ -931,8 +936,8 @@ fn validate_finalized_item(
     }
     let matches = match kind {
         Some("message") => {
-            selected_item(finalized, &["type", "id", "role", "content"])
-                == selected_item(authoritative, &["type", "id", "role", "content"])
+            selected_item(finalized, &["type", "id", "role", "content", "phase"])
+                == selected_item(authoritative, &["type", "id", "role", "content", "phase"])
         }
         Some("reasoning") => {
             selected_item(

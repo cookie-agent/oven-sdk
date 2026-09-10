@@ -8,6 +8,7 @@ use super::sha256_hex;
 const REPLAY_FORMAT: &str = "oven.openai.responses.output.v1";
 
 const CONTINUATION_KIND: &str = "openai.responses.reasoning_continuation";
+const MESSAGE_CONTINUATION_KIND: &str = "openai.responses.message_continuation";
 
 pub(crate) fn decode(
     artifact: &NativeReplayArtifact,
@@ -45,7 +46,7 @@ fn semantic_items(items: &[JsonValue]) -> Option<Vec<JsonValue>> {
 fn message_semantics(item: &JsonValue, semantic: &mut Vec<JsonValue>) -> Option<()> {
     exact_keys(
         item,
-        &["type", "id", "status", "role", "content"],
+        &["type", "id", "status", "role", "content", "phase"],
         &["type", "id", "role", "content"],
     )?;
     non_empty_string(item, "id")?;
@@ -53,14 +54,42 @@ fn message_semantics(item: &JsonValue, semantic: &mut Vec<JsonValue>) -> Option<
         return None;
     }
     completed_status(item)?;
+    match item.get("phase") {
+        None | Some(JsonValue::Null) => {}
+        Some(JsonValue::String(phase))
+            if matches!(phase.as_str(), "commentary" | "final_answer") => {}
+        Some(_) => return None,
+    }
+    let mut has_metadata = item.get("phase").is_some();
     for part in item.get("content")?.as_array()? {
-        exact_keys(part, &["type", "text"], &["type", "text"])?;
+        exact_keys(
+            part,
+            &["type", "text", "annotations", "logprobs"],
+            &["type", "text"],
+        )?;
         if part.get("type")?.as_str()? != "output_text" {
             return None;
+        }
+        if let Some(annotations) = part.get("annotations") {
+            annotations.as_array()?;
+            has_metadata = true;
+        }
+        if let Some(logprobs) = part.get("logprobs") {
+            if !logprobs.is_null() {
+                logprobs.as_array()?;
+            }
+            has_metadata = true;
         }
         semantic.push(serde_json::json!({
             "type":"text",
             "text":part.get("text")?.as_str()?
+        }));
+    }
+    if has_metadata {
+        let encoded = serde_json::to_vec(item).ok()?;
+        semantic.push(serde_json::json!({
+            "type":"message_continuation",
+            "item_sha256":sha256_hex(&encoded)
         }));
     }
     Some(())
@@ -154,6 +183,13 @@ fn semantic_normalized(normalized: &[AssistantPart]) -> Option<Vec<JsonValue>> {
                     "type":"reasoning_continuation",
                     "item_id":non_empty_string(&part.data, "item_id")?,
                     "encrypted_sha256":non_empty_string(&part.data, "encrypted_sha256")?
+                }))
+            }
+            AssistantPart::Custom(part) if part.kind == MESSAGE_CONTINUATION_KIND => {
+                exact_keys(&part.data, &["item_sha256"], &["item_sha256"])?;
+                Some(serde_json::json!({
+                    "type":"message_continuation",
+                    "item_sha256":non_empty_string(&part.data, "item_sha256")?
                 }))
             }
             _ => None,
