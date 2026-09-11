@@ -479,18 +479,28 @@ fn usage_from(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
     let output = value.get("completion_tokens").and_then(JsonValue::as_u64);
     let reasoning = value
         .pointer("/completion_tokens_details/reasoning_tokens")
-        .and_then(JsonValue::as_u64);
+        .and_then(JsonValue::as_u64)
+        .or_else(|| value.get("reasoning_tokens").and_then(JsonValue::as_u64));
     let cache_write = optional_usage_u64(
         value.pointer("/prompt_tokens_details/cache_write_tokens"),
         "Chat cache-write token usage is invalid",
         bytes,
     )?;
+    let input_tokens = value.get("prompt_tokens").and_then(JsonValue::as_u64);
+    let input_tokens_cache_read = value
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(JsonValue::as_u64);
+    let input_tokens_no_cache = input_tokens
+        .filter(|_| input_tokens_cache_read.is_some() || cache_write.is_some())
+        .map(|total| {
+            total
+                .saturating_sub(input_tokens_cache_read.unwrap_or(0))
+                .saturating_sub(cache_write.unwrap_or(0))
+        });
     Ok(Usage {
-        input_tokens: value.get("prompt_tokens").and_then(JsonValue::as_u64),
-        input_tokens_no_cache: None,
-        input_tokens_cache_read: value
-            .pointer("/prompt_tokens_details/cached_tokens")
-            .and_then(JsonValue::as_u64),
+        input_tokens,
+        input_tokens_no_cache,
+        input_tokens_cache_read,
         input_tokens_cache_write: cache_write,
         output_tokens: output,
         output_tokens_text: output.map(|total| total.saturating_sub(reasoning.unwrap_or(0))),

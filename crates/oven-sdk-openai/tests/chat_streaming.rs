@@ -23,6 +23,46 @@ async fn usage_only_chunk_is_terminally_authoritative() {
 }
 
 #[tokio::test]
+async fn qwen_usage_separates_cached_input_and_top_level_reasoning() {
+    let server = MockServer::start().await;
+    common::mount(
+        &server,
+        "/chat/completions",
+        common::qwen_usage_chat_document("{\"cached_tokens\":1216}"),
+    )
+    .await;
+    let result = common::official_chat(&server, "gpt-4o-mini")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let usage = result.turn.finish.usage;
+    assert_eq!(usage.input_tokens_cache_read, Some(1216));
+    assert_eq!(usage.input_tokens_no_cache, Some(48));
+    assert_eq!(usage.output_tokens_reasoning, Some(20));
+    assert_eq!(usage.output_tokens_text, Some(0));
+}
+
+#[tokio::test]
+async fn qwen_cache_miss_keeps_cache_and_no_cache_unknown() {
+    let server = MockServer::start().await;
+    common::mount(
+        &server,
+        "/chat/completions",
+        common::qwen_usage_chat_document("null"),
+    )
+    .await;
+    let result = common::official_chat(&server, "gpt-4o-mini")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let usage = result.turn.finish.usage;
+    assert_eq!(usage.input_tokens_cache_read, None);
+    assert_eq!(usage.input_tokens_no_cache, None);
+    assert_eq!(usage.output_tokens_reasoning, Some(20));
+    assert_eq!(usage.output_tokens_text, Some(0));
+}
+
+#[tokio::test]
 async fn fragmented_parallel_tools_finalize_only_at_done() {
     let server = MockServer::start().await;
     let body = concat!(

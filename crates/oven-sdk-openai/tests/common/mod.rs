@@ -29,6 +29,18 @@ pub fn chat_document(text: &str) -> String {
     )
 }
 
+pub fn qwen_usage_chat_document(cache_details: &str) -> String {
+    format!(
+        concat!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"answer\"}},\"finish_reason\":null}}]}}\n\n",
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n",
+            "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":1264,\"completion_tokens\":20,\"prompt_tokens_details\":{cache_details},\"reasoning_tokens\":20}}}}\n\n",
+            "data: [DONE]\n\n"
+        ),
+        cache_details = cache_details
+    )
+}
+
 pub fn responses_document(text: &str) -> String {
     format!(
         concat!(
