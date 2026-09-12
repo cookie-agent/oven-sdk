@@ -473,6 +473,47 @@ async fn ordinary_responses_models_keep_sampling_without_warnings() {
 }
 
 #[tokio::test]
+async fn normalized_reconstruction_preserves_text_tool_interleaving() {
+    let server = MockServer::start().await;
+    common::mount(&server, "/responses", common::responses_document("ok")).await;
+    let call = ToolCallPart::new("call_1", "lookup", serde_json::json!({"x":1}));
+    let turn = CompletedTurn::new(
+        AssistantMessage::new(vec![
+            AssistantPart::Text(TextPart {
+                text: "before ".into(),
+                metadata: None,
+            }),
+            AssistantPart::ToolCall(call),
+            AssistantPart::Text(TextPart {
+                text: "after".into(),
+                metadata: None,
+            }),
+        ]),
+        Finish::new(Default::default(), FinishReason::ToolCalls),
+    );
+    let result = ToolResultPart::new("call_1", ToolContent::Text("done".into()));
+    let request = Request::new(vec![
+        HistoryTurn::assistant(turn),
+        HistoryTurn::tool(ToolMessage::new(vec![result])),
+    ]);
+    common::official_responses(&server, "gpt-5-mini")
+        .complete(request, AbortSignal::default())
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+    let input = &body["input"];
+    assert_eq!(input[0]["type"], "message");
+    assert_eq!(input[0]["content"][0]["text"], "before ");
+    assert_eq!(input[1]["type"], "function_call");
+    assert_eq!(input[1]["call_id"], "call_1");
+    assert_eq!(input[2]["type"], "message");
+    assert_eq!(input[2]["content"][0]["text"], "after");
+    assert_eq!(input[3]["type"], "function_call_output");
+    assert_eq!(input[3]["call_id"], "call_1");
+}
+
+#[tokio::test]
 async fn normalized_function_call_omits_absent_provider_item_id() {
     let server = MockServer::start().await;
     common::mount(&server, "/responses", common::responses_document("ok")).await;

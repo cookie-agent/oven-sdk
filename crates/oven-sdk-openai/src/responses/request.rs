@@ -325,8 +325,7 @@ fn encode_input(
                         replay_outcome.decisions.push(ReplayDecision {
                             history_index,
                             disposition: ReplayDisposition::DiscardedInvalidPayload {
-                                reason: "unsupported Responses replay format or payload does not match normalized content"
-                                    .into(),
+                                reason: discard_reason(artifact),
                             },
                         });
                     }
@@ -351,6 +350,15 @@ fn encode_input(
         }
     }
     Ok((input, replay_outcome, warnings))
+}
+
+fn discard_reason(artifact: &oven_sdk::NativeReplayArtifact) -> String {
+    match artifact.payload().get("format").and_then(JsonValue::as_str) {
+        Some("oven.openai.responses.output.v1" | "oven.azure.openai.responses.output.v4") => {
+            "Responses replay payload does not match normalized content".to_owned()
+        }
+        _ => "replay artifact format is not supported by the Responses target".to_owned(),
+    }
 }
 
 fn add_tools_and_output(request: &Request, verbosity: Option<&str>, body: &mut JsonValue) {
@@ -611,19 +619,15 @@ fn normalized_assistant(
         return Err(ModelError::replay("Responses tool continuation requires valid native reasoning state"));
     }
     let mut output = Vec::new();
-    let text = parts
-        .iter()
-        .filter_map(|part| match part {
-            AssistantPart::Text(part) => Some(part.text.as_str()),
-            _ => None,
-        })
-        .collect::<String>();
-    if !text.is_empty() {
-        output.push(serde_json::json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}));
-    }
+    // Contiguous text runs stay in position relative to tool items so the
+    // reconstructed input preserves the original turn's interleaving instead
+    // of hoisting all text ahead of the tool calls.
+    let mut text_run = String::new();
     for part in parts {
         match part {
+            AssistantPart::Text(part) => text_run.push_str(&part.text),
             AssistantPart::ToolCall(call) => {
+                push_text_run(&mut output, &mut text_run);
                 let mut item = serde_json::json!({
                     "type":"function_call",
                     "call_id":call.id,
@@ -635,7 +639,10 @@ fn normalized_assistant(
                 }
                 output.push(item);
             }
-            AssistantPart::ToolResult(result) => output.push(function_output(result)?),
+            AssistantPart::ToolResult(result) => {
+                push_text_run(&mut output, &mut text_run);
+                output.push(function_output(result)?);
+            }
             AssistantPart::Custom(part)
                 if part.kind == "openai.responses.reasoning_continuation" =>
             {
@@ -656,5 +663,12 @@ fn normalized_assistant(
             _ => {}
         }
     }
+    push_text_run(&mut output, &mut text_run);
     Ok(output)
+}
+
+fn push_text_run(output: &mut Vec<JsonValue>, text_run: &mut String) {
+    if !text_run.is_empty() {
+        output.push(serde_json::json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":std::mem::take(text_run)}]}));
+    }
 }

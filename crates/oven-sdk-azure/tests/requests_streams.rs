@@ -77,6 +77,54 @@ fn tool_result_request_with_content(content: ToolContent) -> Request {
 }
 
 #[tokio::test]
+async fn responses_normalized_reconstruction_preserves_text_tool_interleaving() {
+    let server = MockServer::start().await;
+    common::mount(
+        &server,
+        "/openai/v1/responses",
+        common::responses_document("ok"),
+    )
+    .await;
+    let call = ToolCallPart::new("call_1", "lookup", serde_json::json!({"x":1}));
+    let turn = CompletedTurn::new(
+        AssistantMessage::new(vec![
+            AssistantPart::Text(TextPart {
+                text: "before ".into(),
+                metadata: None,
+            }),
+            AssistantPart::ToolCall(call),
+            AssistantPart::Text(TextPart {
+                text: "after".into(),
+                metadata: None,
+            }),
+        ]),
+        Finish::new(Default::default(), FinishReason::ToolCalls),
+    );
+    let result = ToolResultPart::new("call_1", ToolContent::Text("done".into()));
+    let request = Request::new(vec![
+        HistoryTurn::assistant(turn),
+        HistoryTurn::tool(ToolMessage::new(vec![result])),
+    ]);
+    common::provider(&server, AzureApiRoute::V1)
+        .responses("deployment", common::gpt5())
+        .unwrap()
+        .complete(request, AbortSignal::default())
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let input = &body["input"];
+    assert_eq!(input[0]["type"], "message");
+    assert_eq!(input[0]["content"][0]["text"], "before ");
+    assert_eq!(input[1]["type"], "function_call");
+    assert_eq!(input[1]["call_id"], "call_1");
+    assert_eq!(input[2]["type"], "message");
+    assert_eq!(input[2]["content"][0]["text"], "after");
+    assert_eq!(input[3]["type"], "function_call_output");
+    assert_eq!(input[3]["call_id"], "call_1");
+}
+
+#[tokio::test]
 async fn responses_tool_result_images_encode_as_input_items_and_other_files_reject() {
     let server = MockServer::start().await;
     common::mount(
