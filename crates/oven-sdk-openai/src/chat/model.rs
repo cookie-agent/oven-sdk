@@ -634,10 +634,18 @@ async fn read_live(live: &mut LiveState, stop_after_event: bool) -> Result<bool,
     }
     let semantic = process_events(live, stop_after_event)?;
     if live.eof && !live.state.done() {
-        return Err(ModelError::unexpected_eof(
-            "OpenAI Chat stream ended before the [DONE] marker",
-        )
-        .with_bytes_received(live.count));
+        if !live.state.saw_finish_reason() {
+            return Err(ModelError::unexpected_eof(
+                "OpenAI Chat stream ended before the [DONE] marker",
+            )
+            .with_bytes_received(live.count));
+        }
+        // Compatible providers may omit the [DONE] marker after a declared
+        // finish_reason; the terminal event already closed the turn.
+        let mut parts = Vec::new();
+        live.state.finish(false, &mut parts, live.count)?;
+        live.queue.extend(parts.into_iter().map(Ok));
+        return Ok(true);
     }
     Ok(semantic)
 }

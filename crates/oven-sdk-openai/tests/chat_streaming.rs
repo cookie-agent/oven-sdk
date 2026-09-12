@@ -159,6 +159,22 @@ async fn clean_eof_without_finish_reason_is_unexpected_eof() {
 }
 
 #[tokio::test]
+async fn clean_eof_after_finish_reason_without_done_completes() {
+    let server = MockServer::start().await;
+    common::mount(
+        &server,
+        "/chat/completions",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n".into(),
+    )
+    .await;
+    let completed = common::official_chat(&server, "gpt-4o-mini")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    assert_eq!(completed.turn.finish.finish_reason, FinishReason::Stop);
+}
+
+#[tokio::test]
 async fn fragmented_refusal_becomes_one_custom_part() {
     let server = MockServer::start().await;
     let body = concat!(

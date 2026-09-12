@@ -378,6 +378,10 @@ impl State {
         Ok(())
     }
 
+    pub(crate) fn saw_finish_reason(&self) -> bool {
+        self.finish_reason.is_some()
+    }
+
     pub(crate) fn in_band_error(
         &mut self,
         error: ModelError,
