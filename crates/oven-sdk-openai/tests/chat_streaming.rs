@@ -142,7 +142,7 @@ async fn malformed_and_empty_final_arguments_are_invalid_response() {
 }
 
 #[tokio::test]
-async fn clean_eof_without_finish_reason_is_unknown() {
+async fn clean_eof_without_finish_reason_is_unexpected_eof() {
     let server = MockServer::start().await;
     common::mount(
         &server,
@@ -150,11 +150,12 @@ async fn clean_eof_without_finish_reason_is_unknown() {
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n".into(),
     )
     .await;
-    let completed = common::official_chat(&server, "gpt-4o-mini")
+    let error = common::official_chat(&server, "gpt-4o-mini")
         .complete(Request::new(Vec::new()), AbortSignal::default())
         .await
-        .unwrap();
-    assert_eq!(completed.turn.finish.finish_reason, FinishReason::Unknown);
+        .unwrap_err();
+    assert_eq!(error.kind, ModelErrorKind::UnexpectedEof);
+    assert!(error.message.contains("ended before the [DONE] marker"));
 }
 
 #[tokio::test]
