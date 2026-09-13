@@ -118,20 +118,27 @@ impl State {
             let delta = choice.get("delta").unwrap_or(&JsonValue::Null);
             self.apply_reasoning(delta, parts);
             if let Some(content) = delta.get("content").and_then(JsonValue::as_str) {
-                self.close_reasoning(parts);
-                if !self.text_open {
-                    self.text_open = true;
-                    parts.push(StreamPart::TextStart {
+                // Providers send an empty `content` chunk with the role delta
+                // before any text (and often before `reasoning_content`).
+                // Opening the text block there would stamp it ahead of a
+                // reasoning block that semantically precedes it, so committed
+                // content order shows thinking after the text.
+                if !content.is_empty() {
+                    self.close_reasoning(parts);
+                    if !self.text_open {
+                        self.text_open = true;
+                        parts.push(StreamPart::TextStart {
+                            id: "0".into(),
+                            metadata: None,
+                        });
+                    }
+                    self.text.push_str(content);
+                    parts.push(StreamPart::TextDelta {
                         id: "0".into(),
+                        delta: content.into(),
                         metadata: None,
                     });
                 }
-                self.text.push_str(content);
-                parts.push(StreamPart::TextDelta {
-                    id: "0".into(),
-                    delta: content.into(),
-                    metadata: None,
-                });
             }
             if let Some(refusal) = delta.get("refusal").and_then(JsonValue::as_str) {
                 self.refusal.push_str(refusal);
@@ -526,6 +533,121 @@ fn optional_usage_u64(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oven_sdk::{ModelId, ProviderId, ResourceId};
+
+    fn test_state() -> State {
+        State::new(
+            AdapterId::new("openai-compatible"),
+            NativeContextScope::new(
+                ProviderId::new("test-provider"),
+                ModelId::new("test-model"),
+                ResourceId::new("test-resource").expect("test resource id constructs"),
+            )
+            .expect("test scope constructs"),
+            ReplayPolicy::Never,
+            ReasoningField::ReasoningContent,
+        )
+    }
+
+    fn chunk(delta: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"choices": [{"index": 0, "delta": delta}]})
+    }
+
+    fn part_kinds(parts: &[StreamPart]) -> Vec<&'static str> {
+        parts
+            .iter()
+            .map(|part| match part {
+                StreamPart::StreamStart { .. } => "stream_start",
+                StreamPart::TextStart { .. } => "text_start",
+                StreamPart::TextDelta { .. } => "text_delta",
+                StreamPart::TextEnd { .. } => "text_end",
+                StreamPart::ReasoningStart { .. } => "reasoning_start",
+                StreamPart::ReasoningDelta { .. } => "reasoning_delta",
+                StreamPart::ReasoningEnd { .. } => "reasoning_end",
+                StreamPart::ToolCall { .. } => "tool_call",
+                StreamPart::ApprovalRequested { .. } => "approval_requested",
+                StreamPart::ToolResult { .. } => "tool_result",
+                StreamPart::Custom { .. } => "custom",
+                StreamPart::Finish { .. } => "finish",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn empty_role_chunk_does_not_open_text_before_reasoning() {
+        let mut state = test_state();
+        let mut parts = Vec::new();
+
+        // Providers emit the role chunk with empty content first; reasoning
+        // streams afterwards, then the actual text.
+        state
+            .apply(
+                chunk(serde_json::json!({"role": "assistant", "content": ""})),
+                &mut parts,
+                0,
+            )
+            .expect("role chunk applies");
+        state
+            .apply(
+                chunk(serde_json::json!({"reasoning_content": "Thinking first."})),
+                &mut parts,
+                0,
+            )
+            .expect("reasoning chunk applies");
+        state
+            .apply(
+                chunk(serde_json::json!({"content": "Answer."})),
+                &mut parts,
+                0,
+            )
+            .expect("text chunk applies");
+
+        assert_eq!(
+            part_kinds(&parts),
+            vec![
+                "reasoning_start",
+                "reasoning_delta",
+                "reasoning_end",
+                "text_start",
+                "text_delta",
+            ],
+            "empty role content must not stamp the text block ahead of reasoning"
+        );
+    }
+
+    #[test]
+    fn empty_content_chunks_midstream_are_ignored() {
+        let mut state = test_state();
+        let mut parts = Vec::new();
+
+        state
+            .apply(
+                chunk(serde_json::json!({"content": "Hello"})),
+                &mut parts,
+                0,
+            )
+            .expect("text chunk applies");
+        let after_hello = parts.len();
+        state
+            .apply(chunk(serde_json::json!({"content": ""})), &mut parts, 0)
+            .expect("empty chunk applies");
+        state
+            .apply(
+                chunk(serde_json::json!({"content": " world"})),
+                &mut parts,
+                0,
+            )
+            .expect("second text chunk applies");
+
+        assert_eq!(
+            part_kinds(&parts),
+            vec!["text_start", "text_delta", "text_delta"],
+            "empty heartbeat chunks contribute no parts"
+        );
+        assert_eq!(parts.len(), after_hello + 1);
+        assert_eq!(state.text, "Hello world");
+    }
 
     #[test]
     fn cache_write_usage_is_optional_and_validated() {
