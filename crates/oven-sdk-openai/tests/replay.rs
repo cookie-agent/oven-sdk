@@ -116,6 +116,74 @@ async fn chat_current_format_round_trips_and_foreign_reconstructs() {
 }
 
 #[tokio::test]
+async fn chat_replay_matches_history_that_dropped_whitespace_only_text() {
+    // Thinking providers close the turn with a whitespace-only text block
+    // between the reasoning and the tool calls. Canonical history drops that
+    // part; the replay artifact still carries it, and the semantic comparison
+    // must treat whitespace-only text as no content so the artifact replays.
+    let document = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\n\\n\\n\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let server = MockServer::start().await;
+    common::mount(&server, "/chat/completions", document.to_string()).await;
+    let config = common::compatible_config(&server, "fixture-model");
+    let mut settings = config.settings;
+    settings.reasoning_field = ReasoningField::ReasoningContent;
+    let model = OpenAiCompatibleChatModel::new(oven_sdk::ModelConfig::new(
+        config.provider,
+        config.model,
+        settings,
+    ))
+    .expect("compatible Chat model");
+    let first = model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .expect("complete");
+    let mut normalized = first.turn;
+    normalized
+        .message
+        .content
+        .retain(|part| !matches!(part, AssistantPart::Text(text) if text.text.trim().is_empty()));
+    assert!(
+        matches!(
+            normalized.message.content.first(),
+            Some(AssistantPart::Reasoning(_))
+        ),
+        "fixture turn opens with reasoning once whitespace text is dropped"
+    );
+    let replayed = model
+        .stream(
+            Request::new(vec![
+                HistoryTurn::assistant(normalized),
+                HistoryTurn::tool(oven_sdk::ToolMessage::new(vec![
+                    oven_sdk::ToolResultPart::new(
+                        "call_1",
+                        oven_sdk::ToolContent::Text("done".into()),
+                    ),
+                ])),
+            ]),
+            AbortSignal::default(),
+        )
+        .await
+        .expect("stream");
+    assert!(
+        matches!(
+            replayed.request.replay.decisions.as_slice(),
+            [oven_sdk::ReplayDecision {
+                disposition: ReplayDisposition::Replayed,
+                ..
+            }]
+        ),
+        "whitespace-only artifact text must not discard the replay payload"
+    );
+}
+
+#[tokio::test]
 async fn invalid_same_adapter_payload_discards_and_reconstructs() {
     let server = MockServer::start().await;
     common::mount(&server, "/chat/completions", common::chat_document("ok")).await;

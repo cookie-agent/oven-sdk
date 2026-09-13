@@ -119,6 +119,10 @@ fn semantic_message(message: &JsonValue, reasoning_field: ChatReasoningField) ->
         .get("content")
         .and_then(JsonValue::as_str)
         .unwrap_or_default();
+    // Canonical history drops whitespace-only text parts, so they carry no
+    // semantic content here either; a message holding only whitespace text
+    // (common before a tool call) must still match that history.
+    let text = if text.trim().is_empty() { "" } else { text };
     let reasoning = message
         .get(match reasoning_field {
             ChatReasoningField::None | ChatReasoningField::ReasoningContent => "reasoning_content",
@@ -156,6 +160,9 @@ fn semantic_normalized(normalized: &[AssistantPart]) -> JsonValue {
     let mut tools = Vec::new();
     for part in normalized {
         match part {
+            // Whitespace-only text parts are dropped from canonical history
+            // and therefore contribute no semantic content.
+            AssistantPart::Text(part) if part.text.trim().is_empty() => {}
             AssistantPart::Text(part) => text.push_str(&part.text),
             AssistantPart::Reasoning(part) => reasoning.push_str(&part.text),
             AssistantPart::ToolCall(call) => tools.push(serde_json::json!({
