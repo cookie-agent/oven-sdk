@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::{AssistantPart, JsonValue, NativeReplayArtifact};
+use crate::{AssistantPart, JsonValue, NativeReplayArtifact, is_semantic_text};
 
 /// Explicit target wire field for visible, non-encrypted Chat reasoning.
 #[derive(Clone, Copy)]
@@ -119,10 +119,9 @@ fn semantic_message(message: &JsonValue, reasoning_field: ChatReasoningField) ->
         .get("content")
         .and_then(JsonValue::as_str)
         .unwrap_or_default();
-    // Canonical history drops whitespace-only text parts, so they carry no
-    // semantic content here either; a message holding only whitespace text
-    // (common before a tool call) must still match that history.
-    let text = if text.trim().is_empty() { "" } else { text };
+    // Whitespace-only text is not semantic content (see `is_semantic_text`),
+    // even though the native artifact may preserve the provider's raw bytes.
+    let text = if is_semantic_text(text) { text } else { "" };
     let reasoning = message
         .get(match reasoning_field {
             ChatReasoningField::None | ChatReasoningField::ReasoningContent => "reasoning_content",
@@ -160,9 +159,9 @@ fn semantic_normalized(normalized: &[AssistantPart]) -> JsonValue {
     let mut tools = Vec::new();
     for part in normalized {
         match part {
-            // Whitespace-only text parts are dropped from canonical history
-            // and therefore contribute no semantic content.
-            AssistantPart::Text(part) if part.text.trim().is_empty() => {}
+            // Whitespace-only text parts carry no semantic content
+            // (see `is_semantic_text`).
+            AssistantPart::Text(part) if !is_semantic_text(&part.text) => {}
             AssistantPart::Text(part) => text.push_str(&part.text),
             AssistantPart::Reasoning(part) => reasoning.push_str(&part.text),
             AssistantPart::ToolCall(call) => tools.push(serde_json::json!({

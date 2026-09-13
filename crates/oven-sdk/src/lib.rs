@@ -780,6 +780,21 @@ impl TextPart {
     }
 }
 
+/// Returns whether assistant text carries semantic content.
+///
+/// This is the single definition of visible text content for normalized
+/// turns: text that is entirely whitespace renders as nothing, so it is not
+/// content even when the provider sent it as non-empty deltas. Consumers
+/// materializing canonical assistant turns (accumulators, transcripts, replay
+/// validators) must apply this rule so providers that pad thinking-model
+/// responses with whitespace filler do not produce blank content rows or
+/// replay mismatches. Providers' raw bytes remain preserved in native replay
+/// metadata; this rule governs only the normalized view.
+#[must_use]
+pub fn is_semantic_text(value: &str) -> bool {
+    !value.trim().is_empty()
+}
+
 /// A typed visible reasoning or reasoning-summary part.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReasoningPart {
