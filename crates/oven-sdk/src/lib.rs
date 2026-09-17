@@ -894,8 +894,16 @@ pub struct ToolCallPart {
     /// Requested tool name.
     pub name: String,
     /// Parsed JSON input.
+    ///
+    /// `JsonValue::Null` together with a `Some` [`raw_input`](Self::raw_input)
+    /// is the marked-invalid convention: the provider's argument text was not a
+    /// valid JSON object and must be treated as failed tool input, never as
+    /// executable arguments.
     pub input: JsonValue,
     /// Exact assembled provider argument text when needed.
+    ///
+    /// For a marked-invalid call (see [`input`](Self::input)) this preserves
+    /// the verbatim provider bytes so replay can round-trip them.
     pub raw_input: Option<String>,
     /// Provider-specific part metadata.
     pub metadata: PartMetadata,
@@ -4007,22 +4015,56 @@ pub trait LanguageModel: Send + Sync {
                                 ));
                             }
                             if !block.arguments.is_empty() {
-                                let input: JsonValue = serde_json::from_str(&block.arguments)
-                                    .map_err(|_| {
-                                        ModelError::invalid_response(
-                                            "tool-call argument stream is not valid JSON",
-                                        )
-                                    })?;
-                                if input != tool_call.input {
-                                    return Err(ModelError::invalid_response(
-                                        "finalized tool call input does not match streamed arguments",
-                                    ));
-                                }
-                                if let Some(raw_input) = &tool_call.raw_input
-                                    && raw_input != &block.arguments
+                                let parsed = serde_json::from_str::<JsonValue>(&block.arguments);
+                                let parsed_object =
+                                    parsed.as_ref().ok().filter(|value| value.is_object());
+                                if let Some(input) = parsed_object {
+                                    if input != &tool_call.input {
+                                        return Err(ModelError::invalid_response(
+                                            "finalized tool call input does not match streamed arguments",
+                                        ));
+                                    }
+                                    if let Some(raw_input) = &tool_call.raw_input
+                                        && raw_input != &block.arguments
+                                    {
+                                        return Err(ModelError::invalid_response(
+                                            "finalized tool call raw input does not match streamed arguments",
+                                        ));
+                                    }
+                                } else if tool_call.input.is_null()
+                                    && tool_call.raw_input.as_deref()
+                                        == Some(block.arguments.as_str())
                                 {
+                                    // Adapters mark argument text that is not a
+                                    // JSON object (unparseable, or a bare
+                                    // array/number/string/null) with `input: null`
+                                    // plus the verbatim raw bytes. That is a
+                                    // recoverable, observable tool failure, not
+                                    // collector corruption; anything else is still
+                                    // a hard error.
+                                    warnings.push(format!(
+                                        "tool call `{}` finalized with arguments that are not a valid JSON object; input surfaced as null",
+                                        tool_call.id
+                                    ));
+                                } else if let Ok(input) = &parsed {
+                                    // Preserve the pre-existing acceptance of a
+                                    // valid non-object value that exactly matches
+                                    // the finalized input (unmarked legacy shape).
+                                    if input != &tool_call.input {
+                                        return Err(ModelError::invalid_response(
+                                            "finalized tool call input does not match streamed arguments",
+                                        ));
+                                    }
+                                    if let Some(raw_input) = &tool_call.raw_input
+                                        && raw_input != &block.arguments
+                                    {
+                                        return Err(ModelError::invalid_response(
+                                            "finalized tool call raw input does not match streamed arguments",
+                                        ));
+                                    }
+                                } else {
                                     return Err(ModelError::invalid_response(
-                                        "finalized tool call raw input does not match streamed arguments",
+                                        "tool-call argument stream is not valid JSON",
                                     ));
                                 }
                                 tool_call.raw_input = Some(block.arguments);
@@ -4622,6 +4664,144 @@ mod tests {
                 tool_result: ToolResultPart::new("call", ToolContent::Text("second".into())),
             },
             finish(FinishReason::Stop),
+        ]);
+    }
+
+    #[test]
+    fn collector_accepts_marked_invalid_tool_arguments_with_warning() {
+        let mut call = ToolCallPart::new("call", "tool", JsonValue::Null);
+        call.raw_input = Some("[".into());
+        let turn = collect(vec![
+            StreamPart::ToolCallStart {
+                id: "call".into(),
+                name: "tool".into(),
+                metadata: None,
+            },
+            StreamPart::ToolCallDelta {
+                id: "call".into(),
+                delta: "[".into(),
+                metadata: None,
+            },
+            StreamPart::ToolCallEnd {
+                id: "call".into(),
+                metadata: None,
+            },
+            StreamPart::ToolCall { tool_call: call },
+            finish(FinishReason::ToolCalls),
+        ])
+        .expect("marked-invalid tool arguments are accepted");
+        assert_eq!(
+            turn.warnings,
+            vec![
+                "tool call `call` finalized with arguments that are not a valid JSON object; input surfaced as null"
+            ]
+        );
+        assert!(matches!(
+            &turn.message.content[0],
+            AssistantPart::ToolCall(ToolCallPart {
+                input: JsonValue::Null,
+                raw_input: Some(raw),
+                ..
+            }) if raw == "["
+        ));
+    }
+
+    #[test]
+    fn collector_accepts_marked_invalid_non_object_tool_arguments_with_warning() {
+        for arguments in ["[]", "123", "\"x\"", "null"] {
+            let mut call = ToolCallPart::new("call", "tool", JsonValue::Null);
+            call.raw_input = Some(arguments.into());
+            let turn = collect(vec![
+                StreamPart::ToolCallStart {
+                    id: "call".into(),
+                    name: "tool".into(),
+                    metadata: None,
+                },
+                StreamPart::ToolCallDelta {
+                    id: "call".into(),
+                    delta: arguments.into(),
+                    metadata: None,
+                },
+                StreamPart::ToolCallEnd {
+                    id: "call".into(),
+                    metadata: None,
+                },
+                StreamPart::ToolCall { tool_call: call },
+                finish(FinishReason::ToolCalls),
+            ])
+            .unwrap_or_else(|error| panic!("{arguments} must be accepted: {error:?}"));
+            assert_eq!(
+                turn.warnings,
+                vec![
+                    "tool call `call` finalized with arguments that are not a valid JSON object; input surfaced as null"
+                ]
+            );
+            assert!(matches!(
+                &turn.message.content[0],
+                AssistantPart::ToolCall(ToolCallPart {
+                    input: JsonValue::Null,
+                    raw_input: Some(raw),
+                    ..
+                }) if raw == arguments
+            ));
+        }
+    }
+
+    #[test]
+    fn collector_accepts_unmarked_non_object_tool_arguments_matching_input() {
+        let mut call = ToolCallPart::new("call", "tool", serde_json::json!([]));
+        call.raw_input = Some("[]".into());
+        let turn = collect(vec![
+            StreamPart::ToolCallStart {
+                id: "call".into(),
+                name: "tool".into(),
+                metadata: None,
+            },
+            StreamPart::ToolCallDelta {
+                id: "call".into(),
+                delta: "[]".into(),
+                metadata: None,
+            },
+            StreamPart::ToolCallEnd {
+                id: "call".into(),
+                metadata: None,
+            },
+            StreamPart::ToolCall { tool_call: call },
+            finish(FinishReason::ToolCalls),
+        ])
+        .expect("unmarked non-object value matching the finalized input is accepted");
+        assert!(turn.warnings.is_empty());
+        assert!(matches!(
+            &turn.message.content[0],
+            AssistantPart::ToolCall(ToolCallPart {
+                input: JsonValue::Array(values),
+                raw_input: Some(raw),
+                ..
+            }) if values.is_empty() && raw == "[]"
+        ));
+    }
+
+    #[test]
+    fn collector_rejects_unmarked_unparseable_tool_arguments() {
+        assert_invalid(vec![
+            StreamPart::ToolCallStart {
+                id: "call".into(),
+                name: "tool".into(),
+                metadata: None,
+            },
+            StreamPart::ToolCallDelta {
+                id: "call".into(),
+                delta: "[".into(),
+                metadata: None,
+            },
+            StreamPart::ToolCallEnd {
+                id: "call".into(),
+                metadata: None,
+            },
+            StreamPart::ToolCall {
+                tool_call: ToolCallPart::new("call", "tool", JsonValue::Null),
+            },
+            finish(FinishReason::ToolCalls),
         ]);
     }
 

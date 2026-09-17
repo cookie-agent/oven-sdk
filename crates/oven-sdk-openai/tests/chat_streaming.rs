@@ -127,18 +127,202 @@ async fn repeated_tool_index_and_missing_identity_finalize_with_stable_ids() {
 }
 
 #[tokio::test]
-async fn malformed_and_empty_final_arguments_are_invalid_response() {
-    for arguments in ["", "["] {
+async fn empty_final_arguments_become_empty_object() {
+    let server = MockServer::start().await;
+    let event = serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"tool","arguments":""}}]},"finish_reason":"tool_calls"}]});
+    let body = format!("data: {event}\n\ndata: [DONE]\n\n");
+    common::mount(&server, "/chat/completions", body).await;
+    let completed = common::official_chat(&server, "gpt-4o-mini")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let call = completed
+        .turn
+        .message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            oven_sdk::AssistantPart::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .expect("finalized tool call");
+    assert_eq!(call.input, serde_json::json!({}));
+    assert!(call.raw_input.is_none());
+    assert!(completed.turn.warnings.is_empty());
+}
+
+#[tokio::test]
+async fn invalid_final_arguments_are_marked_invalid() {
+    let server = MockServer::start().await;
+    let event = serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"tool","arguments":"["}}]},"finish_reason":"tool_calls"}]});
+    let body = format!("data: {event}\n\ndata: [DONE]\n\n");
+    common::mount(&server, "/chat/completions", body).await;
+    let completed = common::official_chat(&server, "gpt-4o-mini")
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let call = completed
+        .turn
+        .message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            oven_sdk::AssistantPart::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .expect("finalized tool call");
+    assert!(call.input.is_null());
+    assert_eq!(call.raw_input.as_deref(), Some("["));
+    assert_eq!(
+        completed.turn.warnings,
+        vec![
+            "tool call `call` finalized with arguments that are not a valid JSON object; input surfaced as null"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn non_object_final_arguments_are_marked_invalid() {
+    for arguments in ["[]", "123", "\"x\"", "null"] {
         let server = MockServer::start().await;
         let event = serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"tool","arguments":arguments}}]},"finish_reason":"tool_calls"}]});
         let body = format!("data: {event}\n\ndata: [DONE]\n\n");
         common::mount(&server, "/chat/completions", body).await;
-        let error = common::official_chat(&server, "gpt-4o-mini")
+        let completed = common::official_chat(&server, "gpt-4o-mini")
             .complete(Request::new(Vec::new()), AbortSignal::default())
             .await
-            .unwrap_err();
-        assert_eq!(error.kind, ModelErrorKind::InvalidResponse);
+            .unwrap();
+        let call = completed
+            .turn
+            .message
+            .content
+            .iter()
+            .find_map(|part| match part {
+                oven_sdk::AssistantPart::ToolCall(call) => Some(call),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{arguments} must finalize a tool call"));
+        assert!(call.input.is_null(), "{arguments} must surface null input");
+        assert_eq!(call.raw_input.as_deref(), Some(arguments));
+        assert_eq!(
+            completed.turn.warnings,
+            vec![
+                "tool call `call` finalized with arguments that are not a valid JSON object; input surfaced as null"
+            ],
+            "{arguments} must carry the marked-invalid warning"
+        );
     }
+}
+
+#[tokio::test]
+async fn zero_argument_tool_replays_canonical_empty_object() {
+    let server = MockServer::start().await;
+    let event = serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"noop","arguments":""}}]},"finish_reason":"tool_calls"}]});
+    let body = format!("data: {event}\n\ndata: [DONE]\n\n");
+    common::mount(&server, "/chat/completions", body).await;
+    let model = common::official_chat(&server, "gpt-4o-mini");
+    let first = model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    assert_eq!(first.turn.finish.finish_reason, FinishReason::ToolCalls);
+    let artifact = first
+        .turn
+        .finish
+        .native_replay
+        .as_ref()
+        .expect("replay artifact");
+    assert_eq!(
+        artifact
+            .payload()
+            .pointer("/message/tool_calls/0/function/arguments"),
+        Some(&serde_json::Value::String("{}".into())),
+        "canonical zero-argument calls replay as an empty object"
+    );
+    let replayed = model
+        .stream(
+            Request::new(vec![
+                oven_sdk::HistoryTurn::assistant(first.turn),
+                oven_sdk::HistoryTurn::tool(oven_sdk::ToolMessage::new(vec![
+                    oven_sdk::ToolResultPart::new(
+                        "call",
+                        oven_sdk::ToolContent::Text("done".into()),
+                    ),
+                ])),
+            ]),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        replayed.request.replay.decisions.as_slice(),
+        [oven_sdk::ReplayDecision {
+            disposition: oven_sdk::ReplayDisposition::Replayed,
+            ..
+        }]
+    ));
+}
+
+#[tokio::test]
+async fn truncated_tool_arguments_replay_the_recorded_raw_string() {
+    let server = MockServer::start().await;
+    let truncated = "{\"query\":\"par";
+    let event = serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"search","arguments":truncated}}]},"finish_reason":"length"}]});
+    let body = format!("data: {event}\n\ndata: [DONE]\n\n");
+    common::mount(&server, "/chat/completions", body).await;
+    let model = common::official_chat(&server, "gpt-4o-mini");
+    let first = model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    assert_eq!(first.turn.finish.finish_reason, FinishReason::Length);
+    let call = first
+        .turn
+        .message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            oven_sdk::AssistantPart::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .expect("finalized tool call");
+    assert!(call.input.is_null());
+    assert_eq!(call.raw_input.as_deref(), Some(truncated));
+
+    let second = model
+        .stream(
+            Request::new(vec![
+                oven_sdk::HistoryTurn::assistant(first.turn),
+                oven_sdk::HistoryTurn::tool(oven_sdk::ToolMessage::new(vec![
+                    oven_sdk::ToolResultPart::new(
+                        "call",
+                        oven_sdk::ToolContent::Text("failed".into()),
+                    ),
+                ])),
+            ]),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        second.request.replay.decisions.as_slice(),
+        [
+            oven_sdk::ReplayDecision {
+                disposition: oven_sdk::ReplayDisposition::DiscardedInvalidPayload { .. },
+                ..
+            },
+            oven_sdk::ReplayDecision {
+                disposition: oven_sdk::ReplayDisposition::ReconstructedNormalized,
+                ..
+            }
+        ]
+    ));
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(
+        body["messages"][0]["tool_calls"][0]["function"]["arguments"], truncated,
+        "reconstruction must keep the verbatim recorded argument bytes"
+    );
 }
 
 #[tokio::test]

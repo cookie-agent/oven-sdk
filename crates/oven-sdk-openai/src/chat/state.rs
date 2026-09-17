@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use oven_sdk::{
-    AdapterId, CustomPart, ErrorStage, Finish, FinishReason, JsonValue, ModelError, ModelErrorKind,
+    AdapterId, CustomPart, ErrorStage, Finish, FinishReason, JsonValue, ModelError,
     NativeContextScope, NativeReplayArtifact, ReplayPolicy, StreamPart, ToolCallPart, Usage,
 };
 
@@ -33,6 +33,9 @@ pub(crate) struct State {
     tools: BTreeMap<(u64, u64), ToolState>,
     tool_ids: BTreeSet<String>,
     next_tool_order: u64,
+    /// Most recently touched tool key, used to route id-less/index-less
+    /// continuation deltas.
+    last_tool: Option<(u64, u64)>,
     usage: Usage,
     finish_reason: Option<String>,
     response_metadata: BTreeMap<String, JsonValue>,
@@ -59,6 +62,7 @@ impl State {
             tools: BTreeMap::new(),
             tool_ids: BTreeSet::new(),
             next_tool_order: 0,
+            last_tool: None,
             usage: Usage::default(),
             finish_reason: None,
             response_metadata: BTreeMap::new(),
@@ -143,7 +147,9 @@ impl State {
             if let Some(refusal) = delta.get("refusal").and_then(JsonValue::as_str) {
                 self.refusal.push_str(refusal);
             }
-            if let Some(calls) = delta.get("tool_calls").and_then(JsonValue::as_array) {
+            if let Some(calls) = delta.get("tool_calls").and_then(JsonValue::as_array)
+                && !calls.is_empty()
+            {
                 self.close_reasoning(parts);
                 for call in calls {
                     self.apply_tool(choice_index, call, parts, bytes)?;
@@ -162,6 +168,13 @@ impl State {
         let Some(reasoning) = delta.get(field).and_then(JsonValue::as_str) else {
             return;
         };
+        // Vercel treats an empty reasoning chunk as falsy and emits nothing; do
+        // not open the block for `""`. Whitespace-only chunks are non-empty and
+        // still stream (whitespace semantics live in the normalized/replay
+        // layer, not the raw event layer).
+        if reasoning.is_empty() {
+            return;
+        }
         if !self.reasoning_open {
             self.reasoning_open = true;
             parts.push(StreamPart::ReasoningStart {
@@ -184,26 +197,79 @@ impl State {
         parts: &mut Vec<StreamPart>,
         bytes: u64,
     ) -> Result<(), ModelError> {
-        let mut index = call.get("index").and_then(JsonValue::as_u64).unwrap_or(0);
+        let explicit_index = call.get("index").and_then(JsonValue::as_u64);
         let provider_id = call
             .get("id")
             .and_then(JsonValue::as_str)
             .filter(|id| !id.is_empty());
         let provider_name = call.pointer("/function/name").and_then(JsonValue::as_str);
-        let starts_new_call = self.tools.get(&(choice_index, index)).is_some_and(|state| {
-            provider_id.is_some_and(|id| {
-                state
-                    .provider_id
-                    .as_deref()
-                    .is_some_and(|existing| existing != id)
-                    || provider_name.is_some_and(|name| {
-                        state
-                            .name
-                            .as_deref()
-                            .is_some_and(|existing| existing != name)
-                    })
-            })
-        });
+
+        // Continuation routing precedence (mirrors Vercel's streaming tool-call
+        // tracker): a non-empty provider id that matches an existing call for
+        // this choice wins over the chunk's own index; an explicit index comes
+        // next; and a delta carrying neither id nor index continues the most
+        // recently touched call. The BTreeMap key remains storage-only, so
+        // routing must no longer assume key == provider index.
+        let mut index;
+        let mut force_new_call = false;
+        if let Some(id) = provider_id {
+            // Ambiguity (two states sharing one provider id after `-N`
+            // deduplication) resolves to the greatest key for determinism.
+            let matched = self
+                .tools
+                .iter()
+                .filter(|((choice, _), state)| {
+                    *choice == choice_index && state.provider_id.as_deref() == Some(id)
+                })
+                .map(|(key, _)| *key)
+                .next_back();
+            match matched {
+                Some(key) => {
+                    let name_conflict = self.tools.get(&key).is_some_and(|state| {
+                        provider_name.is_some_and(|name| {
+                            state
+                                .name
+                                .as_deref()
+                                .is_some_and(|existing| existing != name)
+                        })
+                    });
+                    if name_conflict {
+                        force_new_call = true;
+                        index = explicit_index
+                            .or_else(|| self.last_tool.map(|(_, index)| index))
+                            .unwrap_or(key.1);
+                    } else {
+                        index = key.1;
+                    }
+                }
+                None => {
+                    // A provider id that matches nothing starts a new call;
+                    // its explicit index (or 0) is only a storage hint and
+                    // collides into a fresh allocation below.
+                    index = explicit_index.unwrap_or(0);
+                }
+            }
+        } else if let Some(explicit_index) = explicit_index {
+            index = explicit_index;
+        } else {
+            index = self.last_tool.map(|(_, index)| index).unwrap_or(0);
+        }
+
+        let starts_new_call = force_new_call
+            || self.tools.get(&(choice_index, index)).is_some_and(|state| {
+                provider_id.is_some_and(|id| {
+                    state
+                        .provider_id
+                        .as_deref()
+                        .is_some_and(|existing| existing != id)
+                        || provider_name.is_some_and(|name| {
+                            state
+                                .name
+                                .as_deref()
+                                .is_some_and(|existing| existing != name)
+                        })
+                })
+            });
         if starts_new_call {
             index = self
                 .tools
@@ -253,7 +319,14 @@ impl State {
                 metadata: None,
             });
         }
-        if state.started && state.emitted < state.arguments.len() {
+        // Withhold deltas while the entire accumulated argument text is
+        // whitespace-only so zero-argument calls never open a streamed
+        // argument block (collectors then take their empty-argument path).
+        // Withheld whitespace flushes together with the first real content.
+        if state.started
+            && !state.arguments.trim().is_empty()
+            && state.emitted < state.arguments.len()
+        {
             let delta = state.arguments[state.emitted..].to_owned();
             state.emitted = state.arguments.len();
             let id = state
@@ -266,6 +339,7 @@ impl State {
                 metadata: None,
             });
         }
+        self.last_tool = Some((choice_index, index));
         Ok(())
     }
 
@@ -273,7 +347,7 @@ impl State {
         &mut self,
         done_marker: bool,
         parts: &mut Vec<StreamPart>,
-        bytes: u64,
+        _bytes: u64,
     ) -> Result<(), ModelError> {
         if self.done {
             return Ok(());
@@ -302,7 +376,7 @@ impl State {
                     name: name.clone(),
                     metadata: None,
                 });
-                if !tool.arguments.is_empty() {
+                if !tool.arguments.trim().is_empty() {
                     parts.push(StreamPart::ToolCallDelta {
                         id: id.clone(),
                         delta: tool.arguments.clone(),
@@ -310,23 +384,35 @@ impl State {
                     });
                 }
             }
-            let parsed: JsonValue = serde_json::from_str(&tool.arguments).map_err(|_| {
-                invalid_finalize("final Chat tool arguments are invalid JSON", bytes)
-            })?;
-            if !parsed.is_object() {
-                return Err(invalid_finalize(
-                    "final Chat tool arguments must be a JSON object",
-                    bytes,
-                ));
-            }
+            // Three-way classification, independent of `finish_reason`:
+            //   1. whitespace-only arguments are a canonical zero-argument call;
+            //   2. object JSON is the happy path;
+            //   3. anything else is a marked-invalid call: `input` is null and
+            //      the raw provider text is preserved. `null` fails every
+            //      published tool's object schema downstream, so this surfaces
+            //      as a recoverable tool error rather than a fabricated call.
+            let empty = tool.arguments.trim().is_empty();
+            let (parsed, raw_input) = if empty {
+                (serde_json::json!({}), None)
+            } else {
+                match serde_json::from_str::<JsonValue>(&tool.arguments) {
+                    Ok(parsed) if parsed.is_object() => (parsed, Some(tool.arguments.clone())),
+                    _ => (JsonValue::Null, Some(tool.arguments.clone())),
+                }
+            };
             parts.push(StreamPart::ToolCallEnd {
                 id: id.clone(),
                 metadata: None,
             });
             let mut call = ToolCallPart::new(id.clone(), name.clone(), parsed);
-            call.raw_input = Some(tool.arguments.clone());
+            call.raw_input = raw_input;
             parts.push(StreamPart::ToolCall { tool_call: call });
-            let mut native = serde_json::json!({"id":id,"type":"function","function":{"arguments":tool.arguments}});
+            let native_arguments = if empty {
+                "{}".to_owned()
+            } else {
+                tool.arguments.clone()
+            };
+            let mut native = serde_json::json!({"id":id,"type":"function","function":{"arguments":native_arguments}});
             if let Some(provider_name) = provider_name {
                 native["function"]["name"] = provider_name.into();
             }
@@ -467,12 +553,6 @@ fn reserve_tool_id(
     unreachable!("unbounded tool ID suffix space")
 }
 
-fn invalid_finalize(message: &str, bytes: u64) -> ModelError {
-    ModelError::new(ModelErrorKind::InvalidResponse, message)
-        .with_stage(ErrorStage::StreamFinalize)
-        .with_bytes_received(bytes)
-}
-
 fn map_finish(reason: Option<&str>, done_marker: bool) -> FinishReason {
     match reason {
         Some("stop") => FinishReason::Stop,
@@ -538,15 +618,38 @@ mod tests {
     fn test_state() -> State {
         State::new(
             AdapterId::new("openai-compatible"),
-            NativeContextScope::new(
-                ProviderId::new("test-provider"),
-                ModelId::new("test-model"),
-                ResourceId::new("test-resource").expect("test resource id constructs"),
-            )
-            .expect("test scope constructs"),
+            test_scope(),
             ReplayPolicy::Never,
             ReasoningField::ReasoningContent,
         )
+    }
+
+    fn replay_state() -> State {
+        State::new(
+            AdapterId::new("openai-compatible"),
+            test_scope(),
+            ReplayPolicy::IfValid,
+            ReasoningField::ReasoningContent,
+        )
+    }
+
+    fn test_scope() -> NativeContextScope {
+        NativeContextScope::new(
+            ProviderId::new("test-provider"),
+            ModelId::new("test-model"),
+            ResourceId::new("test-resource").expect("test resource id constructs"),
+        )
+        .expect("test scope constructs")
+    }
+
+    fn finalized_calls(parts: &[StreamPart]) -> Vec<ToolCallPart> {
+        parts
+            .iter()
+            .filter_map(|part| match part {
+                StreamPart::ToolCall { tool_call } => Some(tool_call.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn chunk(delta: serde_json::Value) -> serde_json::Value {
@@ -673,6 +776,287 @@ mod tests {
                 0
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn whitespace_only_arguments_finalize_as_empty_object_without_delta() {
+        let mut state = test_state();
+        let mut parts = Vec::new();
+        state
+            .apply(
+                chunk(serde_json::json!({"tool_calls":[{"index":0,"id":"call","function":{"name":"tool","arguments":"  "}}]})),
+                &mut parts,
+                0,
+            )
+            .expect("whitespace-only arguments apply");
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, StreamPart::ToolCallDelta { .. })),
+            "whitespace-only arguments must not open a streamed argument block"
+        );
+        state.finish(false, &mut parts, 0).expect("finish");
+
+        let calls = finalized_calls(&parts);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].input, serde_json::json!({}));
+        assert!(calls[0].raw_input.is_none());
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, StreamPart::ToolCallDelta { .. }))
+        );
+    }
+
+    #[test]
+    fn withheld_whitespace_flushes_with_first_real_arguments() {
+        let mut state = test_state();
+        let mut parts = Vec::new();
+        state
+            .apply(
+                chunk(serde_json::json!({"tool_calls":[{"index":0,"id":"call","function":{"name":"tool","arguments":"  "}}]})),
+                &mut parts,
+                0,
+            )
+            .expect("whitespace prefix applies");
+        state
+            .apply(
+                chunk(serde_json::json!({"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":1}"}}]})),
+                &mut parts,
+                0,
+            )
+            .expect("real arguments apply");
+        let deltas = parts
+            .iter()
+            .filter_map(|part| match part {
+                StreamPart::ToolCallDelta { delta, .. } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deltas, vec!["  {\"a\":1}".to_owned()]);
+    }
+
+    #[test]
+    fn truncated_arguments_are_marked_invalid_for_every_finish_reason() {
+        for reason in ["length", "tool_calls"] {
+            let mut state = replay_state();
+            let mut parts = Vec::new();
+            state
+                .apply(
+                    serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"tool","arguments":"{\"a\":"}}]},"finish_reason":reason}]}),
+                    &mut parts,
+                    0,
+                )
+                .expect("truncated arguments apply");
+            state
+                .finish(false, &mut parts, 0)
+                .expect("truncated arguments finalize");
+
+            assert!(
+                parts
+                    .iter()
+                    .any(|part| matches!(part, StreamPart::ToolCallEnd { .. })),
+                "every started block must close"
+            );
+            let calls = finalized_calls(&parts);
+            assert_eq!(calls.len(), 1);
+            assert!(calls[0].input.is_null());
+            assert_eq!(calls[0].raw_input.as_deref(), Some("{\"a\":"));
+            let finish = parts
+                .iter()
+                .find_map(|part| match part {
+                    StreamPart::Finish { finish } => Some(finish.clone()),
+                    _ => None,
+                })
+                .expect("finish part");
+            let native = finish.native_replay.expect("replay artifact");
+            assert_eq!(
+                native
+                    .payload()
+                    .pointer("/message/tool_calls/0/function/arguments")
+                    .and_then(JsonValue::as_str),
+                Some("{\"a\":"),
+                "native replay must keep the verbatim raw argument text for {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn indexless_continuation_routes_to_last_touched_call() {
+        let mut state = test_state();
+        let mut parts = Vec::new();
+        state
+            .apply(
+                chunk(serde_json::json!({"tool_calls":[{"index":0,"id":"call_0","function":{"name":"alpha","arguments":"{\"a\":"}}]})),
+                &mut parts,
+                0,
+            )
+            .expect("first call applies");
+        state
+            .apply(
+                chunk(serde_json::json!({"tool_calls":[{"index":1,"id":"call_1","function":{"name":"beta","arguments":"{\"b\":"}}]})),
+                &mut parts,
+                0,
+            )
+            .expect("second call applies");
+        state
+            .apply(
+                chunk(serde_json::json!({"tool_calls":[{"function":{"arguments":"1}"}}]})),
+                &mut parts,
+                0,
+            )
+            .expect("index-less continuation applies");
+        state.finish(false, &mut parts, 0).expect("finish");
+
+        let calls = finalized_calls(&parts);
+        assert_eq!(calls.len(), 2);
+        let alpha = calls.iter().find(|call| call.id == "call_0").unwrap();
+        let beta = calls.iter().find(|call| call.id == "call_1").unwrap();
+        assert!(alpha.input.is_null(), "alpha's fragment stays truncated");
+        assert_eq!(alpha.raw_input.as_deref(), Some("{\"a\":"));
+        assert_eq!(
+            beta.input,
+            serde_json::json!({"b": 1}),
+            "continuation must land on the most recently touched call"
+        );
+    }
+
+    #[test]
+    fn provider_id_routes_across_mismatched_explicit_index() {
+        let mut state = test_state();
+        let mut parts = Vec::new();
+        state
+            .apply(
+                chunk(serde_json::json!({"tool_calls":[{"index":0,"id":"call","function":{"name":"tool","arguments":"{\"a\":"}}]})),
+                &mut parts,
+                0,
+            )
+            .expect("first fragment applies");
+        state
+            .apply(
+                chunk(serde_json::json!({"tool_calls":[{"index":5,"id":"call","function":{"arguments":"1}"}}]})),
+                &mut parts,
+                0,
+            )
+            .expect("same-id mismatched index applies");
+        state.finish(false, &mut parts, 0).expect("finish");
+
+        let calls = finalized_calls(&parts);
+        assert_eq!(calls.len(), 1, "same provider id must merge into one call");
+        assert_eq!(calls[0].input, serde_json::json!({"a": 1}));
+    }
+
+    #[test]
+    fn unmatched_indexless_id_starts_new_call() {
+        let mut state = test_state();
+        let mut parts = Vec::new();
+        state
+            .apply(
+                chunk(serde_json::json!({"tool_calls":[{"index":0,"id":"call_a","function":{"name":"a","arguments":"{}"}}]})),
+                &mut parts,
+                0,
+            )
+            .expect("first call applies");
+        state
+            .apply(
+                chunk(serde_json::json!({"tool_calls":[{"id":"call_b","function":{"name":"b","arguments":"{}"}}]})),
+                &mut parts,
+                0,
+            )
+            .expect("index-less new id applies");
+        state.finish(false, &mut parts, 0).expect("finish");
+
+        let mut ids = finalized_calls(&parts)
+            .into_iter()
+            .map(|call| call.id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, ["call_a", "call_b"]);
+    }
+
+    #[test]
+    fn duplicate_provider_id_resolves_to_greatest_key() {
+        let mut state = test_state();
+        let mut parts = Vec::new();
+        state
+            .apply(
+                chunk(serde_json::json!({"tool_calls":[{"index":0,"id":"x","function":{"name":"a","arguments":"{\"p\":"}}]})),
+                &mut parts,
+                0,
+            )
+            .expect("first call applies");
+        state
+            .apply(
+                chunk(serde_json::json!({"tool_calls":[{"index":1,"id":"x","function":{"name":"b","arguments":"{\"q\":"}}]})),
+                &mut parts,
+                0,
+            )
+            .expect("conflicting name spawns a new call sharing the provider id");
+        state
+            .apply(
+                chunk(serde_json::json!({"tool_calls":[{"id":"x","function":{"arguments":"1}"}}]})),
+                &mut parts,
+                0,
+            )
+            .expect("ambiguous index-less continuation applies");
+        state.finish(false, &mut parts, 0).expect("finish");
+
+        let calls = finalized_calls(&parts);
+        assert_eq!(calls.len(), 2);
+        let first = calls.iter().find(|call| call.id == "x").unwrap();
+        let second = calls.iter().find(|call| call.id == "x-1").unwrap();
+        assert!(first.input.is_null(), "first call keeps its truncated text");
+        assert_eq!(second.input, serde_json::json!({"q": 1}));
+    }
+
+    #[test]
+    fn empty_reasoning_delta_is_ignored() {
+        let mut state = test_state();
+        let mut parts = Vec::new();
+        state
+            .apply(
+                chunk(serde_json::json!({"reasoning_content":""})),
+                &mut parts,
+                0,
+            )
+            .expect("empty reasoning applies");
+        assert!(parts.is_empty(), "empty reasoning must emit nothing");
+        state
+            .apply(chunk(serde_json::json!({"content":"x"})), &mut parts, 0)
+            .expect("text applies");
+        state.finish(false, &mut parts, 0).expect("finish");
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, StreamPart::ReasoningStart { .. }))
+        );
+    }
+
+    #[test]
+    fn empty_tool_calls_array_does_not_close_reasoning() {
+        let mut state = test_state();
+        let mut parts = Vec::new();
+        for delta in [
+            serde_json::json!({"reasoning_content":"think1"}),
+            serde_json::json!({"tool_calls":[]}),
+            serde_json::json!({"reasoning_content":"think2"}),
+        ] {
+            state
+                .apply(chunk(delta), &mut parts, 0)
+                .expect("delta applies");
+        }
+        state.finish(false, &mut parts, 0).expect("finish");
+
+        assert_eq!(
+            part_kinds(&parts),
+            vec![
+                "reasoning_start",
+                "reasoning_delta",
+                "reasoning_delta",
+                "reasoning_end",
+                "finish",
+            ]
         );
     }
 }
