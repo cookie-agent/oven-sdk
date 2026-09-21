@@ -10,7 +10,7 @@ catalog, environment lookup, or model-name inference.
 ## Installation
 
 ```bash
-cargo add oven-sdk@0.4.0 oven-sdk-anthropic@0.5.0 reqwest@0.12
+cargo add oven-sdk@0.4.0 oven-sdk-anthropic@0.5.0 reqwest@0.13
 ```
 
 ## Explicit model construction

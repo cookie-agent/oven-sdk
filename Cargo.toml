@@ -17,7 +17,7 @@ resolver = "3"
 edition = "2024"
 license = "MIT"
 rust-version = "1.88"
-version = "0.5.0"
+version = "0.6.0"
 
 [workspace.dependencies]
 bitflags = "2"
@@ -33,7 +33,7 @@ base64 = "0.22"
 httpdate = "1"
 hmac = "0.12"
 hex = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 sha2 = "0.10"
 time = { version = "0.3.41", features = ["formatting", "macros"] }
 tokio = { version = "1", features = ["macros", "time", "sync"] }
