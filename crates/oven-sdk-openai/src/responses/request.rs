@@ -576,11 +576,11 @@ fn function_output(result: &ToolResultPart) -> Result<JsonValue, ModelError> {
                     ContentValue::Json(value) => {
                         Ok(serde_json::json!({"type":"input_text","text":value.to_string()}))
                     }
-                    ContentValue::File(file) if file.media_type.starts_with("image/") => {
+                    ContentValue::File(file) if tool_result_file_supported(file) => {
                         input_file(file)
                     }
                     ContentValue::File(_) => Err(ModelError::unsupported(
-                        "non-image files in tool results are not deliverable via openai-responses",
+                        "only image and PDF files in tool results are deliverable via openai-responses",
                     )),
                 })
                 .collect::<Result<Vec<_>, _>>()?,
@@ -599,14 +599,19 @@ fn function_output(result: &ToolResultPart) -> Result<JsonValue, ModelError> {
 fn validate_tool_result_files(result: &ToolResultPart) -> Result<(), ModelError> {
     if let ToolContent::Mixed(values) = &result.content
         && values.iter().any(
-            |value| matches!(value, ContentValue::File(file) if !file.media_type.starts_with("image/")),
+            |value| matches!(value, ContentValue::File(file) if !tool_result_file_supported(file)),
         )
     {
         return Err(ModelError::unsupported(
-            "non-image files in tool results are not deliverable via openai-responses",
+            "only image and PDF files in tool results are deliverable via openai-responses",
         ));
     }
     Ok(())
+}
+
+/// `function_call_output` accepts `input_image` and `input_file` parts.
+fn tool_result_file_supported(file: &FilePart) -> bool {
+    file.media_type.starts_with("image/") || file.media_type == "application/pdf"
 }
 
 fn normalized_assistant(

@@ -79,7 +79,7 @@ async fn official_responses_passes_lifecycle_complete_capability_and_replay_suit
     assert_tool_result_file_policy(
         &model,
         ToolResultFileKind::Pdf,
-        ToolResultFilePolicy::Reject,
+        ToolResultFilePolicy::Encode,
     )
     .unwrap();
     let response = model

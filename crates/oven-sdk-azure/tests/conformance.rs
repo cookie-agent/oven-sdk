@@ -97,7 +97,7 @@ async fn chat_and_responses_pass_applicable_core_04_conformance() {
     assert_tool_result_file_policy(
         &responses,
         ToolResultFileKind::Pdf,
-        ToolResultFilePolicy::Reject,
+        ToolResultFilePolicy::Encode,
     )
     .unwrap();
     let completed = assert_complete_drain(&responses, Request::new(Vec::new()))

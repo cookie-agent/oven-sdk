@@ -508,11 +508,11 @@ fn function_output(result: &ToolResultPart) -> Result<JsonValue, ModelError> {
                     ContentValue::Json(value) => {
                         Ok(serde_json::json!({"type":"input_text","text":value.to_string()}))
                     }
-                    ContentValue::File(file) if media::is_image(&file.media_type) => {
+                    ContentValue::File(file) if tool_result_file_supported(file) => {
                         input_file(file)
                     }
                     ContentValue::File(_) => Err(ModelError::unsupported(
-                        "non-image files in tool results are not deliverable via azure-openai-responses",
+                        "only image and PDF files in tool results are deliverable via azure-openai-responses",
                     )),
                 })
                 .collect::<Result<Vec<_>, _>>()?,
@@ -533,13 +533,13 @@ fn validate_tool_result_files(request: &Request) -> Result<(), ModelError> {
         match turn {
             HistoryTurn::Tool(message) => {
                 for result in &message.results {
-                    reject_non_image_tool_result_files(result)?;
+                    reject_unsupported_tool_result_files(result)?;
                 }
             }
             HistoryTurn::Assistant(turn) => {
                 for part in &turn.message.content {
                     if let AssistantPart::ToolResult(result) = part {
-                        reject_non_image_tool_result_files(result)?;
+                        reject_unsupported_tool_result_files(result)?;
                     }
                 }
             }
@@ -549,17 +549,22 @@ fn validate_tool_result_files(request: &Request) -> Result<(), ModelError> {
     Ok(())
 }
 
-fn reject_non_image_tool_result_files(result: &ToolResultPart) -> Result<(), ModelError> {
+fn reject_unsupported_tool_result_files(result: &ToolResultPart) -> Result<(), ModelError> {
     if let ToolContent::Mixed(values) = &result.content
         && values.iter().any(
-            |value| matches!(value, ContentValue::File(file) if !media::is_image(&file.media_type)),
+            |value| matches!(value, ContentValue::File(file) if !tool_result_file_supported(file)),
         )
     {
         return Err(ModelError::unsupported(
-            "non-image files in tool results are not deliverable via azure-openai-responses",
+            "only image and PDF files in tool results are deliverable via azure-openai-responses",
         ));
     }
     Ok(())
+}
+
+/// `function_call_output` accepts `input_image` and `input_file` parts.
+fn tool_result_file_supported(file: &FilePart) -> bool {
+    media::is_image(&file.media_type) || file.media_type == "application/pdf"
 }
 
 fn normalized_assistant(

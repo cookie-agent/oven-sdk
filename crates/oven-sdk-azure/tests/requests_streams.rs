@@ -125,7 +125,7 @@ async fn responses_normalized_reconstruction_preserves_text_tool_interleaving() 
 }
 
 #[tokio::test]
-async fn responses_tool_result_images_encode_as_input_items_and_other_files_reject() {
+async fn responses_tool_result_images_and_pdfs_encode_as_input_items_and_other_files_reject() {
     let server = MockServer::start().await;
     common::mount(
         &server,
@@ -163,10 +163,36 @@ async fn responses_tool_result_images_encode_as_input_items_and_other_files_reje
     );
     assert!(!String::from_utf8_lossy(&requests[0].body).contains("[112,110,103]"));
 
+    model
+        .complete(
+            tool_result_request(FilePart::document(
+                "application/pdf",
+                FileSource::Bytes(bytes::Bytes::from_static(b"pdf")),
+            )),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let output = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .unwrap();
+    assert_eq!(
+        output["output"],
+        serde_json::json!([
+            {"type":"input_text","text":"caption"},
+            {"type":"input_file","filename":"document.pdf","file_data":"data:application/pdf;base64,cGRm"}
+        ])
+    );
+
     let error = model
         .validate_request(&tool_result_request(FilePart::document(
-            "application/pdf",
-            FileSource::Bytes(bytes::Bytes::from_static(b"pdf")),
+            "text/csv",
+            FileSource::Bytes(bytes::Bytes::from_static(b"a,b")),
         )))
         .unwrap_err();
     assert_eq!(error.kind(), oven_sdk::ModelErrorKind::Unsupported);
@@ -174,7 +200,7 @@ async fn responses_tool_result_images_encode_as_input_items_and_other_files_reje
         error.diagnostics.stage,
         oven_sdk::ErrorStage::RequestValidation
     );
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
 #[tokio::test]
