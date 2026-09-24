@@ -447,9 +447,12 @@ fn parse_usage(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
     let cache_write = value
         .pointer("/input_tokens_details/cache_write_tokens")
         .map(|value| {
-            value.as_u64().ok_or_else(|| {
-                invalid("Azure compaction cache-write token usage is invalid", bytes)
-            })
+            value
+                .as_u64()
+                .or(value.is_null().then_some(0))
+                .ok_or_else(|| {
+                    invalid("Azure compaction cache-write token usage is invalid", bytes)
+                })
         })
         .transpose()?;
     let reasoning = value

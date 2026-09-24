@@ -605,8 +605,15 @@ fn optional_usage_u64(
     message: &str,
     bytes: u64,
 ) -> Result<Option<u64>, ModelError> {
+    // Some OpenAI-compatible providers (GLM) send `null` on turns that wrote
+    // nothing to the cache; count that as zero, not as a malformed value.
     value
-        .map(|value| value.as_u64().ok_or_else(|| invalid_event(message, bytes)))
+        .map(|value| {
+            value
+                .as_u64()
+                .or(value.is_null().then_some(0))
+                .ok_or_else(|| invalid_event(message, bytes))
+        })
         .transpose()
 }
 
@@ -767,6 +774,29 @@ mod tests {
                 .unwrap()
                 .input_tokens_cache_write,
             None
+        );
+        assert_eq!(
+            usage_from(
+                &serde_json::json!({
+                    "prompt_tokens": 40,
+                    "prompt_tokens_details": {"cached_tokens": 10, "cache_write_tokens": null}
+                }),
+                0
+            )
+            .unwrap(),
+            Usage {
+                input_tokens: Some(40),
+                input_tokens_no_cache: Some(30),
+                input_tokens_cache_read: Some(10),
+                input_tokens_cache_write: Some(0),
+                output_tokens: None,
+                output_tokens_text: None,
+                output_tokens_reasoning: None,
+                raw: Some(serde_json::json!({
+                    "prompt_tokens": 40,
+                    "prompt_tokens_details": {"cached_tokens": 10, "cache_write_tokens": null}
+                })),
+            }
         );
         assert!(
             usage_from(
