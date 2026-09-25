@@ -3,8 +3,10 @@ pub mod common;
 use std::sync::Arc;
 
 use oven_sdk::{
-    AbortSignal, AdapterId, FilePart, FileSource, HeaderOverrides, HeaderProvider, HistoryTurn,
-    InputPart, JsonSchema, LanguageModel, ModelError, Request, ResponseFormat, UserMessage,
+    AbortSignal, AdapterId, AssistantMessage, AssistantPart, CompletedTurn, FilePart, FileSource,
+    Finish, FinishReason, HeaderOverrides, HeaderProvider, HistoryTurn, InputPart, JsonSchema,
+    LanguageModel, ModelError, Request, ResponseFormat, TextPart, ToolCallPart, ToolContent,
+    ToolMessage, ToolResultPart, UserMessage,
 };
 use oven_sdk_openai::{
     CompatibleChatOptions, OpenAiChatOptions, OpenAiChatRequestExt, OpenAiCompatibleAuth,
@@ -75,6 +77,54 @@ async fn explicit_settings_control_usage_reasoning_and_structured_downgrade() {
         serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
     assert_eq!(body["stream_options"]["include_usage"], true);
     assert_eq!(body["response_format"]["type"], "json_object");
+}
+
+#[tokio::test]
+async fn reasoning_content_is_always_sent_on_compatible_assistant_history() {
+    let tool_loop = || {
+        Request::new(vec![
+            HistoryTurn::user(UserMessage::new(vec![InputPart::Text(TextPart::new(
+                "list files",
+            ))])),
+            HistoryTurn::assistant(CompletedTurn::new(
+                AssistantMessage::new(vec![AssistantPart::ToolCall(ToolCallPart::new(
+                    "call-1",
+                    "bash",
+                    serde_json::json!({"command":"ls"}),
+                ))]),
+                Finish::new(Default::default(), FinishReason::ToolCalls),
+            )),
+            HistoryTurn::tool(ToolMessage::new(vec![ToolResultPart::new(
+                "call-1",
+                ToolContent::Text("a.txt".into()),
+            )])),
+        ])
+    };
+
+    let server = MockServer::start().await;
+    common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+    let mut config = common::compatible_config(&server, "deepseek-compatible");
+    config.settings.reasoning_field = ReasoningField::ReasoningContent;
+    let model = OpenAiCompatibleChatModel::new(config).unwrap();
+    model
+        .complete(tool_loop(), AbortSignal::default())
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+    assert_eq!(body["messages"][1]["role"], "assistant");
+    assert_eq!(body["messages"][1]["reasoning_content"], "");
+
+    let server = MockServer::start().await;
+    common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+    let model = common::compatible(&server);
+    model
+        .complete(tool_loop(), AbortSignal::default())
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+    assert!(body["messages"][1].get("reasoning_content").is_none());
 }
 
 #[test]

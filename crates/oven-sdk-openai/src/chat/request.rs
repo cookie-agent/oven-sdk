@@ -221,8 +221,8 @@ pub(crate) fn encode_request(
                         disposition: ReplayDisposition::NoArtifact,
                     });
                 }
-                if let Some(message) = replayed {
-                    messages.push(message);
+                let mut message = if let Some(message) = replayed {
+                    message
                 } else {
                     if policy != ReplayPolicy::Never {
                         replay_outcome.decisions.push(ReplayDecision {
@@ -230,11 +230,19 @@ pub(crate) fn encode_request(
                             disposition: ReplayDisposition::ReconstructedNormalized,
                         });
                     }
-                    messages.push(assistant_message(
-                        &turn.message.content,
-                        profile.reasoning_field,
-                    )?);
+                    assistant_message(&turn.message.content, profile.reasoning_field)?
+                };
+                // Interleaved-thinking compatible providers (DeepSeek in thinking
+                // mode) reject a tool loop whose assistant messages omit
+                // `reasoning_content`, including turns that produced no reasoning
+                // or came from another model. An empty field satisfies them.
+                if profile.compatible
+                    && profile.reasoning_field == ReasoningField::ReasoningContent
+                    && message.get("reasoning_content").is_none()
+                {
+                    message["reasoning_content"] = "".into();
                 }
+                messages.push(message);
             }
         }
     }
