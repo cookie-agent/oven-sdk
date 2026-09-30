@@ -45,7 +45,8 @@ not native compaction. This constructor is not part of the historical release
 matrix above; see the [OpenAI crate README](crates/oven-sdk-openai/README.md).
 
 `OpenAiChatModel::new_no_auth(config)` directly constructs the official Chat
-codec without configured authentication. No attribution wrapper is needed.
+codec without configured authentication; its `OpenAiNoAuth` still carries the
+optional organization and project headers. No attribution wrapper is needed.
 Current replay preserves standard supported blocks across routing and identity
 changes; encrypted reasoning additionally requires equal known effective wire
 model IDs. Required continuation state cannot silently normalize away. See the

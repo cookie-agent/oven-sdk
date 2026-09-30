@@ -28,7 +28,7 @@ async fn no_auth_chat_captures_official_identity_and_does_not_rebrand_invalid_fo
         oven_sdk::ProviderConfig::new(
             oven_sdk::ProviderId::new("custom-provider"),
             config.provider.api,
-            (),
+            oven_sdk_openai::OpenAiNoAuth::default(),
             config.provider.headers,
         )
         .unwrap(),
@@ -202,6 +202,74 @@ async fn official_chat_encodes_headers_stream_usage_and_single_post() {
     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(body["stream"], true);
     assert_eq!(body["stream_options"]["include_usage"], true);
+}
+
+#[tokio::test]
+async fn no_auth_chat_sends_organization_and_project_headers_once() {
+    let server = MockServer::start().await;
+    common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+    let config = common::official_chat_config(&server, "wire-model");
+    let model = oven_sdk_openai::OpenAiChatModel::new_no_auth(oven_sdk::ModelConfig::new(
+        oven_sdk::ProviderConfig::new(
+            oven_sdk::ProviderId::new("custom-provider"),
+            config.provider.api,
+            oven_sdk_openai::OpenAiNoAuth {
+                organization: Some("org".into()),
+                project: Some("project".into()),
+            },
+            config.provider.headers,
+        )
+        .unwrap(),
+        config.model,
+        config.settings,
+    ))
+    .unwrap();
+    model
+        .complete(Request::new(Vec::new()), AbortSignal::default())
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let headers = &requests[0].headers;
+    assert!(!headers.contains_key("authorization"));
+    for (name, value) in [
+        ("openai-organization", "org"),
+        ("openai-project", "project"),
+    ] {
+        assert_eq!(
+            headers.get_all(name).iter().collect::<Vec<_>>(),
+            [value],
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn no_auth_chat_rejects_organization_header_overrides() {
+    let server = MockServer::start().await;
+    let config = common::official_chat_config(&server, "wire-model");
+    let mut headers = config.provider.headers;
+    headers.static_headers = oven_sdk::HeaderOverrides::new(HeaderMap::from_iter([(
+        reqwest::header::HeaderName::from_static("openai-organization"),
+        HeaderValue::from_static("org"),
+    )]));
+    let error = oven_sdk_openai::OpenAiChatModel::new_no_auth(oven_sdk::ModelConfig::new(
+        oven_sdk::ProviderConfig::new(
+            oven_sdk::ProviderId::new("custom-provider"),
+            config.provider.api,
+            oven_sdk_openai::OpenAiNoAuth::default(),
+            headers,
+        )
+        .unwrap(),
+        config.model,
+        config.settings,
+    ))
+    .err()
+    .unwrap();
+    assert_eq!(
+        error.message,
+        "OpenAI header override `openai-organization` is protected"
+    );
 }
 
 #[tokio::test]

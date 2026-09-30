@@ -38,6 +38,19 @@ impl OpenAiAuth {
     }
 }
 
+/// Official OpenAI account headers for a Chat endpoint without credentials.
+///
+/// The codec sends no `Authorization`; `organization` and `project` still
+/// travel as the `OpenAI-Organization` and `OpenAI-Project` headers, which
+/// configured header overrides may not supply.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OpenAiNoAuth {
+    /// Optional `OpenAI-Organization` value.
+    pub organization: Option<String>,
+    /// Optional `OpenAI-Project` value.
+    pub project: Option<String>,
+}
+
 /// Explicit authentication for one OpenAI-compatible Chat endpoint.
 #[derive(Clone, Default)]
 pub struct OpenAiCompatibleAuth {
@@ -304,11 +317,34 @@ pub(crate) fn official_base_headers(
             "OpenAI authentication requires a non-empty API key",
         ));
     }
+    account_base_headers(
+        auth.organization.as_deref(),
+        auth.project.as_deref(),
+        configured,
+    )
+}
+
+pub(crate) fn no_auth_base_headers(
+    auth: &OpenAiNoAuth,
+    configured: &HeaderConfig,
+) -> Result<HeaderMap, ModelError> {
+    account_base_headers(
+        auth.organization.as_deref(),
+        auth.project.as_deref(),
+        configured,
+    )
+}
+
+fn account_base_headers(
+    organization: Option<&str>,
+    project: Option<&str>,
+    configured: &HeaderConfig,
+) -> Result<HeaderMap, ModelError> {
     let mut headers = HeaderMap::new();
-    if let Some(organization) = &auth.organization {
+    if let Some(organization) = organization {
         insert_named_header(&mut headers, "openai-organization", organization)?;
     }
-    if let Some(project) = &auth.project {
+    if let Some(project) = project {
         insert_named_header(&mut headers, "openai-project", project)?;
     }
     validate_headers(configured.static_headers.as_map(), true)?;

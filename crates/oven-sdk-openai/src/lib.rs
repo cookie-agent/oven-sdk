@@ -16,7 +16,7 @@ mod wire;
 pub use chat::model::{OpenAiChatModel, OpenAiCompatibleChatModel};
 pub use configuration::{
     MaxTokensField, OpenAiAuth, OpenAiChatSettings, OpenAiCompatibleAuth,
-    OpenAiCompatibleChatSettings, OpenAiResponsesCompaction, OpenAiResponsesSettings,
+    OpenAiCompatibleChatSettings, OpenAiNoAuth, OpenAiResponsesCompaction, OpenAiResponsesSettings,
     ReasoningField, StructuredOutputSupport, SystemMessageRole,
 };
 pub use options::{
