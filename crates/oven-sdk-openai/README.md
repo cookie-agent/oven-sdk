@@ -14,7 +14,7 @@ cargo add oven-sdk-openai@0.4.0
 Construct the protocol and authentication surface explicitly:
 
 - `OpenAiChatModel::new(ModelConfig<OpenAiAuth, OpenAiChatSettings>)`
-- `OpenAiChatModel::new_no_auth(ModelConfig<(), OpenAiChatSettings>)`
+- `OpenAiChatModel::new_no_auth(ModelConfig<OpenAiNoAuth, OpenAiChatSettings>)`
 - `OpenAiResponsesModel::new(ModelConfig<OpenAiAuth, OpenAiResponsesSettings>)`
 - `OpenAiResponsesModel::new_compatible(ModelConfig<OpenAiCompatibleAuth, OpenAiResponsesSettings>, AdapterId)`
 - `OpenAiCompatibleChatModel::new(ModelConfig<OpenAiCompatibleAuth, OpenAiCompatibleChatSettings>)`
@@ -27,9 +27,12 @@ header-provider, and no-auth endpoints use the same Responses encoder and SSE
 decoder, including declared tool calls and block-aware native replay. The server must
 actually implement that protocol; construction does not probe feature support.
 
-`new_no_auth` constructs the official Chat codec directly with unit auth. Its
-requests and captured artifacts retain the official Chat adapter identity;
-there is no attribution-rewriting wrapper or fake credential.
+`new_no_auth` constructs the official Chat codec directly without credentials.
+Its requests and captured artifacts retain the official Chat adapter identity;
+there is no attribution-rewriting wrapper or fake credential. `OpenAiNoAuth`
+carries the optional organization and project, sent as the `OpenAI-Organization`
+and `OpenAI-Project` headers exactly as with `OpenAiAuth`; header overrides
+cannot supply them.
 
 There is no OpenAI factory, default `model()` surface, registry, model catalog,
 compatible baseline, provider preset, endpoint inference, credential discovery,

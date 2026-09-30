@@ -13,10 +13,11 @@ use crate::{
     chat::{request, state::State},
     configuration::{
         MaxTokensField, OpenAiAuth, OpenAiChatSettings, OpenAiCompatibleAuth,
-        OpenAiCompatibleChatSettings, ReasoningField, StructuredOutputSupport, SystemMessageRole,
-        build_client, canonical_endpoint, compatible_base_headers, compatible_headers,
-        header_scope_component, official_base_headers, official_headers, replay_resource_id,
-        validate_chat_declaration, validate_routing_discriminator,
+        OpenAiCompatibleChatSettings, OpenAiNoAuth, ReasoningField, StructuredOutputSupport,
+        SystemMessageRole, build_client, canonical_endpoint, compatible_base_headers,
+        compatible_headers, header_scope_component, no_auth_base_headers, official_base_headers,
+        official_headers, replay_resource_id, validate_chat_declaration,
+        validate_routing_discriminator,
     },
     error::classify_error,
     transport::OpenAiTimeouts,
@@ -59,9 +60,16 @@ impl OpenAiChatModel {
     }
 
     /// Constructs the official Chat codec without configured authentication.
-    /// Capture and request attribution use the official Chat adapter identity.
-    pub fn new_no_auth(config: ModelConfig<(), OpenAiChatSettings>) -> Result<Self, ModelError> {
-        let base_headers = compatible_base_headers(&config.provider.headers)?;
+    /// Capture and request attribution use the official Chat adapter identity;
+    /// the organization and project headers are sent as with [`OpenAiAuth`].
+    pub fn new_no_auth(
+        config: ModelConfig<OpenAiNoAuth, OpenAiChatSettings>,
+    ) -> Result<Self, ModelError> {
+        let base_headers = no_auth_base_headers(&config.provider.auth, &config.provider.headers)?;
+        let OpenAiNoAuth {
+            organization,
+            project,
+        } = config.provider.auth;
         Self::build(
             ModelConfig::new(
                 oven_sdk::ProviderConfig::new(
@@ -74,8 +82,8 @@ impl OpenAiChatModel {
                 config.settings,
             ),
             base_headers,
-            None,
-            None,
+            organization,
+            project,
         )
     }
 
