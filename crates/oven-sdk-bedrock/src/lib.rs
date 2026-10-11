@@ -6,6 +6,7 @@
 //! This crate uses the Bedrock Runtime wire protocol directly. It does not use
 //! Anthropic's AWS Messages endpoint and it does not perform hidden retries.
 
+mod body;
 mod configuration;
 mod error;
 /// Incremental AWS EventStream framing and CRC validation.

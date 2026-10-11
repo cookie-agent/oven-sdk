@@ -213,10 +213,7 @@ impl BedrockModel {
                     streaming,
                 },
             )?;
-            let body = serde_json::to_vec(&encoded.body).map_err(|_| {
-                ModelError::invalid_request("could not serialize Bedrock Converse request")
-                    .with_stage(ErrorStage::RequestEncoding)
-            })?;
+            let body = encoded.body;
             crate::request::validate_serialized_body(&request, body.len())?;
             let mut headers = self.config.headers.static_headers.as_map().clone();
             if let Some(provider) = &self.config.headers.dynamic_headers {

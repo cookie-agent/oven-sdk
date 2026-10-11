@@ -2,21 +2,29 @@
 
 use std::collections::BTreeSet;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use bytes::Bytes;
 use oven_sdk::{
     AssistantPart, Capability, ContentValue, ErrorStage, FilePart, FileSource, HistoryTurn,
-    InputPart, JsonValue, LanguageModelDescriptor, ModelCapabilities, ModelError,
-    NativeContextScope, ReplayDecision, ReplayDisposition, ReplayOutcome, ReplayPolicy, Request,
-    ResponseFormat, SystemPart, ToolChoice, ToolContent, ToolResultPart,
+    InputPart, JsonValue, LanguageModelDescriptor, ModelCapabilities, ModelError, ModelId,
+    NativeContextScope, NativeReplayArtifact, ReplayDecision, ReplayDisposition, ReplayOutcome,
+    ReplayPolicy, Request, ResponseFormat, SystemPart, ToolChoice, ToolContent, ToolResultPart,
 };
+use serde::Deserialize as _;
 
 use crate::{
     BedrockReasoningWireFormat, BedrockStructuredOutput, REPLAY_FORMAT,
-    options::{BedrockCachePoint, BedrockCacheStrategy, BedrockCacheTtl, BedrockRequestOptions},
+    body::{
+        AdditionalFields, Base64, Block, CachePoint, ConverseBody, Document, Effort,
+        GuardrailConfig, InferenceConfig, InputSchema, Media, Message, OutputConfig,
+        PerformanceConfig, ReasoningConfig, S3Location, ServiceTier, Source, Thinking, ToolConfig,
+        ToolResult, ToolSpec, ToolUse, push_message,
+    },
+    options::{BedrockCacheStrategy, BedrockCacheTtl, BedrockRequestOptions},
 };
 
 pub(crate) struct Encoded {
-    pub(crate) body: JsonValue,
+    /// Serialized request body; signed and sent verbatim.
+    pub(crate) body: Bytes,
     pub(crate) replay: ReplayOutcome,
     pub(crate) warnings: Vec<String>,
 }
@@ -203,7 +211,7 @@ pub(crate) fn encode_request(
     let mut replay = ReplayOutcome::default();
     let mut warnings = Vec::new();
     let mut system = Vec::new();
-    let mut messages = Vec::<JsonValue>::new();
+    let mut messages = Vec::<Message<'_>>::new();
     let mut document_counter = 0_u64;
 
     for (history_index, turn) in request.history.iter().enumerate() {
@@ -213,16 +221,16 @@ pub(crate) fn encode_request(
                     if let SystemPart::Text(text) = part
                         && !text.text.is_empty()
                     {
-                        system.push(serde_json::json!({"text":text.text}));
+                        system.push(Block::Text(&text.text));
                     }
                 }
             }
             HistoryTurn::User(message) => {
-                let mut content = Vec::new();
+                let mut content = Vec::with_capacity(message.content.len() + 1);
                 for part in &message.content {
                     match part {
                         InputPart::Text(text) if !text.text.is_empty() => {
-                            content.push(serde_json::json!({"text":text.text}));
+                            content.push(Block::Text(&text.text));
                         }
                         InputPart::File(file) => {
                             content.push(file_content(file, options, &mut document_counter)?)
@@ -241,38 +249,32 @@ pub(crate) fn encode_request(
                         disposition: ReplayDisposition::ReconstructedNormalized,
                     });
                 } else if let Some(artifact) = &turn.finish.native_replay {
-                    {
-                        let mut source_capabilities = descriptor.capabilities.clone();
-                        source_capabilities.features.insert(Capability::REASONING);
-                        match decode_replay(
-                            artifact.payload(),
-                            &turn.message.content,
-                            &source_capabilities,
-                            true,
-                        ) {
-                            Ok(content) => {
-                                replay.decisions.push(ReplayDecision {
-                                    history_index,
-                                    disposition: ReplayDisposition::Replayed,
-                                });
-                                native = Some(oven_sdk::replay::eligible_blocks(
-                                    artifact,
-                                    &descriptor.identity.model_id,
-                                    oven_sdk::replay::BlockFormat::Converse {
-                                        redacted_reasoning: settings.signed_reasoning,
-                                    },
-                                    descriptor.capabilities.replay.reasoning,
-                                    content,
-                                    &mut warnings,
-                                )?);
-                            }
-                            Err(reason) => replay.decisions.push(ReplayDecision {
+                    match decode_replay(
+                        artifact.payload(),
+                        &turn.message.content,
+                        descriptor.capabilities.features | Capability::REASONING,
+                        true,
+                    ) {
+                        Ok(content) => {
+                            replay.decisions.push(ReplayDecision {
                                 history_index,
-                                disposition: ReplayDisposition::DiscardedInvalidPayload {
-                                    reason: reason.into(),
-                                },
-                            }),
+                                disposition: ReplayDisposition::Replayed,
+                            });
+                            native = Some(eligible_blocks(
+                                artifact,
+                                &descriptor.identity.model_id,
+                                settings.signed_reasoning,
+                                descriptor.capabilities.replay.reasoning,
+                                content,
+                                &mut warnings,
+                            )?);
                         }
+                        Err(reason) => replay.decisions.push(ReplayDecision {
+                            history_index,
+                            disposition: ReplayDisposition::DiscardedInvalidPayload {
+                                reason: reason.into(),
+                            },
+                        }),
                     }
                 } else {
                     replay.decisions.push(ReplayDecision {
@@ -280,17 +282,12 @@ pub(crate) fn encode_request(
                         disposition: ReplayDisposition::NoArtifact,
                     });
                 }
-                let inline_results = turn
-                    .message
-                    .content
-                    .iter()
-                    .filter_map(|part| match part {
-                        AssistantPart::ToolResult(result) => Some(result.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
                 let mut content = match native {
-                    Some(content) => content,
+                    Some(blocks) => {
+                        let mut content = Vec::with_capacity(blocks.len() + 1);
+                        content.extend(blocks.into_iter().map(Block::Native));
+                        content
+                    }
                     None => {
                         if replay_policy != ReplayPolicy::Never {
                             replay.decisions.push(ReplayDecision {
@@ -313,12 +310,13 @@ pub(crate) fn encode_request(
                             .iter()
                             .filter_map(|part| match part {
                                 AssistantPart::Text(text) if !text.text.is_empty() => {
-                                    Some(serde_json::json!({"text":text.text}))
+                                    Some(Block::Text(&text.text))
                                 }
-                                AssistantPart::ToolCall(call) => Some(serde_json::json!({
-                                    "toolUse":{"toolUseId":call.id,"name":call.name,"input":call.input}
+                                AssistantPart::ToolCall(call) => Some(Block::ToolUse(ToolUse {
+                                    tool_use_id: &call.id,
+                                    name: &call.name,
+                                    input: &call.input,
                                 })),
-                                AssistantPart::ToolResult(_) => None,
                                 _ => None,
                             })
                             .collect()
@@ -326,157 +324,132 @@ pub(crate) fn encode_request(
                 };
                 append_message_cache_point(&mut content, options.cache.as_ref(), history_index);
                 push_message(&mut messages, "assistant", content);
-                if !inline_results.is_empty() {
-                    let content = inline_results
-                        .iter()
-                        .map(|result| tool_result(result, options, &mut document_counter))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    push_message(&mut messages, "user", content);
-                }
+                let inline_results = turn
+                    .message
+                    .content
+                    .iter()
+                    .filter_map(|part| match part {
+                        AssistantPart::ToolResult(result) => {
+                            Some(tool_result(result, options, &mut document_counter))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                push_message(&mut messages, "user", inline_results);
             }
             HistoryTurn::Tool(message) => {
-                let mut content = message
-                    .results
-                    .iter()
-                    .map(|result| tool_result(result, options, &mut document_counter))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut content = Vec::with_capacity(message.results.len() + 1);
+                for result in &message.results {
+                    content.push(tool_result(result, options, &mut document_counter)?);
+                }
                 append_message_cache_point(&mut content, options.cache.as_ref(), history_index);
                 push_message(&mut messages, "user", content);
             }
         }
     }
 
-    let mut root = serde_json::json!({"messages":messages});
-    if !system.is_empty() {
-        if let Some(point) = options
+    if !system.is_empty()
+        && let Some(point) = options
             .cache
             .as_ref()
             .and_then(|cache| cache.system.as_ref())
-        {
-            system.push(cache_point(point));
-        }
-        root["system"] = JsonValue::Array(system);
-    }
-    let mut inference = serde_json::json!({});
-    if let Some(value) = request.inference.max_output_tokens {
-        inference["maxTokens"] = JsonValue::from(value);
-    }
-    if let Some(value) = request.inference.temperature {
-        inference["temperature"] = JsonValue::from(value);
-    }
-    if let Some(value) = request.inference.top_p {
-        inference["topP"] = JsonValue::from(value);
-    }
-    if !options.stop_sequences.is_empty() {
-        inference["stopSequences"] =
-            serde_json::to_value(&options.stop_sequences).expect("stop sequences are serializable");
-    }
-    if inference
-        .as_object()
-        .is_some_and(|object| !object.is_empty())
     {
-        root["inferenceConfig"] = inference;
+        system.push(Block::CachePoint(point.into()));
     }
-    if !request.tools.is_empty() {
-        root["toolConfig"] = serde_json::json!({
-            "tools":request.tools.iter().map(|tool| serde_json::json!({
-                "toolSpec":{"name":tool.name,"description":tool.description,"inputSchema":{"json":tool.input_schema.as_value()}}
-            })).collect::<Vec<_>>()
-        });
+    let tool_config = if request.tools.is_empty() {
+        None
+    } else {
+        let mut tools = Vec::with_capacity(request.tools.len() + 1);
+        tools.extend(request.tools.iter().map(|tool| {
+            Block::ToolSpec(ToolSpec {
+                name: &tool.name,
+                description: &tool.description,
+                input_schema: InputSchema {
+                    json: tool.input_schema.as_value(),
+                },
+            })
+        }));
         if let Some(point) = options
             .cache
             .as_ref()
             .and_then(|cache| cache.tools.as_ref())
         {
-            root["toolConfig"]["tools"]
-                .as_array_mut()
-                .expect("tools are an array")
-                .push(cache_point(point));
+            tools.push(Block::CachePoint(point.into()));
         }
-        root["toolConfig"]["toolChoice"] = match &request.tool_choice {
-            ToolChoice::Auto => serde_json::json!({"auto":{}}),
-            ToolChoice::Required => serde_json::json!({"any":{}}),
-            ToolChoice::None => JsonValue::Null,
-            ToolChoice::Tool(name) => serde_json::json!({"tool":{"name":name}}),
+        let tool_choice = match &request.tool_choice {
+            ToolChoice::Auto => Some(crate::body::ToolChoice::Auto {}),
+            ToolChoice::Required => Some(crate::body::ToolChoice::Any {}),
+            ToolChoice::None => None,
+            ToolChoice::Tool(name) => Some(crate::body::ToolChoice::Tool { name }),
         };
-        if request.tool_choice == ToolChoice::None {
-            root["toolConfig"]
-                .as_object_mut()
-                .expect("object")
-                .remove("toolChoice");
+        Some(ToolConfig { tools, tool_choice })
+    };
+    let output_config = match &request.response_format {
+        ResponseFormat::Json {
+            schema: Some(schema),
+        } => {
+            if settings.structured_output != BedrockStructuredOutput::JsonSchema {
+                return Err(ModelError::unsupported(
+                    "native structured output is unsupported by this Bedrock configuration",
+                ));
+            }
+            Some(OutputConfig::json_schema(schema.as_value()))
         }
-    }
-    if let ResponseFormat::Json {
-        schema: Some(schema),
-    } = &request.response_format
-    {
-        if settings.structured_output != BedrockStructuredOutput::JsonSchema {
-            return Err(ModelError::unsupported(
-                "native structured output is unsupported by this Bedrock configuration",
-            ));
+        _ => None,
+    };
+    let additional_model_request_fields =
+        encode_additional_fields(request, options, settings.reasoning_wire_format)?;
+    let guardrail_config = match &options.guardrail {
+        Some(guardrail) => {
+            if !settings.streaming && guardrail.stream_processing_mode.is_some() {
+                return Err(ModelError::invalid_request(
+                    "Bedrock streamProcessingMode is valid only for ConverseStream",
+                )
+                .with_stage(ErrorStage::RequestEncoding));
+            }
+            Some(GuardrailConfig {
+                guardrail_identifier: &guardrail.guardrail_identifier,
+                guardrail_version: &guardrail.guardrail_version,
+                trace: guardrail.trace.as_deref(),
+                stream_processing_mode: guardrail
+                    .stream_processing_mode
+                    .as_deref()
+                    .filter(|_| settings.streaming),
+            })
         }
-        let schema = serde_json::to_string(schema.as_value()).map_err(|_| {
-            ModelError::invalid_request("could not serialize Bedrock structured-output schema")
-                .with_stage(ErrorStage::RequestEncoding)
-        })?;
-        root["outputConfig"] = serde_json::json!({
-            "textFormat":{"type":"json_schema","structure":{"jsonSchema":{"schema":schema}}}
-        });
+        None => None,
+    };
+    let body = ConverseBody {
+        messages,
+        system,
+        inference_config: InferenceConfig {
+            max_tokens: request.inference.max_output_tokens,
+            temperature: request.inference.temperature,
+            top_p: request.inference.top_p,
+            stop_sequences: &options.stop_sequences,
+        },
+        tool_config,
+        output_config,
+        additional_model_request_fields,
+        additional_model_response_field_paths: &options.additional_model_response_field_paths,
+        service_tier: options
+            .service_tier
+            .as_deref()
+            .map(|kind| ServiceTier { kind }),
+        performance_config: options
+            .performance_latency
+            .as_deref()
+            .map(|latency| PerformanceConfig { latency }),
+        request_metadata: &options.request_metadata,
+        guardrail_config,
     }
-    let mut additional = options
-        .additional_model_request_fields
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({}));
-    encode_reasoning(
-        &mut additional,
-        request,
-        options,
-        settings.reasoning_wire_format,
-    )?;
-    if additional
-        .as_object()
-        .is_some_and(|object| !object.is_empty())
-    {
-        root["additionalModelRequestFields"] = additional;
-    }
-    if !options.additional_model_response_field_paths.is_empty() {
-        root["additionalModelResponseFieldPaths"] =
-            serde_json::to_value(&options.additional_model_response_field_paths)
-                .expect("paths are serializable");
-    }
-    if let Some(value) = &options.service_tier {
-        root["serviceTier"] = serde_json::json!({"type":value});
-    }
-    if let Some(value) = &options.performance_latency {
-        root["performanceConfig"] = serde_json::json!({"latency":value});
-    }
-    if !options.request_metadata.is_empty() {
-        root["requestMetadata"] = serde_json::to_value(&options.request_metadata)
-            .expect("request metadata is serializable");
-    }
-    if let Some(guardrail) = &options.guardrail {
-        if !settings.streaming && guardrail.stream_processing_mode.is_some() {
-            return Err(ModelError::invalid_request(
-                "Bedrock streamProcessingMode is valid only for ConverseStream",
-            )
-            .with_stage(ErrorStage::RequestEncoding));
-        }
-        let mut encoded = serde_json::json!({
-            "guardrailIdentifier":guardrail.guardrail_identifier,
-            "guardrailVersion":guardrail.guardrail_version,
-        });
-        if let Some(trace) = &guardrail.trace {
-            encoded["trace"] = JsonValue::String(trace.clone());
-        }
-        if settings.streaming
-            && let Some(mode) = &guardrail.stream_processing_mode
-        {
-            encoded["streamProcessingMode"] = JsonValue::String(mode.clone());
-        }
-        root["guardrailConfig"] = encoded;
-    }
+    .to_bytes()
+    .map_err(|_| {
+        ModelError::invalid_request("could not serialize Bedrock Converse request")
+            .with_stage(ErrorStage::RequestEncoding)
+    })?;
     Ok(Encoded {
-        body: root,
+        body: Bytes::from(body),
         replay,
         warnings,
     })
@@ -559,7 +532,7 @@ fn validate_cache_strategy(
 }
 
 fn append_message_cache_point(
-    content: &mut Vec<JsonValue>,
+    content: &mut Vec<Block<'_>>,
     cache: Option<&BedrockCacheStrategy>,
     history_index: usize,
 ) {
@@ -569,16 +542,8 @@ fn append_message_cache_point(
             .iter()
             .find(|point| point.history_index == history_index)
     }) {
-        content.push(cache_point(&point.cache_point));
+        content.push(Block::CachePoint(CachePoint::from(&point.cache_point)));
     }
-}
-
-fn cache_point(point: &BedrockCachePoint) -> JsonValue {
-    let mut value = serde_json::json!({"type":"default"});
-    if let Some(ttl) = point.ttl {
-        value["ttl"] = serde_json::to_value(ttl).expect("cache TTL is serializable");
-    }
-    serde_json::json!({"cachePoint":value})
 }
 
 pub(crate) fn validate_serialized_body(request: &Request, bytes: usize) -> Result<(), ModelError> {
@@ -591,26 +556,32 @@ pub(crate) fn validate_serialized_body(request: &Request, bytes: usize) -> Resul
     Ok(())
 }
 
-fn encode_reasoning(
-    additional: &mut JsonValue,
-    request: &Request,
-    options: &BedrockRequestOptions,
+fn encode_additional_fields<'a>(
+    request: &'a Request,
+    options: &'a BedrockRequestOptions,
     wire_format: BedrockReasoningWireFormat,
-) -> Result<(), ModelError> {
+) -> Result<AdditionalFields<'a>, ModelError> {
+    let caller = options.additional_model_request_fields.as_ref();
+    let mut fields = AdditionalFields {
+        fields: caller.and_then(JsonValue::as_object),
+        ..AdditionalFields::default()
+    };
     let effort = options
         .max_reasoning_effort
-        .as_ref()
-        .or(request.inference.reasoning_effort.as_ref());
+        .as_deref()
+        .or(request.inference.reasoning_effort.as_deref());
     if options.reasoning_type.is_none()
         && options.reasoning_budget_tokens.is_none()
         && options.reasoning_display.is_none()
         && effort.is_none()
     {
-        return Ok(());
+        return Ok(fields);
     }
-    let object = additional.as_object_mut().ok_or_else(|| {
-        ModelError::invalid_request("Bedrock additional model fields must be an object")
-    })?;
+    if caller.is_some_and(|value| !value.is_object()) {
+        return Err(ModelError::invalid_request(
+            "Bedrock additional model fields must be an object",
+        ));
+    }
     match wire_format {
         BedrockReasoningWireFormat::Unsupported => {
             return Err(ModelError::unsupported(
@@ -618,48 +589,39 @@ fn encode_reasoning(
             ));
         }
         BedrockReasoningWireFormat::AnthropicThinking => {
-            if options.reasoning_type.as_deref() == Some("adaptive") {
-                let mut thinking = serde_json::Map::new();
-                thinking.insert("type".into(), JsonValue::String("adaptive".into()));
-                if let Some(display) = &options.reasoning_display {
-                    thinking.insert("display".into(), JsonValue::String(display.clone()));
-                }
-                object.insert("thinking".into(), JsonValue::Object(thinking));
+            fields.thinking = if options.reasoning_type.as_deref() == Some("adaptive") {
+                Some(Thinking {
+                    kind: "adaptive",
+                    budget_tokens: None,
+                    display: options.reasoning_display.as_deref(),
+                })
             } else if let Some(budget) = options.reasoning_budget_tokens {
-                object.insert(
-                    "thinking".into(),
-                    serde_json::json!({"type":options.reasoning_type.as_deref().unwrap_or("enabled"),"budget_tokens":budget}),
-                );
-            } else if let Some(kind) = &options.reasoning_type {
-                object.insert("thinking".into(), serde_json::json!({"type":kind}));
-            }
-            if let Some(effort) = effort {
-                object.insert("output_config".into(), serde_json::json!({"effort":effort}));
-            }
+                Some(Thinking {
+                    kind: options.reasoning_type.as_deref().unwrap_or("enabled"),
+                    budget_tokens: Some(budget),
+                    display: None,
+                })
+            } else {
+                options.reasoning_type.as_deref().map(|kind| Thinking {
+                    kind,
+                    budget_tokens: None,
+                    display: None,
+                })
+            };
+            fields.output_config = effort.map(|effort| Effort { effort });
         }
         BedrockReasoningWireFormat::OpenAiReasoningEffort => {
-            if let Some(effort) = effort {
-                object.insert("reasoning_effort".into(), JsonValue::String(effort.clone()));
-            }
+            fields.reasoning_effort = effort;
         }
         BedrockReasoningWireFormat::BedrockReasoningConfig => {
-            let mut reasoning = serde_json::Map::new();
-            if let Some(kind) = &options.reasoning_type {
-                reasoning.insert("type".into(), JsonValue::String(kind.clone()));
-            }
-            if let Some(budget) = options.reasoning_budget_tokens {
-                reasoning.insert("budgetTokens".into(), JsonValue::from(budget));
-            }
-            if let Some(effort) = effort {
-                reasoning.insert(
-                    "maxReasoningEffort".into(),
-                    JsonValue::String(effort.clone()),
-                );
-            }
-            object.insert("reasoningConfig".into(), JsonValue::Object(reasoning));
+            fields.reasoning_config = Some(ReasoningConfig {
+                kind: options.reasoning_type.as_deref(),
+                budget_tokens: options.reasoning_budget_tokens,
+                max_reasoning_effort: effort,
+            });
         }
     }
-    Ok(())
+    Ok(fields)
 }
 
 fn validate_reasoning_options(
@@ -793,32 +755,11 @@ pub(crate) fn options(request: &Request) -> Result<BedrockRequestOptions, ModelE
         .provider_options
         .get("bedrock")
         .map(|value| {
-            serde_json::from_value(value.clone())
+            BedrockRequestOptions::deserialize(value)
                 .map_err(|_| ModelError::invalid_request("invalid Bedrock request options"))
         })
         .transpose()
         .map(|value| value.unwrap_or_default())
-}
-
-fn push_message(messages: &mut Vec<JsonValue>, role: &str, content: Vec<JsonValue>) {
-    if content.is_empty() {
-        return;
-    }
-    if messages
-        .last()
-        .and_then(|value| value.get("role"))
-        .and_then(JsonValue::as_str)
-        == Some(role)
-    {
-        messages
-            .last_mut()
-            .and_then(|value| value.get_mut("content"))
-            .and_then(JsonValue::as_array_mut)
-            .expect("existing message content is an array")
-            .extend(content);
-    } else {
-        messages.push(serde_json::json!({"role":role,"content":content}));
-    }
 }
 
 fn validate_file(file: &FilePart, has_accompanying_text: bool) -> Result<(), ModelError> {
@@ -1159,67 +1100,76 @@ fn validate_bucket_owner(options: &BedrockRequestOptions) -> Result<(), ModelErr
     Ok(())
 }
 
-fn file_content(
-    file: &FilePart,
-    options: &BedrockRequestOptions,
+fn file_content<'a>(
+    file: &'a FilePart,
+    options: &'a BedrockRequestOptions,
     document_counter: &mut u64,
-) -> Result<JsonValue, ModelError> {
+) -> Result<Block<'a>, ModelError> {
     let format = media_format(&file.media_type).ok_or_else(|| {
         ModelError::unsupported("unsupported Bedrock media MIME type")
             .with_stage(ErrorStage::RequestEncoding)
     })?;
     let source = media_source(file, options)?;
     Ok(match format.kind {
-        MediaKind::Image => serde_json::json!({"image":{"format":format.format,"source":source}}),
-        MediaKind::Video => serde_json::json!({"video":{"format":format.format,"source":source}}),
+        MediaKind::Image => Block::Image(Media {
+            format: format.format,
+            source,
+        }),
+        MediaKind::Video => Block::Video(Media {
+            format: format.format,
+            source,
+        }),
         MediaKind::Document => {
             *document_counter = document_counter.checked_add(1).ok_or_else(|| {
                 ModelError::invalid_request("Bedrock document counter overflowed")
                     .with_stage(ErrorStage::RequestEncoding)
             })?;
             let name = document_name(file.filename.as_deref(), *document_counter)?;
-            serde_json::json!({"document":{"format":format.format,"name":name,"source":source}})
+            Block::Document(Document {
+                format: format.format,
+                name,
+                source,
+            })
         }
     })
 }
 
-fn media_source(file: &FilePart, options: &BedrockRequestOptions) -> Result<JsonValue, ModelError> {
+fn media_source<'a>(
+    file: &'a FilePart,
+    options: &'a BedrockRequestOptions,
+) -> Result<Source<'a>, ModelError> {
     match &file.source {
-        FileSource::Bytes(bytes) => Ok(serde_json::json!({"bytes":STANDARD.encode(bytes)})),
-        FileSource::Text(text) => Ok(serde_json::json!({"text":text})),
-        FileSource::Url(url) => {
-            let mut location = serde_json::json!({"uri":url.as_str()});
-            if let Some(owner) = options
+        FileSource::Bytes(bytes) => Ok(Source::Bytes(Base64(bytes))),
+        FileSource::Text(text) => Ok(Source::Text(text)),
+        FileSource::Url(url) => Ok(Source::S3Location(S3Location {
+            uri: url.as_str(),
+            bucket_owner: options
                 .s3
                 .as_ref()
-                .and_then(|options| options.bucket_owner.as_ref())
-            {
-                location["bucketOwner"] = JsonValue::String(owner.clone());
-            }
-            Ok(serde_json::json!({"s3Location":location}))
-        }
+                .and_then(|options| options.bucket_owner.as_deref()),
+        })),
         FileSource::ProviderReference { .. } => Err(ModelError::unsupported(
             "Bedrock provider file references are unsupported",
         )),
     }
 }
 
-fn tool_result(
-    result: &ToolResultPart,
-    options: &BedrockRequestOptions,
+fn tool_result<'a>(
+    result: &'a ToolResultPart,
+    options: &'a BedrockRequestOptions,
     document_counter: &mut u64,
-) -> Result<JsonValue, ModelError> {
+) -> Result<Block<'a>, ModelError> {
     let content = match &result.content {
-        ToolContent::Text(value) => vec![serde_json::json!({"text":value})],
-        ToolContent::Json(value) => vec![serde_json::json!({"json":value})],
-        ToolContent::Denied { reason } => vec![serde_json::json!({
-            "text":reason.as_deref().unwrap_or("Tool call execution denied.")
-        })],
+        ToolContent::Text(value) => vec![Block::Text(value)],
+        ToolContent::Json(value) => vec![Block::Json(value)],
+        ToolContent::Denied { reason } => vec![Block::Text(
+            reason.as_deref().unwrap_or("Tool call execution denied."),
+        )],
         ToolContent::Mixed(values) => values
             .iter()
             .map(|value| match value {
-                ContentValue::Text(value) => Ok(serde_json::json!({"text":value})),
-                ContentValue::Json(value) => Ok(serde_json::json!({"json":value})),
+                ContentValue::Text(value) => Ok(Block::Text(value)),
+                ContentValue::Json(value) => Ok(Block::Json(value)),
                 ContentValue::File(file) => {
                     validate_file(file, true)?;
                     file_content(file, options, document_counter)
@@ -1227,12 +1177,10 @@ fn tool_result(
             })
             .collect::<Result<Vec<_>, ModelError>>()?,
     };
-    Ok(serde_json::json!({
-        "toolResult":{
-            "toolUseId":result.tool_call_id,
-            "content":content,
-            "status":if result.is_error {"error"} else {"success"}
-        }
+    Ok(Block::ToolResult(ToolResult {
+        tool_use_id: &result.tool_call_id,
+        content,
+        status: if result.is_error { "error" } else { "success" },
     }))
 }
 
@@ -1314,12 +1262,13 @@ fn document_name(filename: Option<&str>, counter: u64) -> Result<String, ModelEr
     Ok(name)
 }
 
-fn decode_replay(
-    payload: &JsonValue,
+/// Decodes a matching current-format artifact, borrowing its content blocks.
+fn decode_replay<'a>(
+    payload: &'a JsonValue,
     normalized: &[AssistantPart],
-    capabilities: &ModelCapabilities,
+    features: Capability,
     signed_reasoning: bool,
-) -> Result<Vec<JsonValue>, &'static str> {
+) -> Result<&'a [JsonValue], &'static str> {
     let root = payload
         .as_object()
         .ok_or("Bedrock replay payload is not an object")?;
@@ -1332,10 +1281,9 @@ fn decode_replay(
     let content = root
         .get("assistant_content")
         .and_then(JsonValue::as_array)
-        .ok_or("Bedrock replay assistant content is invalid")?
-        .clone();
-    let semantics = validate_native_content(&content, capabilities, signed_reasoning)?;
-    if semantics != normalized_semantics(normalized) {
+        .ok_or("Bedrock replay assistant content is invalid")?;
+    validate_native_content(content, features, signed_reasoning)?;
+    if !semantic_content_matches(content, normalized) {
         return Err("Bedrock replay payload did not match normalized content");
     }
     Ok(content)
@@ -1343,10 +1291,9 @@ fn decode_replay(
 
 fn validate_native_content(
     parts: &[JsonValue],
-    capabilities: &ModelCapabilities,
+    features: Capability,
     signed_reasoning: bool,
-) -> Result<Vec<JsonValue>, &'static str> {
-    let mut semantics = Vec::new();
+) -> Result<(), &'static str> {
     let mut tool_ids = BTreeSet::new();
     for part in parts {
         let object = part
@@ -1356,14 +1303,13 @@ fn validate_native_content(
             return Err("Bedrock replay content block union is ambiguous");
         }
         if let Some(value) = object.get("text") {
-            let text = value
+            value
                 .as_str()
                 .ok_or("Bedrock replay text block is invalid")?;
-            semantics.push(serde_json::json!({"type":"text","text":text}));
             continue;
         }
         if let Some(value) = object.get("toolUse") {
-            if !capabilities.features.contains(Capability::TOOL_CALLING) {
+            if !features.contains(Capability::TOOL_CALLING) {
                 return Err("Bedrock replay tool use is unsupported by the declaration");
             }
             let tool = value
@@ -1374,22 +1320,17 @@ fn validate_native_content(
             }
             let id = nonempty_string(tool.get("toolUseId"))
                 .ok_or("Bedrock replay toolUseId is invalid")?;
-            let name =
-                nonempty_string(tool.get("name")).ok_or("Bedrock replay tool name is invalid")?;
-            let input = tool
-                .get("input")
+            nonempty_string(tool.get("name")).ok_or("Bedrock replay tool name is invalid")?;
+            tool.get("input")
                 .filter(|value| value.is_object())
                 .ok_or("Bedrock replay tool input must be an object")?;
             if !tool_ids.insert(id) {
                 return Err("Bedrock replay contains duplicate toolUse IDs");
             }
-            semantics.push(serde_json::json!({
-                "type":"tool_call","id":id,"name":name,"input":input
-            }));
             continue;
         }
         if let Some(value) = object.get("reasoningContent") {
-            if !capabilities.features.contains(Capability::REASONING) {
+            if !features.contains(Capability::REASONING) {
                 return Err("Bedrock replay reasoning is unsupported by the declaration");
             }
             let reasoning = value
@@ -1412,11 +1353,9 @@ fn validate_native_content(
                 {
                     return Err("Bedrock replay reasoningText shape is invalid");
                 }
-                let visible = text
-                    .get("text")
+                text.get("text")
                     .and_then(JsonValue::as_str)
                     .ok_or("Bedrock replay reasoning text is invalid")?;
-                semantics.push(serde_json::json!({"type":"reasoning","text":visible}));
                 continue;
             }
             if let Some(value) = reasoning.get("redactedContent") {
@@ -1431,7 +1370,7 @@ fn validate_native_content(
         }
         return Err("Bedrock replay contains an unsupported native part");
     }
-    Ok(semantics)
+    Ok(())
 }
 
 fn exact_keys(object: &serde_json::Map<String, JsonValue>, expected: &[&str]) -> bool {
@@ -1444,20 +1383,116 @@ fn nonempty_string(value: Option<&JsonValue>) -> Option<&str> {
         .filter(|value| !value.trim().is_empty())
 }
 
-fn normalized_semantics(parts: &[AssistantPart]) -> Vec<JsonValue> {
-    parts
-        .iter()
-        .filter_map(|part| match part {
-            AssistantPart::Text(text) => Some(serde_json::json!({"type":"text","text":text.text})),
-            AssistantPart::Reasoning(reasoning) => {
-                Some(serde_json::json!({"type":"reasoning","text":reasoning.text}))
-            }
-            AssistantPart::ToolCall(call) => Some(serde_json::json!({
-                "type":"tool_call","id":call.id,"name":call.name,"input":call.input
-            })),
-            _ => None,
-        })
-        .collect()
+/// The semantic content of one validated native block or one normalized part.
+#[derive(PartialEq)]
+enum Semantic<'a> {
+    Text(&'a str),
+    Reasoning(&'a str),
+    ToolCall {
+        id: &'a str,
+        name: &'a str,
+        input: &'a JsonValue,
+    },
+}
+
+/// Semantics of a block that passed [`validate_native_content`]; redacted reasoning has none.
+fn native_semantic(block: &JsonValue) -> Option<Semantic<'_>> {
+    if let Some(text) = block.get("text") {
+        return text.as_str().map(Semantic::Text);
+    }
+    if let Some(tool) = block.get("toolUse") {
+        return Some(Semantic::ToolCall {
+            id: tool.get("toolUseId")?.as_str()?,
+            name: tool.get("name")?.as_str()?,
+            input: tool.get("input")?,
+        });
+    }
+    block
+        .get("reasoningContent")
+        .and_then(|reasoning| reasoning.get("reasoningText"))
+        .and_then(|text| text.get("text"))
+        .and_then(JsonValue::as_str)
+        .map(Semantic::Reasoning)
+}
+
+fn normalized_semantic(part: &AssistantPart) -> Option<Semantic<'_>> {
+    match part {
+        AssistantPart::Text(text) => Some(Semantic::Text(&text.text)),
+        AssistantPart::Reasoning(reasoning) => Some(Semantic::Reasoning(&reasoning.text)),
+        AssistantPart::ToolCall(call) => Some(Semantic::ToolCall {
+            id: &call.id,
+            name: &call.name,
+            input: &call.input,
+        }),
+        _ => None,
+    }
+}
+
+/// Compares validated native blocks with normalized parts in order, without copying either.
+fn semantic_content_matches(content: &[JsonValue], normalized: &[AssistantPart]) -> bool {
+    let mut native = content.iter().filter_map(native_semantic);
+    for expected in normalized.iter().filter_map(normalized_semantic) {
+        if native.next() != Some(expected) {
+            return false;
+        }
+    }
+    native.next().is_none()
+}
+
+/// Applies Converse block eligibility to validated replay blocks without copying them.
+///
+/// Mirrors `oven_sdk::replay::eligible_blocks` with `BlockFormat::Converse`: reasoning needs
+/// target reasoning support, redacted reasoning additionally needs target redacted-reasoning
+/// support and the same known wire model, and a tool continuation cannot silently lose
+/// reasoning state.
+fn eligible_blocks<'a>(
+    artifact: &NativeReplayArtifact,
+    target: &ModelId,
+    redacted_reasoning: bool,
+    reasoning_supported: bool,
+    blocks: &'a [JsonValue],
+    warnings: &mut Vec<String>,
+) -> Result<Vec<&'a serde_json::Map<String, JsonValue>>, ModelError> {
+    let encrypted_allowed = reasoning_supported
+        && artifact.source_wire_model_id() == Some(target)
+        && redacted_reasoning;
+    let mut omitted = false;
+    let mut has_calls = false;
+    let mut eligible = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let object = block
+            .as_object()
+            .ok_or_else(|| ModelError::replay("native replay block must be an object"))?;
+        if object.len() != 1
+            || !object
+                .keys()
+                .all(|key| matches!(key.as_str(), "text" | "toolUse" | "reasoningContent"))
+        {
+            return Err(ModelError::replay(
+                "unsupported custom Converse replay block",
+            ));
+        }
+        has_calls |= object.contains_key("toolUse");
+        let reasoning = object.contains_key("reasoningContent");
+        let encrypted = object
+            .get("reasoningContent")
+            .and_then(|reasoning| reasoning.get("redactedContent"))
+            .is_some();
+        if reasoning && !reasoning_supported || encrypted && !encrypted_allowed {
+            omitted = true;
+        } else {
+            eligible.push(object);
+        }
+    }
+    if omitted {
+        if has_calls {
+            return Err(ModelError::replay(
+                "native tool continuation cannot omit ineligible reasoning state",
+            ));
+        }
+        warnings.push("native reasoning excluded: target support or equal known wire model_id is required for encrypted reasoning".into());
+    }
+    Ok(eligible)
 }
 
 #[cfg(test)]
@@ -1487,6 +1522,159 @@ mod tests {
         assert!(validate_file(&audio, true).is_err());
     }
 
+    fn semantic_parts() -> Vec<AssistantPart> {
+        vec![
+            AssistantPart::Reasoning(oven_sdk::ReasoningPart::new("think")),
+            AssistantPart::Text(oven_sdk::TextPart::new("")),
+            AssistantPart::Text(oven_sdk::TextPart::new("answer")),
+            AssistantPart::ToolCall(oven_sdk::ToolCallPart::new(
+                "call",
+                "lookup",
+                serde_json::json!({"q":[1,2]}),
+            )),
+        ]
+    }
+
+    fn semantic_content() -> Vec<JsonValue> {
+        vec![
+            serde_json::json!({"reasoningContent":{"reasoningText":{"text":"think","signature":"sig"}}}),
+            serde_json::json!({"reasoningContent":{"redactedContent":"opaque"}}),
+            serde_json::json!({"text":""}),
+            serde_json::json!({"text":"answer"}),
+            serde_json::json!({"toolUse":{"toolUseId":"call","name":"lookup","input":{"q":[1,2]}}}),
+        ]
+    }
+
+    #[test]
+    fn semantic_comparison_skips_redacted_and_signatures_only() {
+        assert!(semantic_content_matches(
+            &semantic_content(),
+            &semantic_parts()
+        ));
+        let mut unsigned = semantic_content();
+        unsigned[0] = serde_json::json!({"reasoningContent":{"reasoningText":{"text":"think"}}});
+        assert!(semantic_content_matches(&unsigned, &semantic_parts()));
+    }
+
+    #[test]
+    fn semantic_comparison_rejects_any_other_difference() {
+        let mutations: [fn(&mut Vec<JsonValue>); 8] = [
+            |content| content[0]["reasoningContent"]["reasoningText"]["text"] = "other".into(),
+            |content| content[3]["text"] = "answer ".into(),
+            |content| content[4]["toolUse"]["input"] = serde_json::json!({"q":[2,1]}),
+            |content| content[4]["toolUse"]["name"] = "other".into(),
+            |content| content[4]["toolUse"]["toolUseId"] = "other".into(),
+            |content| {
+                content.remove(2);
+            },
+            |content| content.swap(2, 3),
+            |content| content.push(serde_json::json!({"text":"extra"})),
+        ];
+        for mutate in mutations {
+            let mut changed = semantic_content();
+            mutate(&mut changed);
+            assert!(!semantic_content_matches(&changed, &semantic_parts()));
+        }
+        let reasoning_as_text = vec![serde_json::json!({"text":"think"})];
+        assert!(!semantic_content_matches(
+            &reasoning_as_text,
+            &[AssistantPart::Reasoning(oven_sdk::ReasoningPart::new(
+                "think"
+            ))]
+        ));
+    }
+
+    /// The local borrowed eligibility must agree exactly with the core owned implementation.
+    #[test]
+    fn eligible_blocks_match_core_converse_eligibility() {
+        let scope = NativeContextScope::new(
+            oven_sdk::ProviderId::new("amazon.bedrock"),
+            ModelId::new("model-a"),
+            oven_sdk::ResourceId::new("bedrock-converse:test").unwrap(),
+        )
+        .unwrap();
+        let artifact = |source: Option<&str>| {
+            let artifact = NativeReplayArtifact::new(
+                oven_sdk::AdapterId::new("oven.bedrock.converse"),
+                scope.clone(),
+                serde_json::json!({}),
+            )
+            .unwrap();
+            match source {
+                Some(model) => artifact
+                    .with_source_wire_model_id(ModelId::new(model))
+                    .unwrap(),
+                None => artifact,
+            }
+        };
+        let reasoning =
+            serde_json::json!({"reasoningContent":{"reasoningText":{"text":"t","signature":"s"}}});
+        let redacted = serde_json::json!({"reasoningContent":{"redactedContent":"opaque"}});
+        let text = serde_json::json!({"text":"answer"});
+        let tool = serde_json::json!({"toolUse":{"toolUseId":"c","name":"n","input":{}}});
+        let block_sets = [
+            vec![reasoning.clone(), redacted.clone(), text.clone()],
+            vec![
+                reasoning.clone(),
+                redacted.clone(),
+                text.clone(),
+                tool.clone(),
+            ],
+            vec![reasoning.clone(), text.clone(), tool.clone()],
+            vec![text.clone()],
+            vec![serde_json::json!({"text":"a","toolUse":{}})],
+            vec![serde_json::json!({"image":{}})],
+            vec![serde_json::json!("not an object")],
+        ];
+        let target = ModelId::new("model-a");
+        for blocks in &block_sets {
+            for source in [Some("model-a"), Some("model-b"), None] {
+                for redacted_reasoning in [true, false] {
+                    for reasoning_supported in [true, false] {
+                        let artifact = artifact(source);
+                        let mut local_warnings = Vec::new();
+                        let local = eligible_blocks(
+                            &artifact,
+                            &target,
+                            redacted_reasoning,
+                            reasoning_supported,
+                            blocks,
+                            &mut local_warnings,
+                        )
+                        .map(|blocks| {
+                            blocks
+                                .into_iter()
+                                .map(|block| JsonValue::Object(block.clone()))
+                                .collect::<Vec<_>>()
+                        });
+                        let mut core_warnings = Vec::new();
+                        let core = oven_sdk::replay::eligible_blocks(
+                            &artifact,
+                            &target,
+                            oven_sdk::replay::BlockFormat::Converse { redacted_reasoning },
+                            reasoning_supported,
+                            blocks.clone(),
+                            &mut core_warnings,
+                        );
+                        match (local, core) {
+                            (Ok(local), Ok(core)) => assert_eq!(local, core),
+                            (Err(local), Err(core)) => {
+                                assert_eq!(local.kind, core.kind);
+                                assert_eq!(local.message, core.message);
+                            }
+                            (local, core) => panic!(
+                                "eligibility diverged: local ok={} core ok={}",
+                                local.is_ok(),
+                                core.is_ok()
+                            ),
+                        }
+                        assert_eq!(local_warnings, core_warnings);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn replay_is_semantically_exact() {
         let capabilities = replay_capabilities();
@@ -1498,7 +1686,7 @@ mod tests {
             AssistantPart::Reasoning(oven_sdk::ReasoningPart::new("think")),
             AssistantPart::Text(oven_sdk::TextPart::new("answer")),
         ];
-        assert!(decode_replay(&payload, &normalized, &capabilities, true).is_ok());
+        assert!(decode_replay(&payload, &normalized, capabilities.features, true).is_ok());
     }
 
     #[test]
@@ -1535,7 +1723,7 @@ mod tests {
                 "format":REPLAY_FORMAT,
                 "assistant_content":content,
             });
-            assert!(decode_replay(&payload, normalized, &capabilities, true).is_err());
+            assert!(decode_replay(&payload, normalized, capabilities.features, true).is_err());
         }
 
         for content in [
@@ -1546,14 +1734,14 @@ mod tests {
                 "format":REPLAY_FORMAT,
                 "assistant_content":content,
             });
-            assert!(decode_replay(&payload, &reasoning, &capabilities, true).is_ok());
+            assert!(decode_replay(&payload, &reasoning, capabilities.features, true).is_ok());
         }
 
         let valid_redacted = serde_json::json!({
             "format":REPLAY_FORMAT,
             "assistant_content":[{"reasoningContent":{"redactedContent":"opaque"}}],
         });
-        assert!(decode_replay(&valid_redacted, &[], &capabilities, true).is_ok());
+        assert!(decode_replay(&valid_redacted, &[], capabilities.features, true).is_ok());
 
         let unsigned_reasoning = vec![AssistantPart::Reasoning(oven_sdk::ReasoningPart::new(
             "think",
@@ -1562,7 +1750,15 @@ mod tests {
             "format":REPLAY_FORMAT,
             "assistant_content":[{"reasoningContent":{"reasoningText":{"text":"think","signature":"unexpected"}}}],
         });
-        assert!(decode_replay(&signed_payload, &unsigned_reasoning, &capabilities, false).is_ok());
+        assert!(
+            decode_replay(
+                &signed_payload,
+                &unsigned_reasoning,
+                capabilities.features,
+                false
+            )
+            .is_ok()
+        );
         let unsupported_redacted = serde_json::json!({
             "format":REPLAY_FORMAT,
             "assistant_content":[{"reasoningContent":{"redactedContent":"opaque"}}],
@@ -1571,7 +1767,7 @@ mod tests {
             decode_replay(
                 &unsupported_redacted,
                 &unsigned_reasoning,
-                &capabilities,
+                capabilities.features,
                 false
             )
             .is_err()
@@ -1580,7 +1776,15 @@ mod tests {
             "format":REPLAY_FORMAT,
             "assistant_content":[{"reasoningContent":{"reasoningText":{"text":"think"}}}],
         });
-        assert!(decode_replay(&valid_unsigned, &unsigned_reasoning, &capabilities, false).is_ok());
+        assert!(
+            decode_replay(
+                &valid_unsigned,
+                &unsigned_reasoning,
+                capabilities.features,
+                false
+            )
+            .is_ok()
+        );
 
         for mutation in [
             serde_json::json!({
@@ -1602,7 +1806,7 @@ mod tests {
                 "assistant_content":"not-an-array",
             }),
         ] {
-            assert!(decode_replay(&mutation, &[], &capabilities, true).is_err());
+            assert!(decode_replay(&mutation, &[], capabilities.features, true).is_err());
         }
     }
 
@@ -1661,7 +1865,10 @@ mod tests {
         let markdown = FilePart::document("text/markdown", FileSource::Text("# valid".into()));
         assert!(validate_file(&markdown, true).is_ok());
         assert_eq!(
-            media_source(&markdown, &BedrockRequestOptions::default()).unwrap(),
+            serde_json::to_value(
+                media_source(&markdown, &BedrockRequestOptions::default()).unwrap()
+            )
+            .unwrap(),
             serde_json::json!({"text":"# valid"})
         );
         let wmv = FilePart::video(
