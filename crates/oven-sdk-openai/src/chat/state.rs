@@ -1,13 +1,164 @@
 //! Chat Completions stream state machine.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use oven_sdk::{
     AdapterId, CustomPart, ErrorStage, Finish, FinishReason, JsonValue, ModelError,
     NativeContextScope, NativeReplayArtifact, ReplayPolicy, StreamPart, ToolCallPart, Usage,
 };
 
+use oven_sdk::provider_support::{JsonObject, KeyPresent};
+use serde::Deserialize;
+
 use crate::{configuration::ReasoningField, wire::chat::REPLAY_FORMAT};
+
+/// One Chat Completions chunk.
+///
+/// The SSE loop decodes it straight from the event payload; when that typed
+/// decode declines (mistyped fields, duplicate keys, arrays), [`Self::from_value`]
+/// rebuilds it from a `JsonValue` with lenient `get`/`as_*` lookups, so both
+/// sources feed the same state machine.
+#[derive(Default, Deserialize)]
+pub(crate) struct ChatChunk<'a> {
+    #[serde(default)]
+    pub(crate) error: KeyPresent,
+    #[serde(default)]
+    id: Option<JsonValue>,
+    #[serde(default)]
+    model: Option<JsonValue>,
+    #[serde(default)]
+    created: Option<JsonValue>,
+    #[serde(default)]
+    system_fingerprint: Option<JsonValue>,
+    #[serde(default)]
+    usage: Option<JsonValue>,
+    #[serde(default, borrow)]
+    choices: Option<Vec<JsonObject<ChatChoice<'a>>>>,
+}
+
+#[derive(Default, Deserialize)]
+struct ChatChoice<'a> {
+    #[serde(default)]
+    index: Option<u64>,
+    #[serde(default, borrow)]
+    finish_reason: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    delta: Option<JsonObject<ChatDelta<'a>>>,
+}
+
+#[derive(Default, Deserialize)]
+struct ChatDelta<'a> {
+    #[serde(default, borrow)]
+    content: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    refusal: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    reasoning_content: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    reasoning: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    tool_calls: Option<Vec<JsonObject<ChatToolDelta<'a>>>>,
+}
+
+#[derive(Default, Deserialize)]
+struct ChatToolDelta<'a> {
+    #[serde(default)]
+    index: Option<u64>,
+    #[serde(default, borrow)]
+    id: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    function: Option<JsonObject<ChatFunctionDelta<'a>>>,
+}
+
+#[derive(Default, Deserialize)]
+struct ChatFunctionDelta<'a> {
+    #[serde(default, borrow)]
+    name: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    arguments: Option<Cow<'a, str>>,
+}
+
+fn json_str<'a>(value: &'a JsonValue, key: &str) -> Option<Cow<'a, str>> {
+    value
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .map(Cow::Borrowed)
+}
+
+impl<'a> ChatChunk<'a> {
+    /// Extracts a chunk from a `JsonValue` with the adapter's lenient lookup semantics.
+    pub(crate) fn from_value(value: &'a JsonValue) -> Self {
+        let metadata = |key| value.get(key).filter(|value| !value.is_null()).cloned();
+        let choices = value
+            .get("choices")
+            .and_then(JsonValue::as_array)
+            .map(|choices| {
+                choices
+                    .iter()
+                    .map(|choice| JsonObject(ChatChoice::from_value(choice)))
+                    .collect()
+            });
+        Self {
+            error: KeyPresent(value.get("error").is_some()),
+            id: metadata("id"),
+            model: metadata("model"),
+            created: metadata("created"),
+            system_fingerprint: metadata("system_fingerprint"),
+            usage: metadata("usage"),
+            choices,
+        }
+    }
+}
+
+impl<'a> ChatChoice<'a> {
+    fn from_value(value: &'a JsonValue) -> Self {
+        Self {
+            index: value.get("index").and_then(JsonValue::as_u64),
+            finish_reason: json_str(value, "finish_reason"),
+            delta: value
+                .get("delta")
+                .map(|delta| JsonObject(ChatDelta::from_value(delta))),
+        }
+    }
+}
+
+impl<'a> ChatDelta<'a> {
+    fn from_value(value: &'a JsonValue) -> Self {
+        Self {
+            content: json_str(value, "content"),
+            refusal: json_str(value, "refusal"),
+            reasoning_content: json_str(value, "reasoning_content"),
+            reasoning: json_str(value, "reasoning"),
+            tool_calls: value
+                .get("tool_calls")
+                .and_then(JsonValue::as_array)
+                .map(|calls| {
+                    calls
+                        .iter()
+                        .map(|call| JsonObject(ChatToolDelta::from_value(call)))
+                        .collect()
+                }),
+        }
+    }
+}
+
+impl<'a> ChatToolDelta<'a> {
+    fn from_value(value: &'a JsonValue) -> Self {
+        Self {
+            index: value.get("index").and_then(JsonValue::as_u64),
+            id: json_str(value, "id"),
+            function: value.get("function").map(|function| {
+                JsonObject(ChatFunctionDelta {
+                    name: json_str(function, "name"),
+                    arguments: json_str(function, "arguments"),
+                })
+            }),
+        }
+    }
+}
 
 #[derive(Default)]
 struct ToolState {
@@ -78,50 +229,70 @@ impl State {
         &self.response_metadata
     }
 
+    #[cfg(test)]
     pub(crate) fn apply(
         &mut self,
         value: JsonValue,
         parts: &mut Vec<StreamPart>,
         bytes: u64,
     ) -> Result<(), ModelError> {
+        self.apply_chunk(ChatChunk::from_value(&value), parts, bytes)
+    }
+
+    pub(crate) fn apply_chunk(
+        &mut self,
+        chunk: ChatChunk<'_>,
+        parts: &mut Vec<StreamPart>,
+        bytes: u64,
+    ) -> Result<(), ModelError> {
         if self.done {
             return Err(invalid_event("Chat event after terminal finish", bytes));
         }
-        if value.get("error").is_some() {
+        if chunk.error.0 {
             return Err(invalid_event(
                 "Chat error envelope must be handled by the stream transport",
                 bytes,
             ));
         }
-        self.capture_metadata(&value);
-        if let Some(usage) = value.get("usage").filter(|usage| !usage.is_null()) {
-            self.usage = usage_from(usage, bytes)?;
+        for (key, value) in [
+            ("openai.response_id", chunk.id),
+            ("openai.model", chunk.model),
+            ("openai.created", chunk.created),
+            ("openai.system_fingerprint", chunk.system_fingerprint),
+        ] {
+            if let Some(value) = value {
+                set_metadata(&mut self.response_metadata, key, value);
+            }
         }
-        let choices = value
-            .get("choices")
-            .and_then(JsonValue::as_array)
-            .cloned()
-            .unwrap_or_default();
+        if let Some(usage) = chunk.usage {
+            self.usage = usage_from(&usage, bytes)?;
+        }
+        let choices = chunk.choices.unwrap_or_default();
         if choices.len() > 1 {
             return Err(invalid_event(
                 "multiple Chat choices are unsupported",
                 bytes,
             ));
         }
-        for choice in choices {
-            let choice_index = choice.get("index").and_then(JsonValue::as_u64).unwrap_or(0);
+        for JsonObject(choice) in choices {
+            let choice_index = choice.index.unwrap_or(0);
             if choice_index != 0 {
                 return Err(invalid_event(
                     "only Chat choice index 0 is supported",
                     bytes,
                 ));
             }
-            if let Some(reason) = choice.get("finish_reason").and_then(JsonValue::as_str) {
-                self.finish_reason = Some(reason.to_owned());
+            if let Some(reason) = choice.finish_reason {
+                self.finish_reason = Some(reason.into_owned());
             }
-            let delta = choice.get("delta").unwrap_or(&JsonValue::Null);
-            self.apply_reasoning(delta, parts);
-            if let Some(content) = delta.get("content").and_then(JsonValue::as_str) {
+            let delta = choice.delta.map(|delta| delta.0).unwrap_or_default();
+            let reasoning = match self.reasoning_field {
+                ReasoningField::None => None,
+                ReasoningField::ReasoningContent => delta.reasoning_content.as_deref(),
+                ReasoningField::Reasoning => delta.reasoning.as_deref(),
+            };
+            self.apply_reasoning(reasoning, parts);
+            if let Some(content) = delta.content {
                 // Providers send an empty `content` chunk with the role delta
                 // before any text (and often before `reasoning_content`).
                 // Opening the text block there would stamp it ahead of a
@@ -136,22 +307,22 @@ impl State {
                             metadata: None,
                         });
                     }
-                    self.text.push_str(content);
+                    self.text.push_str(&content);
                     parts.push(StreamPart::TextDelta {
                         id: "0".into(),
-                        delta: content.into(),
+                        delta: content.into_owned(),
                         metadata: None,
                     });
                 }
             }
-            if let Some(refusal) = delta.get("refusal").and_then(JsonValue::as_str) {
-                self.refusal.push_str(refusal);
+            if let Some(refusal) = delta.refusal {
+                self.refusal.push_str(&refusal);
             }
-            if let Some(calls) = delta.get("tool_calls").and_then(JsonValue::as_array)
+            if let Some(calls) = delta.tool_calls
                 && !calls.is_empty()
             {
                 self.close_reasoning(parts);
-                for call in calls {
+                for JsonObject(call) in calls {
                     self.apply_tool(choice_index, call, parts, bytes)?;
                 }
             }
@@ -159,13 +330,8 @@ impl State {
         Ok(())
     }
 
-    fn apply_reasoning(&mut self, delta: &JsonValue, parts: &mut Vec<StreamPart>) {
-        let field = match self.reasoning_field {
-            ReasoningField::None => return,
-            ReasoningField::ReasoningContent => "reasoning_content",
-            ReasoningField::Reasoning => "reasoning",
-        };
-        let Some(reasoning) = delta.get(field).and_then(JsonValue::as_str) else {
+    fn apply_reasoning(&mut self, reasoning: Option<&str>, parts: &mut Vec<StreamPart>) {
+        let Some(reasoning) = reasoning else {
             return;
         };
         // Vercel treats an empty reasoning chunk as falsy and emits nothing; do
@@ -193,16 +359,14 @@ impl State {
     fn apply_tool(
         &mut self,
         choice_index: u64,
-        call: &JsonValue,
+        call: ChatToolDelta<'_>,
         parts: &mut Vec<StreamPart>,
         bytes: u64,
     ) -> Result<(), ModelError> {
-        let explicit_index = call.get("index").and_then(JsonValue::as_u64);
-        let provider_id = call
-            .get("id")
-            .and_then(JsonValue::as_str)
-            .filter(|id| !id.is_empty());
-        let provider_name = call.pointer("/function/name").and_then(JsonValue::as_str);
+        let explicit_index = call.index;
+        let provider_id = call.id.as_deref().filter(|id| !id.is_empty());
+        let function = call.function.map(|function| function.0).unwrap_or_default();
+        let provider_name = function.name.as_deref();
 
         // Continuation routing precedence (mirrors Vercel's streaming tool-call
         // tracker): a non-empty provider id that matches an existing call for
@@ -291,7 +455,7 @@ impl State {
             state.provider_id = Some(provider_id.into());
             state.id = Some(id);
         }
-        if let Some(name) = call.pointer("/function/name").and_then(JsonValue::as_str) {
+        if let Some(name) = provider_name {
             if state
                 .name
                 .as_deref()
@@ -301,11 +465,8 @@ impl State {
             }
             state.name = Some(name.into());
         }
-        if let Some(arguments) = call
-            .pointer("/function/arguments")
-            .and_then(JsonValue::as_str)
-        {
-            state.arguments.push_str(arguments);
+        if let Some(arguments) = function.arguments {
+            state.arguments.push_str(&arguments);
         }
         if !state.started
             && let (Some(id), Some(name)) = (&state.id, &state.name)
@@ -400,22 +561,30 @@ impl State {
                     _ => (JsonValue::Null, Some(tool.arguments.clone())),
                 }
             };
+            // The raw-input copy above and the replay copy below each need their
+            // own string; the accumulator itself moves into the replay payload.
             parts.push(StreamPart::ToolCallEnd {
                 id: id.clone(),
                 metadata: None,
             });
-            let mut call = ToolCallPart::new(id.clone(), name.clone(), parsed);
+            let mut call = ToolCallPart::new(id.clone(), name, parsed);
             call.raw_input = raw_input;
             parts.push(StreamPart::ToolCall { tool_call: call });
             let native_arguments = if empty {
                 "{}".to_owned()
             } else {
-                tool.arguments.clone()
+                tool.arguments
             };
-            let mut native = serde_json::json!({"id":id,"type":"function","function":{"arguments":native_arguments}});
+            let mut function = serde_json::Map::new();
+            function.insert("arguments".into(), native_arguments.into());
             if let Some(provider_name) = provider_name {
-                native["function"]["name"] = provider_name.into();
+                function.insert("name".into(), provider_name.into());
             }
+            let mut native = serde_json::Map::new();
+            native.insert("id".into(), id.into());
+            native.insert("type".into(), "function".into());
+            native.insert("function".into(), function.into());
+            let native = JsonValue::Object(native);
             native_calls.push((tool.order.unwrap_or(u64::MAX), native));
         }
         native_calls.sort_by_key(|(order, _)| *order);
@@ -423,41 +592,52 @@ impl State {
             .into_iter()
             .map(|(_, call)| call)
             .collect::<Vec<_>>();
-        if !self.refusal.is_empty() {
+        // The turn is over: accumulated text moves into the replay payload.
+        let refusal = std::mem::take(&mut self.refusal);
+        if !refusal.is_empty() {
             parts.push(StreamPart::Custom {
-                part: CustomPart::new("openai.refusal", JsonValue::String(self.refusal.clone())),
+                part: CustomPart::new("openai.refusal", JsonValue::String(refusal.clone())),
             });
         }
         let reason = map_finish(self.finish_reason.as_deref(), done_marker);
-        let mut finish = Finish::new(self.usage.clone(), reason);
+        let mut finish = Finish::new(std::mem::take(&mut self.usage), reason);
         finish.response_metadata = self.response_metadata.clone();
         if self.policy != ReplayPolicy::Never {
-            let mut message = serde_json::json!({
-                "role":"assistant",
-                "content":if self.text.is_empty(){JsonValue::Null}else{JsonValue::String(self.text.clone())}
-            });
+            let text = std::mem::take(&mut self.text);
+            let reasoning = std::mem::take(&mut self.reasoning);
+            let mut message = serde_json::Map::new();
+            message.insert("role".into(), "assistant".into());
+            message.insert(
+                "content".into(),
+                if text.is_empty() {
+                    JsonValue::Null
+                } else {
+                    JsonValue::String(text)
+                },
+            );
             if !native_calls.is_empty() {
-                message["tool_calls"] = JsonValue::Array(native_calls);
+                message.insert("tool_calls".into(), JsonValue::Array(native_calls));
             }
-            if !self.reasoning.is_empty() {
+            if !reasoning.is_empty() {
                 match self.reasoning_field {
                     ReasoningField::ReasoningContent => {
-                        message["reasoning_content"] = self.reasoning.clone().into();
+                        message.insert("reasoning_content".into(), reasoning.into());
                     }
                     ReasoningField::Reasoning => {
-                        message["reasoning"] = self.reasoning.clone().into();
+                        message.insert("reasoning".into(), reasoning.into());
                     }
                     ReasoningField::None => {}
                 }
             }
-            if !self.refusal.is_empty() {
-                message["refusal"] = self.refusal.clone().into();
+            if !refusal.is_empty() {
+                message.insert("refusal".into(), refusal.into());
             }
-            let payload = serde_json::json!({
-                "format":REPLAY_FORMAT,
-                "message":message,
-                "finish_reason":self.finish_reason
-            });
+            let message = JsonValue::Object(message);
+            let mut payload = serde_json::Map::new();
+            payload.insert("format".into(), REPLAY_FORMAT.into());
+            payload.insert("message".into(), message);
+            payload.insert("finish_reason".into(), self.finish_reason.clone().into());
+            let payload = JsonValue::Object(payload);
             finish.native_replay = Some(
                 NativeReplayArtifact::capture(self.adapter_id.clone(), self.scope.clone(), payload)
                     .map_err(|_| {
@@ -512,17 +692,14 @@ impl State {
             });
         }
     }
+}
 
-    fn capture_metadata(&mut self, value: &JsonValue) {
-        for (source, key) in [
-            ("id", "openai.response_id"),
-            ("model", "openai.model"),
-            ("created", "openai.created"),
-            ("system_fingerprint", "openai.system_fingerprint"),
-        ] {
-            if let Some(value) = value.get(source).cloned().filter(|value| !value.is_null()) {
-                self.response_metadata.insert(key.into(), value);
-            }
+/// Updates a metadata entry in place, allocating its key only on first insert.
+fn set_metadata(metadata: &mut BTreeMap<String, JsonValue>, key: &str, value: JsonValue) {
+    match metadata.get_mut(key) {
+        Some(slot) => *slot = value,
+        None => {
+            metadata.insert(key.to_owned(), value);
         }
     }
 }
@@ -682,6 +859,85 @@ mod tests {
                 _ => "other",
             })
             .collect()
+    }
+
+    /// Drives payloads like the SSE loop, optionally forcing the `JsonValue` path.
+    fn drive_chunks(chunks: &[&str], typed: bool) -> (Vec<StreamPart>, usize) {
+        let mut state = replay_state();
+        let mut parts = Vec::new();
+        let mut typed_hits = 0;
+        for data in chunks {
+            if typed
+                && let Some(chunk) =
+                    oven_sdk::provider_support::parse_json_object::<ChatChunk<'_>>(data)
+            {
+                typed_hits += 1;
+                state.apply_chunk(chunk, &mut parts, 0).unwrap();
+                continue;
+            }
+            let value: JsonValue = serde_json::from_str(data).unwrap();
+            state
+                .apply_chunk(ChatChunk::from_value(&value), &mut parts, 0)
+                .unwrap();
+        }
+        state.finish(true, &mut parts, 0).unwrap();
+        (parts, typed_hits)
+    }
+
+    #[test]
+    fn typed_chunk_decode_matches_json_value_path() {
+        let chunks = [
+            r#"{"id":"chat_1","model":"m","created":1,"system_fingerprint":null,"choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}"#,
+            r#"{"id":"chat_1","choices":[{"index":0,"delta":{"reasoning_content":"think \"hard\""}}]}"#,
+            r#"{"id":"chat_1","choices":[{"index":0,"delta":{"content":"hé\nllo","refusal":null}}]}"#,
+            // Declined by the typed decode: mistyped content, non-object delta,
+            // non-object tool call, duplicate keys.
+            r#"{"choices":[{"index":0,"delta":{"content":5}}]}"#,
+            r#"{"choices":[{"index":0,"delta":"text"}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[7]}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"content":"a","content":"b"}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"refusal":"no"}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"[1]}"}}]}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}"#,
+        ];
+        let (typed, typed_hits) = drive_chunks(&chunks, true);
+        let (dom, dom_hits) = drive_chunks(&chunks, false);
+        assert_eq!(typed_hits, 8);
+        assert_eq!(dom_hits, 0);
+        assert_eq!(typed, dom);
+        let Some(StreamPart::Finish { finish }) = typed.last() else {
+            panic!("missing finish");
+        };
+        assert_eq!(finish.usage.input_tokens, Some(4));
+        assert_eq!(
+            finish.response_metadata.get("openai.response_id"),
+            Some(&serde_json::json!("chat_1"))
+        );
+        assert!(
+            !finish
+                .response_metadata
+                .contains_key("openai.system_fingerprint")
+        );
+        assert_eq!(
+            finish.native_replay.as_ref().unwrap().payload(),
+            &serde_json::json!({
+                "format": REPLAY_FORMAT,
+                "message": {
+                    "role": "assistant",
+                    "content": "hé\nllob",
+                    "reasoning_content": "think \"hard\"",
+                    "refusal": "no",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{\"q\":[1]}"},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            })
+        );
     }
 
     #[test]

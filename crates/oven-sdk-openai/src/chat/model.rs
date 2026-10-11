@@ -2,6 +2,7 @@
 
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
+use oven_sdk::provider_support::parse_json_object;
 use oven_sdk::{
     AbortSignal, AdapterId, BoxFuture, BoxStream, ErrorStage, JsonValue, LanguageModel,
     LanguageModelDescriptor, ModelConfig, ModelError, ModelId, ModelIdentity, NativeContextScope,
@@ -10,7 +11,10 @@ use oven_sdk::{
 use reqwest::{Client, header::HeaderMap};
 
 use crate::{
-    chat::{request, state::State},
+    chat::{
+        request,
+        state::{ChatChunk, State},
+    },
     configuration::{
         MaxTokensField, OpenAiAuth, OpenAiChatSettings, OpenAiCompatibleAuth,
         OpenAiCompatibleChatSettings, OpenAiNoAuth, ReasoningField, StructuredOutputSupport,
@@ -673,6 +677,20 @@ fn process_events(live: &mut LiveState, stop_after_event: bool) -> Result<bool, 
             live.pending_events.clear();
             return Ok(true);
         }
+        // Hot path: decode the chunk straight into typed fields. Error envelopes
+        // and any shape the typed decode declines take the JsonValue path.
+        if let Some(chunk) = parse_json_object::<ChatChunk<'_>>(&event.data)
+            && !chunk.error.0
+        {
+            live.saw_provider_event = true;
+            let mut parts = Vec::new();
+            live.state.apply_chunk(chunk, &mut parts, live.count)?;
+            live.queue.extend(parts.into_iter().map(Ok));
+            if stop_after_event {
+                return Ok(true);
+            }
+            continue;
+        }
         let value: JsonValue = serde_json::from_str(&event.data).map_err(|_| {
             ModelError::invalid_response("OpenAI Chat SSE event is invalid JSON")
                 .with_stage(ErrorStage::StreamDecode)
@@ -700,7 +718,8 @@ fn process_events(live: &mut LiveState, stop_after_event: bool) -> Result<bool, 
         }
         live.saw_provider_event = true;
         let mut parts = Vec::new();
-        live.state.apply(value, &mut parts, live.count)?;
+        live.state
+            .apply_chunk(ChatChunk::from_value(&value), &mut parts, live.count)?;
         live.queue.extend(parts.into_iter().map(Ok));
         if stop_after_event {
             return Ok(true);
