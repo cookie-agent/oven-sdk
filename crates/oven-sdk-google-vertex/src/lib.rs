@@ -3,6 +3,7 @@
 #![allow(clippy::result_large_err)]
 //! Google Vertex AI Gemini `generateContent` and `streamGenerateContent` adapter.
 
+mod body;
 mod error;
 mod model;
 mod options;

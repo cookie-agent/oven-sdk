@@ -2,22 +2,28 @@
 
 use std::collections::BTreeMap;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use oven_sdk::{
     AssistantPart, Capability, ErrorStage, FilePart, FileSource, HistoryTurn, InputPart, JsonValue,
-    LanguageModelDescriptor, ModelCapabilities, ModelError, ReplayDecision, ReplayDisposition,
-    ReplayOutcome, ReplayPolicy, Request, ResponseFormat, SystemPart, ToolChoice, ToolContent,
-    ToolResultPart,
+    LanguageModelDescriptor, ModelCapabilities, ModelError, NativeReplayArtifact, ReplayDecision,
+    ReplayDisposition, ReplayOutcome, ReplayPolicy, Request, ResponseFormat, SystemPart,
+    ToolChoice, ToolContent, ToolResultPart,
 };
+use serde::Deserialize as _;
 
 use crate::{
     REPLAY_FORMAT,
+    body::{
+        self, Body, Content, Empty, FunctionCallingConfig, FunctionDeclaration, GenerationConfig,
+        Part, Parts, RagResources, ResponseFormatText, Tool, ToolConfig, ToolOutput,
+        VertexRagStore,
+    },
     model::{GoogleVertexMediaSettings, GoogleVertexSettings, GoogleVertexThinkingMode},
     options::{GoogleVertexProviderTool, GoogleVertexRequestOptions, GoogleVertexToolOptions},
 };
 
 pub(crate) struct Encoded {
-    pub(crate) body: JsonValue,
+    /// Serialized JSON request body.
+    pub(crate) body: Vec<u8>,
     pub(crate) replay: ReplayOutcome,
     pub(crate) warnings: Vec<String>,
     pub(crate) shared_request_type: Option<String>,
@@ -29,9 +35,9 @@ pub(crate) struct ParsedOptions {
     strict_tools: Vec<bool>,
 }
 
-struct ToolIdentity {
-    name: String,
-    provider_id: Option<String>,
+struct ToolIdentity<'a> {
+    name: &'a str,
+    provider_id: Option<&'a str>,
 }
 
 pub(crate) fn validate_request(
@@ -202,6 +208,14 @@ fn validate_cached_content(
     }
 }
 
+/// Where a replayed assistant turn's validated native parts live.
+enum ReplaySource<'a> {
+    /// Borrowed in place from the artifact payload.
+    Borrowed(&'a [JsonValue]),
+    /// Index into the owned parts produced by the shared cross-adapter codec.
+    Owned(usize),
+}
+
 pub(crate) fn encode_request(
     request: &Request,
     parsed: &ParsedOptions,
@@ -211,11 +225,48 @@ pub(crate) fn encode_request(
     wire_model_id: &oven_sdk::ModelId,
 ) -> Result<Encoded, ModelError> {
     let options = &parsed.request;
+    let provider_tools_supported = descriptor
+        .capabilities
+        .features
+        .contains(Capability::PROVIDER_TOOLS);
     let mut replay = ReplayOutcome::default();
     let mut warnings = Vec::new();
+
+    // Validate native payloads first. Only the shared cross-adapter codec yields owned parts;
+    // they are stored here so every body part can borrow for the whole encoding.
+    let mut fallback_parts = Vec::<Vec<JsonValue>>::new();
+    let sources = if replay_policy == ReplayPolicy::Never {
+        Vec::new()
+    } else {
+        request
+            .history
+            .iter()
+            .map(|turn| {
+                let HistoryTurn::Assistant(turn) = turn else {
+                    return None;
+                };
+                let artifact = turn.finish.native_replay.as_ref()?;
+                Some(
+                    match decode_replay(artifact.payload(), &turn.message.content) {
+                        Ok(parts) => Ok(ReplaySource::Borrowed(parts)),
+                        Err(reason) => oven_sdk::replay::generate_content_parts(
+                            artifact,
+                            &turn.message.content,
+                        )
+                        .map(|parts| {
+                            fallback_parts.push(parts);
+                            ReplaySource::Owned(fallback_parts.len() - 1)
+                        })
+                        .ok_or(reason),
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
     let mut system_parts = Vec::new();
-    let mut contents = Vec::new();
-    let mut tool_names = BTreeMap::<String, ToolIdentity>::new();
+    let mut contents = Vec::<Content<'_>>::with_capacity(request.history.len());
+    let mut tool_names = BTreeMap::<&str, ToolIdentity<'_>>::new();
     let mut previous_tool_content = false;
 
     for (history_index, turn) in request.history.iter().enumerate() {
@@ -226,7 +277,7 @@ pub(crate) fn encode_request(
                     if let SystemPart::Text(text) = part
                         && !text.text.is_empty()
                     {
-                        system_parts.push(serde_json::json!({"text":text.text}));
+                        system_parts.push(Part::Text(&text.text));
                     }
                 }
             }
@@ -236,12 +287,13 @@ pub(crate) fn encode_request(
                     .content
                     .iter()
                     .map(input_part)
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>();
+                    .filter_map(Result::transpose)
+                    .collect::<Result<Vec<_>, _>>()?;
                 if !parts.is_empty() {
-                    contents.push(serde_json::json!({"role":"user","parts":parts}));
+                    contents.push(Content {
+                        role: "user",
+                        parts,
+                    });
                 }
             }
             HistoryTurn::Assistant(turn) => {
@@ -253,42 +305,34 @@ pub(crate) fn encode_request(
                         disposition: ReplayDisposition::ReconstructedNormalized,
                     });
                 } else if let Some(artifact) = &turn.finish.native_replay {
+                    match sources[history_index]
+                        .as_ref()
+                        .expect("assistant replay source was validated")
                     {
-                        match decode_replay(artifact.payload(), &turn.message.content).or_else(
-                            |reason| {
-                                oven_sdk::replay::generate_content_parts(
-                                    artifact,
-                                    &turn.message.content,
-                                )
-                                .ok_or(reason)
-                            },
-                        ) {
-                            Ok(parts) => {
-                                replay.decisions.push(ReplayDecision {
-                                    history_index,
-                                    disposition: ReplayDisposition::Replayed,
-                                });
-                                native = Some(oven_sdk::replay::eligible_blocks(
-                                    artifact,
-                                    wire_model_id,
-                                    oven_sdk::replay::BlockFormat::GenerateContent {
-                                        provider_tools: descriptor
-                                            .capabilities
-                                            .features
-                                            .contains(Capability::PROVIDER_TOOLS),
-                                    },
-                                    descriptor.capabilities.replay.reasoning,
-                                    parts,
-                                    &mut warnings,
-                                )?);
-                            }
-                            Err(reason) => replay.decisions.push(ReplayDecision {
+                        Ok(source) => {
+                            replay.decisions.push(ReplayDecision {
                                 history_index,
-                                disposition: ReplayDisposition::DiscardedInvalidPayload {
-                                    reason: reason.into(),
-                                },
-                            }),
+                                disposition: ReplayDisposition::Replayed,
+                            });
+                            let parts = match source {
+                                ReplaySource::Borrowed(parts) => *parts,
+                                ReplaySource::Owned(index) => fallback_parts[*index].as_slice(),
+                            };
+                            native = Some(eligible_parts(
+                                artifact,
+                                wire_model_id,
+                                provider_tools_supported,
+                                descriptor.capabilities.replay.reasoning,
+                                parts,
+                                &mut warnings,
+                            )?);
                         }
+                        Err(reason) => replay.decisions.push(ReplayDecision {
+                            history_index,
+                            disposition: ReplayDisposition::DiscardedInvalidPayload {
+                                reason: (*reason).into(),
+                            },
+                        }),
                     }
                 } else {
                     replay.decisions.push(ReplayDecision {
@@ -329,24 +373,23 @@ pub(crate) fn encode_request(
                             .collect()
                     }
                 };
-                let mut wire_calls = parts.iter().filter_map(|part| part.get("functionCall"));
+                let mut wire_calls = parts.iter().filter_map(Part::function_call_id);
                 for part in &turn.message.content {
                     if let AssistantPart::ToolCall(call) = part {
                         tool_names.insert(
-                            call.id.clone(),
+                            call.id.as_str(),
                             ToolIdentity {
-                                name: call.name.clone(),
-                                provider_id: wire_calls
-                                    .next()
-                                    .and_then(|call| call.get("id"))
-                                    .and_then(JsonValue::as_str)
-                                    .map(str::to_owned),
+                                name: &call.name,
+                                provider_id: wire_calls.next().flatten(),
                             },
                         );
                     }
                 }
                 if !parts.is_empty() {
-                    contents.push(serde_json::json!({"role":"model","parts":parts}));
+                    contents.push(Content {
+                        role: "model",
+                        parts,
+                    });
                 }
             }
             HistoryTurn::Tool(message) => {
@@ -358,81 +401,58 @@ pub(crate) fn encode_request(
                 if previous_tool_content {
                     contents
                         .last_mut()
-                        .and_then(|content| content.get_mut("parts"))
-                        .and_then(JsonValue::as_array_mut)
                         .expect("previous tool content has parts")
+                        .parts
                         .extend(parts);
                 } else if !parts.is_empty() {
-                    contents.push(serde_json::json!({"role":"user","parts":parts}));
+                    contents.push(Content {
+                        role: "user",
+                        parts,
+                    });
                 }
                 previous_tool_content = true;
             }
         }
     }
 
-    let mut generation_config = serde_json::json!({});
-    if let Some(value) = request.inference.max_output_tokens {
-        generation_config["maxOutputTokens"] = JsonValue::from(value);
-    }
-    if let Some(value) = request.inference.temperature {
-        generation_config["temperature"] = JsonValue::from(value);
-    }
-    if let Some(value) = request.inference.top_p {
-        generation_config["topP"] = JsonValue::from(value);
-    }
-    if let Some(value) = options.top_k {
-        generation_config["topK"] = JsonValue::from(value);
-    }
-    if !options.stop_sequences.is_empty() {
-        generation_config["stopSequences"] =
-            serde_json::to_value(&options.stop_sequences).expect("stop sequences are serializable");
-    }
-    if let Some(value) = options.seed {
-        generation_config["seed"] = JsonValue::from(value);
-    }
-    if let Some(value) = options.presence_penalty {
-        generation_config["presencePenalty"] = JsonValue::from(value);
-    }
-    if let Some(value) = options.frequency_penalty {
-        generation_config["frequencyPenalty"] = JsonValue::from(value);
-    }
-    if let Some(value) = &options.thinking_config {
-        generation_config["thinkingConfig"] =
-            serde_json::to_value(value).expect("thinking config is serializable");
-    }
-    if let ResponseFormat::Json {
-        schema: Some(schema),
-    } = &request.response_format
-    {
-        generation_config["responseFormat"] = serde_json::json!([{
-            "text":{"mimeType":"APPLICATION_JSON","schema":schema.as_value()}
-        }]);
-    }
+    let generation_config = GenerationConfig {
+        max_output_tokens: request.inference.max_output_tokens,
+        temperature: request.inference.temperature,
+        top_p: request.inference.top_p,
+        top_k: options.top_k,
+        stop_sequences: &options.stop_sequences,
+        seed: options.seed,
+        presence_penalty: options.presence_penalty,
+        frequency_penalty: options.frequency_penalty,
+        thinking_config: options.thinking_config.as_ref(),
+        response_format: match &request.response_format {
+            ResponseFormat::Json {
+                schema: Some(schema),
+            } => Some([body::ResponseFormat {
+                text: ResponseFormatText {
+                    mime_type: "APPLICATION_JSON",
+                    schema: schema.as_value(),
+                },
+            }]),
+            _ => None,
+        },
+    };
 
-    let mut root = serde_json::json!({"contents":contents});
-    if !system_parts.is_empty() {
-        root["systemInstruction"] = serde_json::json!({"parts":system_parts});
-    }
-    if generation_config
-        .as_object()
-        .is_some_and(|object| !object.is_empty())
-    {
-        root["generationConfig"] = generation_config;
-    }
     let mut tools = provider_tools(&options.provider_tools);
     if !request.tools.is_empty() {
-        tools.push(serde_json::json!({
-            "functionDeclarations": request.tools.iter().map(|tool| serde_json::json!({
-                "name":tool.name,
-                "description":tool.description,
-                "parametersJsonSchema":tool.input_schema.as_value(),
-            })).collect::<Vec<_>>()
-        }));
+        tools.push(Tool::FunctionDeclarations(
+            request
+                .tools
+                .iter()
+                .map(|tool| FunctionDeclaration {
+                    name: &tool.name,
+                    description: &tool.description,
+                    parameters_json_schema: tool.input_schema.as_value(),
+                })
+                .collect(),
+        ));
     }
-    if !tools.is_empty() {
-        root["tools"] = JsonValue::Array(tools);
-    }
-    if !request.tools.is_empty() || stream_function_call_arguments {
+    let tool_config = (!request.tools.is_empty() || stream_function_call_arguments).then(|| {
         let strict = parsed.strict_tools.iter().any(|strict| *strict);
         let (mode, names) = match &request.tool_choice {
             ToolChoice::Auto => (if strict { "VALIDATED" } else { "AUTO" }, None),
@@ -440,28 +460,35 @@ pub(crate) fn encode_request(
             ToolChoice::None => ("NONE", None),
             ToolChoice::Tool(name) => (
                 if strict { "VALIDATED" } else { "ANY" },
-                Some(vec![name.clone()]),
+                Some([name.as_str()]),
             ),
         };
-        root["toolConfig"] = serde_json::json!({"functionCallingConfig":{"mode":mode}});
-        if stream_function_call_arguments {
-            root["toolConfig"]["functionCallingConfig"]["streamFunctionCallArguments"] =
-                JsonValue::Bool(true);
+        ToolConfig {
+            function_calling_config: FunctionCallingConfig {
+                mode,
+                stream_function_call_arguments,
+                allowed_function_names: names,
+            },
         }
-        if let Some(names) = names {
-            root["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"] =
-                serde_json::to_value(names).expect("tool names are serializable");
-        }
+    });
+    let body = Body {
+        contents,
+        system_instruction: (!system_parts.is_empty()).then_some(Parts {
+            parts: system_parts,
+        }),
+        generation_config,
+        tools,
+        tool_config,
+        cached_content: options.cached_content.as_deref(),
+        safety_settings: &options.safety_settings,
     }
-    if let Some(value) = &options.cached_content {
-        root["cachedContent"] = JsonValue::String(value.clone());
-    }
-    if !options.safety_settings.is_empty() {
-        root["safetySettings"] = serde_json::to_value(&options.safety_settings)
-            .expect("safety settings are serializable");
-    }
+    .to_bytes()
+    .map_err(|_| {
+        ModelError::invalid_request("could not serialize Vertex Gemini request")
+            .with_stage(ErrorStage::RequestEncoding)
+    })?;
     Ok(Encoded {
-        body: root,
+        body,
         replay,
         warnings,
         shared_request_type: options.shared_request_type.clone(),
@@ -474,7 +501,7 @@ pub(crate) fn options(request: &Request) -> Result<ParsedOptions, ModelError> {
         .provider_options
         .get("google_vertex")
         .map(|value| {
-            serde_json::from_value(value.clone())
+            GoogleVertexRequestOptions::deserialize(value)
                 .map_err(|_| ModelError::invalid_request("invalid Google Vertex request options"))
         })
         .transpose()?
@@ -485,8 +512,8 @@ pub(crate) fn options(request: &Request) -> Result<ParsedOptions, ModelError> {
         .map(|tool| {
             tool.provider_options
                 .get("google_vertex")
-                .and_then(|value| serde_json::from_value(value.clone()).ok())
-                .is_some_and(|options: GoogleVertexToolOptions| options.strict)
+                .and_then(|value| GoogleVertexToolOptions::deserialize(value).ok())
+                .is_some_and(|options| options.strict)
         })
         .collect();
     Ok(ParsedOptions {
@@ -495,30 +522,26 @@ pub(crate) fn options(request: &Request) -> Result<ParsedOptions, ModelError> {
     })
 }
 
-fn provider_tools(tools: &[GoogleVertexProviderTool]) -> Vec<JsonValue> {
-    tools
-        .iter()
-        .map(|tool| match tool {
-            GoogleVertexProviderTool::GoogleSearch => serde_json::json!({"googleSearch":{}}),
-            GoogleVertexProviderTool::UrlContext => serde_json::json!({"urlContext":{}}),
-            GoogleVertexProviderTool::CodeExecution => serde_json::json!({"codeExecution":{}}),
-            GoogleVertexProviderTool::VertexRagStore { rag_corpus, top_k } => {
-                let mut value = serde_json::json!({"retrieval":{"vertexRagStore":{"ragResources":{"ragCorpus":rag_corpus}}}});
-                if let Some(top_k) = top_k {
-                    value["retrieval"]["vertexRagStore"]["similarityTopK"] = JsonValue::from(*top_k);
-                }
-                value
-            }
-            GoogleVertexProviderTool::GoogleMaps => serde_json::json!({"googleMaps":{}}),
-        })
-        .collect()
+fn provider_tools(tools: &[GoogleVertexProviderTool]) -> Vec<Tool<'_>> {
+    let mut output = Vec::with_capacity(tools.len() + 1);
+    output.extend(tools.iter().map(|tool| match tool {
+        GoogleVertexProviderTool::GoogleSearch => Tool::GoogleSearch(Empty {}),
+        GoogleVertexProviderTool::UrlContext => Tool::UrlContext(Empty {}),
+        GoogleVertexProviderTool::CodeExecution => Tool::CodeExecution(Empty {}),
+        GoogleVertexProviderTool::VertexRagStore { rag_corpus, top_k } => Tool::Retrieval {
+            store: VertexRagStore {
+                rag_resources: RagResources { rag_corpus },
+                similarity_top_k: *top_k,
+            },
+        },
+        GoogleVertexProviderTool::GoogleMaps => Tool::GoogleMaps(Empty {}),
+    }));
+    output
 }
 
-fn input_part(part: &InputPart) -> Result<Option<JsonValue>, ModelError> {
+fn input_part(part: &InputPart) -> Result<Option<Part<'_>>, ModelError> {
     match part {
-        InputPart::Text(text) => {
-            Ok((!text.text.is_empty()).then(|| serde_json::json!({"text":text.text})))
-        }
+        InputPart::Text(text) => Ok((!text.text.is_empty()).then_some(Part::Text(&text.text))),
         InputPart::File(file) => file_part(file).map(Some),
         InputPart::Custom(_) => Err(ModelError::unsupported(
             "Vertex custom input parts are not supported",
@@ -526,17 +549,21 @@ fn input_part(part: &InputPart) -> Result<Option<JsonValue>, ModelError> {
     }
 }
 
-fn file_part(file: &FilePart) -> Result<JsonValue, ModelError> {
+fn file_part(file: &FilePart) -> Result<Part<'_>, ModelError> {
+    let mime_type = file.media_type.as_str();
     match &file.source {
-        FileSource::Bytes(bytes) => Ok(serde_json::json!({
-            "inlineData":{"mimeType":file.media_type,"data":STANDARD.encode(bytes)}
-        })),
-        FileSource::Text(text) => Ok(serde_json::json!({
-            "inlineData":{"mimeType":file.media_type,"data":STANDARD.encode(text.as_bytes())}
-        })),
-        FileSource::Url(url) => Ok(serde_json::json!({
-            "fileData":{"mimeType":file.media_type,"fileUri":url.as_str()}
-        })),
+        FileSource::Bytes(bytes) => Ok(Part::InlineData {
+            mime_type,
+            data: bytes,
+        }),
+        FileSource::Text(text) => Ok(Part::InlineData {
+            mime_type,
+            data: text.as_bytes(),
+        }),
+        FileSource::Url(url) => Ok(Part::FileData {
+            mime_type,
+            file_uri: url.as_str(),
+        }),
         FileSource::ProviderReference { .. } => Err(ModelError::unsupported(
             "Vertex Gemini does not accept Gemini Files provider references",
         )
@@ -544,60 +571,51 @@ fn file_part(file: &FilePart) -> Result<JsonValue, ModelError> {
     }
 }
 
-fn assistant_part(part: &AssistantPart) -> Option<JsonValue> {
+fn assistant_part(part: &AssistantPart) -> Option<Part<'_>> {
     match part {
-        AssistantPart::Text(text) if !text.text.is_empty() => {
-            Some(serde_json::json!({"text":text.text}))
-        }
-        AssistantPart::ToolCall(call) => {
-            let mut function_call = serde_json::json!({"name":call.name,"args":call.input});
-            if let Some(id) = &call.provider_item_id {
-                function_call["id"] = JsonValue::String(id.clone());
-            }
-            Some(serde_json::json!({"functionCall":function_call}))
-        }
+        AssistantPart::Text(text) if !text.text.is_empty() => Some(Part::Text(&text.text)),
+        AssistantPart::ToolCall(call) => Some(Part::FunctionCall {
+            id: call.provider_item_id.as_deref(),
+            name: &call.name,
+            args: &call.input,
+        }),
         _ => None,
     }
 }
 
-fn function_response(
-    result: &ToolResultPart,
-    identities: &BTreeMap<String, ToolIdentity>,
-) -> Result<JsonValue, ModelError> {
-    let identity = identities.get(&result.tool_call_id).ok_or_else(|| {
-        ModelError::invalid_request("Vertex tool result could not resolve its function name")
-    })?;
+fn function_response<'a>(
+    result: &'a ToolResultPart,
+    identities: &BTreeMap<&str, ToolIdentity<'a>>,
+) -> Result<Part<'a>, ModelError> {
+    let identity = identities
+        .get(result.tool_call_id.as_str())
+        .ok_or_else(|| {
+            ModelError::invalid_request("Vertex tool result could not resolve its function name")
+        })?;
     let output = match &result.content {
-        ToolContent::Text(value) => JsonValue::String(value.clone()),
-        ToolContent::Json(value) => value.clone(),
-        ToolContent::Denied { reason } => JsonValue::String(
-            reason
-                .clone()
-                .unwrap_or_else(|| "Tool call execution denied.".into()),
-        ),
-        ToolContent::Mixed(values) => JsonValue::Array(
-            values
+        ToolContent::Text(value) => ToolOutput::Str(value),
+        ToolContent::Json(value) => ToolOutput::Json(value),
+        ToolContent::Denied { reason } => {
+            ToolOutput::Str(reason.as_deref().unwrap_or("Tool call execution denied."))
+        }
+        ToolContent::Mixed(values) => {
+            if values
                 .iter()
-                .map(|value| match value {
-                    oven_sdk::ContentValue::Text(value) => Ok(JsonValue::String(value.clone())),
-                    oven_sdk::ContentValue::Json(value) => Ok(value.clone()),
-                    oven_sdk::ContentValue::File(_) => Err(ModelError::unsupported(
-                        "files in tool results are not deliverable via google-vertex",
-                    )),
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
+                .any(|value| matches!(value, oven_sdk::ContentValue::File(_)))
+            {
+                return Err(ModelError::unsupported(
+                    "files in tool results are not deliverable via google-vertex",
+                ));
+            }
+            ToolOutput::Mixed(values)
+        }
     };
-    let response = if result.is_error {
-        serde_json::json!({"error":output})
-    } else {
-        serde_json::json!({"output":output})
-    };
-    let mut function_response = serde_json::json!({"name":identity.name,"response":response});
-    if let Some(id) = &identity.provider_id {
-        function_response["id"] = JsonValue::String(id.clone());
-    }
-    Ok(serde_json::json!({"functionResponse":function_response}))
+    Ok(Part::FunctionResponse {
+        id: identity.provider_id,
+        name: identity.name,
+        is_error: result.is_error,
+        output,
+    })
 }
 
 fn validate_tool_result_files(result: &ToolResultPart) -> Result<(), ModelError> {
@@ -1017,10 +1035,10 @@ fn schema_error(context: &str, detail: &str) -> ModelError {
         .with_stage(ErrorStage::RequestEncoding)
 }
 
-fn decode_replay(
-    payload: &JsonValue,
+fn decode_replay<'a>(
+    payload: &'a JsonValue,
     normalized: &[AssistantPart],
-) -> Result<Vec<JsonValue>, &'static str> {
+) -> Result<&'a [JsonValue], &'static str> {
     if payload.get("format").and_then(JsonValue::as_str) != Some(REPLAY_FORMAT) {
         return Err("Vertex replay format is invalid");
     }
@@ -1030,18 +1048,128 @@ fn decode_replay(
     let parts = payload
         .pointer("/content/parts")
         .and_then(JsonValue::as_array)
-        .ok_or("Vertex replay parts are invalid")?
-        .clone();
+        .ok_or("Vertex replay parts are invalid")?;
     if parts.iter().any(|part| !valid_native_part(part)) {
         return Err("Vertex replay contains an unsupported native part");
     }
-    if native_semantics(&parts) != normalized_semantics(normalized) {
+    if !semantics_match(parts, normalized) {
         return Err("Vertex replay payload did not match normalized content");
     }
-    if !oven_sdk::replay::vertex_signatures_match(&parts, normalized) {
+    if !oven_sdk::replay::vertex_signatures_match(parts, normalized) {
         return Err("Vertex required thought-signature witness does not match native state");
     }
     Ok(parts)
+}
+
+/// Applies `generateContent` part eligibility to validated replay parts without copying them.
+///
+/// Mirrors `oven_sdk::replay::eligible_blocks` with `BlockFormat::GenerateContent`: thought
+/// signatures need target reasoning support and the same known wire model, thought parts need
+/// target reasoning support, and a tool continuation cannot silently lose reasoning state.
+fn eligible_parts<'a>(
+    artifact: &NativeReplayArtifact,
+    target: &oven_sdk::ModelId,
+    provider_tools: bool,
+    reasoning_supported: bool,
+    parts: &'a [JsonValue],
+    warnings: &mut Vec<String>,
+) -> Result<Vec<Part<'a>>, ModelError> {
+    const EXCLUSIVE: [&str; 6] = [
+        "text",
+        "functionCall",
+        "toolCall",
+        "toolResponse",
+        "executableCode",
+        "codeExecutionResult",
+    ];
+    const SERVER: [&str; 4] = [
+        "toolCall",
+        "toolResponse",
+        "executableCode",
+        "codeExecutionResult",
+    ];
+    let encrypted_allowed = reasoning_supported && artifact.source_wire_model_id() == Some(target);
+    let mut omitted = false;
+    let mut has_calls = false;
+    let mut eligible = Vec::with_capacity(parts.len());
+    for part in parts {
+        let object = part
+            .as_object()
+            .ok_or_else(|| ModelError::replay("native replay block must be an object"))?;
+        if EXCLUSIVE
+            .iter()
+            .filter(|key| object.contains_key(**key))
+            .count()
+            != 1
+        {
+            return Err(ModelError::replay("ambiguous generateContent native part"));
+        }
+        let server_part = SERVER.iter().any(|key| object.contains_key(*key));
+        if !object.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "text" | "thought" | "thoughtSignature" | "functionCall"
+            ) || provider_tools && SERVER.contains(&key.as_str())
+        }) {
+            return Err(ModelError::replay(
+                "target has no explicit support for these custom generateContent replay fields",
+            ));
+        }
+        if object.get("text").is_some_and(|value| !value.is_string())
+            || object
+                .get("thought")
+                .is_some_and(|value| !value.is_boolean())
+            || object
+                .get("thoughtSignature")
+                .is_some_and(|value| !value.is_string())
+            || object.contains_key("text") && object.contains_key("functionCall")
+        {
+            return Err(ModelError::replay("invalid generateContent replay part"));
+        }
+        if let Some(call) = object.get("functionCall") {
+            let call = call
+                .as_object()
+                .ok_or_else(|| ModelError::replay("invalid native functionCall"))?;
+            if !call
+                .keys()
+                .all(|key| matches!(key.as_str(), "id" | "name" | "args"))
+                || !call.get("name").is_some_and(JsonValue::is_string)
+                || call.get("id").is_some_and(|value| !value.is_string())
+                || call.get("args").is_some_and(|value| !value.is_object())
+            {
+                return Err(ModelError::replay("invalid native functionCall fields"));
+            }
+        }
+        has_calls |= object.contains_key("functionCall") || server_part;
+        if !(object.contains_key("text")
+            || object.contains_key("functionCall")
+            || (provider_tools && server_part))
+        {
+            return Err(ModelError::replay(
+                "target has no explicit support for this custom generateContent replay block",
+            ));
+        }
+        let strip_signature = !encrypted_allowed && object.contains_key("thoughtSignature");
+        omitted |= strip_signature;
+        let reasoning = object.get("thought").and_then(JsonValue::as_bool) == Some(true);
+        if reasoning && !reasoning_supported {
+            omitted = true;
+        } else {
+            eligible.push(Part::Native {
+                value: object,
+                strip_signature,
+            });
+        }
+    }
+    if omitted {
+        if has_calls {
+            return Err(ModelError::replay(
+                "native tool continuation cannot omit ineligible reasoning state",
+            ));
+        }
+        warnings.push("native reasoning excluded: target support or equal known wire model_id is required for encrypted reasoning".into());
+    }
+    Ok(eligible)
 }
 
 fn valid_native_part(part: &JsonValue) -> bool {
@@ -1066,43 +1194,89 @@ fn valid_native_part(part: &JsonValue) -> bool {
     })
 }
 
-fn native_semantics(parts: &[JsonValue]) -> Vec<JsonValue> {
-    parts.iter().filter_map(|part| {
+/// The replay-relevant meaning of one native part, borrowed from the payload.
+enum NativeSemantic<'a> {
+    Text {
+        reasoning: bool,
+        text: &'a str,
+    },
+    ToolCall {
+        /// `None` compares as JSON null.
+        provider_id: Option<&'a JsonValue>,
+        name: &'a str,
+        /// `None` compares as an empty object.
+        args: Option<&'a JsonValue>,
+    },
+}
+
+impl<'a> NativeSemantic<'a> {
+    fn from_part(part: &'a JsonValue) -> Option<Self> {
         if let Some(text) = part.get("text").and_then(JsonValue::as_str) {
             if text.is_empty() && part.get("thoughtSignature").is_some() {
                 return None;
             }
-            return Some(serde_json::json!({
-                "type":if part.get("thought").and_then(JsonValue::as_bool) == Some(true) {"reasoning"} else {"text"},
-                "text":text,
-            }));
+            return Some(Self::Text {
+                reasoning: part.get("thought").and_then(JsonValue::as_bool) == Some(true),
+                text,
+            });
         }
-        part.get("functionCall").map(|call| serde_json::json!({
-            "type":"tool_call",
-            "provider_id":call.get("id").cloned().unwrap_or(JsonValue::Null),
-            "name":call.get("name").and_then(JsonValue::as_str).unwrap_or(""),
-            "args":call.get("args").cloned().unwrap_or_else(|| serde_json::json!({})),
-        }))
-    }).collect()
+        part.get("functionCall").map(|call| Self::ToolCall {
+            provider_id: call.get("id"),
+            name: call.get("name").and_then(JsonValue::as_str).unwrap_or(""),
+            args: call.get("args"),
+        })
+    }
+
+    /// Whether this native part carries the same meaning as one normalized part.
+    fn matches(&self, expected: &AssistantPart) -> bool {
+        match (self, expected) {
+            (Self::Text { reasoning, text }, AssistantPart::Text(expected)) => {
+                !reasoning && *text == expected.text
+            }
+            (Self::Text { reasoning, text }, AssistantPart::Reasoning(expected)) => {
+                *reasoning && *text == expected.text
+            }
+            (
+                Self::ToolCall {
+                    provider_id,
+                    name,
+                    args,
+                },
+                AssistantPart::ToolCall(call),
+            ) => {
+                let id_matches = match call.provider_item_id.as_deref() {
+                    Some(expected) => provider_id.and_then(JsonValue::as_str) == Some(expected),
+                    None => provider_id.is_none_or(JsonValue::is_null),
+                };
+                id_matches
+                    && *name == call.name
+                    && match args {
+                        Some(args) => **args == call.input,
+                        None => call
+                            .input
+                            .as_object()
+                            .is_some_and(serde_json::Map::is_empty),
+                    }
+            }
+            _ => false,
+        }
+    }
 }
 
-fn normalized_semantics(parts: &[AssistantPart]) -> Vec<JsonValue> {
-    parts
-        .iter()
-        .filter_map(|part| match part {
-            AssistantPart::Text(text) => Some(serde_json::json!({"type":"text","text":text.text})),
-            AssistantPart::Reasoning(reasoning) => {
-                Some(serde_json::json!({"type":"reasoning","text":reasoning.text}))
-            }
-            AssistantPart::ToolCall(call) => Some(serde_json::json!({
-                "type":"tool_call",
-                "provider_id":call.provider_item_id,
-                "name":call.name,
-                "args":call.input,
-            })),
-            _ => None,
-        })
-        .collect()
+/// Compares native and normalized semantics pairwise, without materializing either side.
+fn semantics_match(parts: &[JsonValue], normalized: &[AssistantPart]) -> bool {
+    let mut native = parts.iter().filter_map(NativeSemantic::from_part);
+    for expected in normalized.iter().filter(|part| {
+        matches!(
+            part,
+            AssistantPart::Text(_) | AssistantPart::Reasoning(_) | AssistantPart::ToolCall(_)
+        )
+    }) {
+        if !native.next().is_some_and(|part| part.matches(expected)) {
+            return false;
+        }
+    }
+    native.next().is_none()
 }
 
 #[cfg(test)]
@@ -1177,6 +1351,142 @@ mod tests {
             FileSource::Url("https://example.com/2.jpg".parse().unwrap()),
         );
         assert!(validate_file(&third, &settings, &mut image_counts).is_err());
+    }
+
+    fn artifact(source_model: Option<&str>) -> NativeReplayArtifact {
+        let artifact = NativeReplayArtifact::new(
+            oven_sdk::AdapterId::new("oven.google.vertex.generate-content"),
+            oven_sdk::NativeContextScope::new(
+                oven_sdk::ProviderId::new("google.vertex"),
+                oven_sdk::ModelId::new("target"),
+                oven_sdk::ResourceId::new("scope").unwrap(),
+            )
+            .unwrap(),
+            serde_json::json!({"role":"model","parts":[]}),
+        )
+        .unwrap();
+        match source_model {
+            Some(model) => artifact
+                .with_source_wire_model_id(oven_sdk::ModelId::new(model))
+                .unwrap(),
+            None => artifact,
+        }
+    }
+
+    #[test]
+    fn borrowed_eligibility_matches_the_shared_generate_content_codec() {
+        let cases = [
+            serde_json::json!([
+                {"text":"think","thought":true,"thoughtSignature":"sig-1"},
+                {"text":"answer","thoughtSignature":"sig-2"}
+            ]),
+            serde_json::json!([
+                {"text":"think","thought":true,"thoughtSignature":"sig-1"},
+                {"functionCall":{"id":"c","name":"lookup","args":{}},"thoughtSignature":"sig-2"}
+            ]),
+            serde_json::json!([
+                {"toolCall":{"toolType":"URL_CONTEXT","args":{}},"thoughtSignature":"sig"},
+                {"text":"done"}
+            ]),
+            serde_json::json!([{"text":"a","functionCall":{"name":"x"}}]),
+            serde_json::json!([{"thought":true}]),
+            serde_json::json!([{"text":7}]),
+            serde_json::json!([{"text":"a","partMetadata":{}}]),
+            serde_json::json!([{"functionCall":{"name":"x","extra":1}}]),
+            serde_json::json!([{"functionCall":"x"}]),
+            serde_json::json!(["not an object"]),
+        ];
+        for parts in cases {
+            let parts = parts.as_array().unwrap();
+            for source in [Some("target"), Some("other"), None] {
+                for provider_tools in [false, true] {
+                    for reasoning in [false, true] {
+                        let artifact = artifact(source);
+                        let mut core_warnings = Vec::new();
+                        let core = oven_sdk::replay::eligible_blocks(
+                            &artifact,
+                            &oven_sdk::ModelId::new("target"),
+                            oven_sdk::replay::BlockFormat::GenerateContent { provider_tools },
+                            reasoning,
+                            parts.clone(),
+                            &mut core_warnings,
+                        );
+                        let mut warnings = Vec::new();
+                        let borrowed = eligible_parts(
+                            &artifact,
+                            &oven_sdk::ModelId::new("target"),
+                            provider_tools,
+                            reasoning,
+                            parts,
+                            &mut warnings,
+                        )
+                        .map(|parts| {
+                            parts
+                                .iter()
+                                .map(|part| serde_json::to_value(part).unwrap())
+                                .collect::<Vec<_>>()
+                        });
+                        let context = format!("{parts:?} {source:?} {provider_tools} {reasoning}");
+                        match (core, borrowed) {
+                            (Ok(core), Ok(borrowed)) => assert_eq!(core, borrowed, "{context}"),
+                            (Err(core), Err(borrowed)) => {
+                                assert_eq!(core.to_string(), borrowed.to_string(), "{context}");
+                            }
+                            (core, borrowed) => panic!("{context}: {core:?} vs {borrowed:?}"),
+                        }
+                        assert_eq!(core_warnings, warnings, "{context}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn in_place_semantics_match_text_reasoning_and_provider_call_ids_exactly() {
+        let mut with_id = oven_sdk::ToolCallPart::new("c1", "lookup", serde_json::json!({}));
+        with_id.provider_item_id = Some("p1".into());
+        let normalized = vec![
+            AssistantPart::Reasoning(oven_sdk::ReasoningPart::new("think")),
+            AssistantPart::Text(oven_sdk::TextPart::new("")),
+            AssistantPart::ToolCall(with_id),
+            AssistantPart::ToolCall(oven_sdk::ToolCallPart::new(
+                "c2",
+                "lookup",
+                serde_json::json!({"q":1}),
+            )),
+            AssistantPart::Custom(oven_sdk::CustomPart::new("ignored", serde_json::json!({}))),
+        ];
+        let parts = serde_json::json!([
+            {"text":"think","thought":true,"thoughtSignature":"sig"},
+            {"text":""},
+            {"functionCall":{"id":"p1","name":"lookup"}},
+            {"functionCall":{"id":null,"name":"lookup","args":{"q":1}}},
+            {"text":"","thoughtSignature":"tail"}
+        ]);
+        assert!(semantics_match(parts.as_array().unwrap(), &normalized));
+        let mut missing_id = parts.clone();
+        missing_id[3]["functionCall"]
+            .as_object_mut()
+            .unwrap()
+            .remove("id");
+        assert!(semantics_match(missing_id.as_array().unwrap(), &normalized));
+        let mutations: [fn(&mut JsonValue); 8] = [
+            |parts| parts[0]["thought"] = JsonValue::Bool(false),
+            |parts| parts[1]["text"] = JsonValue::String(" ".into()),
+            |parts| parts[2]["functionCall"]["args"] = serde_json::json!({"x":1}),
+            |parts| parts[2]["functionCall"]["id"] = JsonValue::String("other".into()),
+            |parts| parts[3]["functionCall"]["id"] = JsonValue::String("p2".into()),
+            |parts| parts[3]["functionCall"]["name"] = JsonValue::String("other".into()),
+            |parts| parts[4]["text"] = JsonValue::String("visible".into()),
+            |parts| {
+                parts.as_array_mut().unwrap().remove(1);
+            },
+        ];
+        for mutate in mutations {
+            let mut changed = parts.clone();
+            mutate(&mut changed);
+            assert!(!semantics_match(changed.as_array().unwrap(), &normalized));
+        }
     }
 
     #[test]
