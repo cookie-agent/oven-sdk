@@ -1,6 +1,9 @@
 //! Anthropic stream event state machine.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use oven_sdk::{
     AdapterId, ErrorStage, Finish, FinishReason, JsonValue, ModelError, ModelErrorKind,
@@ -11,8 +14,46 @@ use crate::{error::classify_error_for, wire::Protocol};
 use reqwest::header::HeaderMap;
 
 use super::blocks::Block;
+use oven_sdk::provider_support::JsonObject;
 
 const MAX_CONTENT_BLOCK_INDEX: u64 = 4095;
+
+/// Borrowed `content_block_delta` payload decoded without a `JsonValue` DOM.
+///
+/// Only well-typed fields decode; anything else declines so the caller falls
+/// back to [`State::apply`], which owns every edge case.
+#[derive(serde::Deserialize)]
+pub(crate) struct ContentBlockDelta<'a> {
+    #[serde(rename = "type", borrow)]
+    pub(crate) kind: Cow<'a, str>,
+    index: u64,
+    #[serde(borrow)]
+    delta: JsonObject<DeltaBody<'a>>,
+}
+
+#[derive(serde::Deserialize)]
+struct DeltaBody<'a> {
+    #[serde(rename = "type", default, borrow)]
+    kind: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    text: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    thinking: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    signature: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    partial_json: Option<Cow<'a, str>>,
+}
+
+/// Outcome of the typed `content_block_delta` fast path.
+// Returned by value and matched immediately; boxing the part would add an allocation.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum FastDelta {
+    /// The delta was applied and produced at most this one part.
+    Applied(Option<StreamPart>),
+    /// The delta needs the `JsonValue` path; state is untouched.
+    Declined,
+}
 
 pub(crate) struct State {
     pub(super) started: bool,
@@ -75,6 +116,59 @@ impl State {
         }
         self.request_id = request_id;
     }
+    /// Applies a typed text, thinking, signature, or tool-input delta to its open block.
+    ///
+    /// Mirrors the matching `content_block_delta` arms of [`Self::apply`] and
+    /// declines every other case (terminal state, unknown block, mismatched
+    /// delta type) without mutating state.
+    pub(crate) fn apply_content_block_delta(&mut self, event: ContentBlockDelta<'_>) -> FastDelta {
+        if self.done || event.index > MAX_CONTENT_BLOCK_INDEX {
+            return FastDelta::Declined;
+        }
+        let delta = event.delta.0;
+        let kind = delta.kind.as_deref().unwrap_or("");
+        let Some(block) = self.blocks.get_mut(&event.index) else {
+            return FastDelta::Declined;
+        };
+        let part = match block {
+            Block::Text { id, text } if kind == "text_delta" => {
+                let value = delta.text.unwrap_or_default();
+                text.push_str(&value);
+                Some(StreamPart::TextDelta {
+                    id: id.clone(),
+                    delta: value.into_owned(),
+                    metadata: None,
+                })
+            }
+            Block::Thinking { id, text, .. } if kind == "thinking_delta" => {
+                let value = delta.thinking.unwrap_or_default();
+                text.push_str(&value);
+                Some(StreamPart::ReasoningDelta {
+                    id: id.clone(),
+                    delta: value.into_owned(),
+                    metadata: None,
+                })
+            }
+            Block::Thinking { signature, .. } if kind == "signature_delta" => {
+                if let Some(piece) = delta.signature {
+                    signature.get_or_insert_with(String::new).push_str(&piece);
+                }
+                None
+            }
+            Block::Tool { id, input, .. } if kind == "input_json_delta" => {
+                let piece = delta.partial_json.unwrap_or_default();
+                input.push_str(&piece);
+                (!piece.is_empty()).then(|| StreamPart::ToolCallDelta {
+                    id: id.clone(),
+                    delta: piece.into_owned(),
+                    metadata: None,
+                })
+            }
+            _ => return FastDelta::Declined,
+        };
+        FastDelta::Applied(part)
+    }
+
     pub(crate) fn apply(
         &mut self,
         event: &str,
@@ -176,8 +270,12 @@ impl State {
                 self.next_block_order = self.next_block_order.saturating_add(1);
                 let b = match ty {
                     "text" => {
-                        parts.push(StreamPart::TextStart { id, metadata: None });
+                        parts.push(StreamPart::TextStart {
+                            id: id.clone(),
+                            metadata: None,
+                        });
                         Block::Text {
+                            id,
                             text: String::new(),
                         }
                     }
@@ -190,6 +288,7 @@ impl State {
                         });
                         parts.push(StreamPart::ReasoningStart { id, metadata });
                         Block::Thinking {
+                            id: format!("thinking:{i}"),
                             redacted: ty == "redacted_thinking",
                             text: String::new(),
                             data: block.get("data").cloned(),
@@ -260,24 +359,23 @@ impl State {
                     return Ok(());
                 };
                 match block {
-                    Block::Text { text } if ty == "text_delta" => {
-                        let id = format!("text:{i}");
+                    Block::Text { id, text } if ty == "text_delta" => {
                         let value = delta.get("text").and_then(JsonValue::as_str).unwrap_or("");
                         text.push_str(value);
                         parts.push(StreamPart::TextDelta {
-                            id,
+                            id: id.clone(),
                             delta: value.into(),
                             metadata: None,
                         });
                     }
-                    Block::Thinking { text, .. } if ty == "thinking_delta" => {
+                    Block::Thinking { id, text, .. } if ty == "thinking_delta" => {
                         let value = delta
                             .get("thinking")
                             .and_then(JsonValue::as_str)
                             .unwrap_or("");
                         text.push_str(value);
                         parts.push(StreamPart::ReasoningDelta {
-                            id: format!("thinking:{i}"),
+                            id: id.clone(),
                             delta: value.into(),
                             metadata: None,
                         });
@@ -323,27 +421,32 @@ impl State {
                 };
                 let order = self.block_order.remove(&i).unwrap_or(self.next_block_order);
                 match block {
-                    Block::Text { text } => {
-                        self.push_native(order, serde_json::json!({"type":"text","text":text}));
-                        parts.push(StreamPart::TextEnd {
-                            id: format!("text:{i}"),
-                            metadata: None,
-                        });
+                    Block::Text { id, text } => {
+                        self.push_native(
+                            order,
+                            json_object([("type", "text".into()), ("text", text.into())]),
+                        );
+                        parts.push(StreamPart::TextEnd { id, metadata: None });
                     }
                     Block::Thinking {
                         redacted,
                         text,
                         data,
                         signature,
+                        ..
                     } => {
                         let native = if redacted {
                             let data = data.unwrap_or_else(|| JsonValue::String(String::new()));
-                            serde_json::json!({"type":"redacted_thinking","data":data})
+                            json_object([("type", "redacted_thinking".into()), ("data", data)])
                         } else {
                             // The native schema always carries this field; a missing delta is
                             // represented as the equivalent empty signature.
                             let signature = signature.unwrap_or_default();
-                            serde_json::json!({"type":"thinking","thinking":text,"signature":signature})
+                            json_object([
+                                ("type", "thinking".into()),
+                                ("thinking", text.into()),
+                                ("signature", signature.into()),
+                            ])
                         };
                         self.push_native(order, native);
                         parts.push(StreamPart::ReasoningEnd {
@@ -378,7 +481,17 @@ impl State {
                         }
                         let mut call = ToolCallPart::new(id, name, parsed);
                         call.raw_input = Some(raw);
-                        self.push_native(order, serde_json::json!({"type":"tool_use","id":call.id,"name":call.name,"input":call.input}));
+                        // The part and the replay payload each own the parsed input;
+                        // cloning the DOM is cheaper than serializing it again.
+                        self.push_native(
+                            order,
+                            json_object([
+                                ("type", "tool_use".into()),
+                                ("id", call.id.as_str().into()),
+                                ("name", call.name.as_str().into()),
+                                ("input", call.input.clone()),
+                            ]),
+                        );
                         parts.push(StreamPart::ToolCallEnd {
                             id: call.id.clone(),
                             metadata: None,
@@ -429,7 +542,18 @@ impl State {
                     let content = std::mem::take(&mut self.native)
                         .into_values()
                         .collect::<Vec<_>>();
-                    let payload = serde_json::json!({"format":self.protocol.replay_format(),"message":{"role":"assistant","content":content},"stop_reason":self.stop.take(),"stop_sequence":self.stop_sequence.take()});
+                    let payload = json_object([
+                        ("format", self.protocol.replay_format().into()),
+                        (
+                            "message",
+                            json_object([
+                                ("role", "assistant".into()),
+                                ("content", JsonValue::Array(content)),
+                            ]),
+                        ),
+                        ("stop_reason", self.stop.take().into()),
+                        ("stop_sequence", self.stop_sequence.take().into()),
+                    ]);
                     finish.native_replay = Some(
                         NativeReplayArtifact::capture(
                             self.adapter_id.clone(),
@@ -457,10 +581,9 @@ impl State {
                 let open = std::mem::take(&mut self.blocks);
                 for (index, block) in open {
                     match block {
-                        Block::Text { .. } => parts.push(StreamPart::TextEnd {
-                            id: format!("text:{index}"),
-                            metadata: None,
-                        }),
+                        Block::Text { id, .. } => {
+                            parts.push(StreamPart::TextEnd { id, metadata: None });
+                        }
                         Block::Thinking { redacted, .. } => parts.push(StreamPart::ReasoningEnd {
                             id: format!(
                                 "{}:{index}",
@@ -525,6 +648,16 @@ impl State {
     fn push_native(&mut self, order: u64, value: JsonValue) {
         self.native.insert(order, value);
     }
+}
+
+/// Builds a JSON object from owned values without `json!`'s serialize-copy.
+fn json_object<const N: usize>(entries: [(&str, JsonValue); N]) -> JsonValue {
+    JsonValue::Object(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
 }
 
 fn reserve_tool_id(
@@ -676,6 +809,148 @@ mod tests {
             oven_sdk::ResourceId::new("test-resource").expect("valid resource"),
         )
         .expect("valid native-context scope")
+    }
+
+    fn new_state() -> State {
+        State::new(
+            ReplayPolicy::IfValid,
+            Protocol::Anthropic,
+            Protocol::Anthropic.adapter_id(),
+            native_context_scope(),
+        )
+    }
+
+    /// Drives SSE payloads the way the live loop does, optionally skipping the typed path.
+    fn drive(events: &[(&str, &str)], fast: bool) -> (Vec<StreamPart>, usize) {
+        let mut state = new_state();
+        let mut parts = Vec::new();
+        let mut fast_hits = 0;
+        for (name, data) in events {
+            if fast
+                && (name.is_empty() || *name == "content_block_delta")
+                && let Some(delta) =
+                    oven_sdk::provider_support::parse_json_object::<ContentBlockDelta<'_>>(data)
+                && delta.kind == "content_block_delta"
+                && let FastDelta::Applied(part) = state.apply_content_block_delta(delta)
+            {
+                fast_hits += 1;
+                parts.extend(part);
+                continue;
+            }
+            let value = serde_json::from_str(data).unwrap();
+            state.apply(name, value, &mut parts, 7).unwrap();
+        }
+        (parts, fast_hits)
+    }
+
+    #[test]
+    fn typed_delta_path_matches_json_value_path() {
+        let events = [
+            (
+                "message_start",
+                r#"{"type":"message_start","message":{"id":"msg_1","model":"m","usage":{"input_tokens":3}}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan \"a\""}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta"}}"#,
+            ),
+            (
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            (
+                "",
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hé\nllo"}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta"}}"#,
+            ),
+            // Declined shapes: mistyped text, array delta, unknown index, mismatched type.
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":5}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":1,"delta":["text_delta","x"]}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":9,"delta":{"type":"text_delta","text":"x"}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":""}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"q\":"}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"[1,2]}"}}"#,
+            ),
+            (
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}"#,
+            ),
+            ("message_stop", r#"{"type":"message_stop"}"#),
+        ];
+        let (fast, fast_hits) = drive(&events, true);
+        let (slow, slow_hits) = drive(&events, false);
+        assert_eq!(fast_hits, 8);
+        assert_eq!(slow_hits, 0);
+        assert_eq!(fast, slow);
+        let Some(StreamPart::Finish { finish }) = fast.last() else {
+            panic!("missing finish");
+        };
+        assert_eq!(
+            finish.native_replay.as_ref().unwrap().payload(),
+            &serde_json::json!({
+                "format": Protocol::Anthropic.replay_format(),
+                "message": {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "plan \"a\"", "signature": "sig"},
+                    {"type": "text", "text": "hé\nllo"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"q": [1, 2]}},
+                ]},
+                "stop_reason": "tool_use",
+                "stop_sequence": null,
+            })
+        );
+        assert!(fast.contains(&StreamPart::TextDelta {
+            id: "text:1".into(),
+            delta: "hé\nllo".into(),
+            metadata: None,
+        }));
+        assert!(fast.iter().any(|part| matches!(
+            part,
+            StreamPart::ProviderEvent { data, .. } if data.get("index") == Some(&serde_json::json!(9))
+        )));
     }
 
     #[test]

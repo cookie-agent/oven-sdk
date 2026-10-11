@@ -5,7 +5,10 @@ pub(crate) mod state;
 
 use std::{collections::VecDeque, time::Duration};
 
-use oven_sdk::{BoxStream, ErrorStage, JsonValue, ModelError, StreamItem};
+use oven_sdk::{
+    BoxStream, ErrorStage, JsonValue, ModelError, StreamItem,
+    provider_support::{json_type_tag, parse_json_object},
+};
 #[cfg(test)]
 use oven_sdk::{ReplayPolicy, StreamPart};
 use reqwest::header::HeaderMap;
@@ -103,6 +106,20 @@ fn process_live_events(
         if event.data.is_empty() || event.name == "ping" {
             continue;
         }
+        // Hot path: text, thinking, and tool-input deltas decode into borrowed
+        // typed fields. Anything the typed path declines takes the DOM path below.
+        if (event.name.is_empty() || event.name == "content_block_delta")
+            && let Some(delta) = parse_json_object::<state::ContentBlockDelta<'_>>(&event.data)
+            && delta.kind == "content_block_delta"
+            && let state::FastDelta::Applied(part) = live.state.apply_content_block_delta(delta)
+        {
+            semantic = true;
+            live.queue.extend(part.map(Ok));
+            if stop_at_first_semantic {
+                return Ok(true);
+            }
+            continue;
+        }
         let value: JsonValue = serde_json::from_str(&event.data).map_err(|_| {
             ModelError::invalid_response("Messages SSE event is invalid JSON")
                 .with_stage(ErrorStage::StreamDecode)
@@ -172,16 +189,7 @@ fn trailing_semantic_event(event: &crate::sse::Event) -> bool {
     if event.data.is_empty() || event.name == "ping" {
         return false;
     }
-    serde_json::from_str::<JsonValue>(&event.data)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .and_then(JsonValue::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        != Some("ping")
+    json_type_tag(&event.data).as_deref() != Some("ping")
 }
 
 #[cfg(test)]
