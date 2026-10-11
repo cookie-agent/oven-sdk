@@ -101,10 +101,10 @@ use crate::{AssistantPart, JsonValue, ModelError, ModelId, NativeReplayArtifact}
 
 /// Validates an entire source envelope before extracting Responses wire items.
 /// Origin adapter and routing provenance are not eligibility gates.
-pub fn responses_items(
-    artifact: &NativeReplayArtifact,
+pub fn responses_items<'a>(
+    artifact: &'a NativeReplayArtifact,
     normalized: &[AssistantPart],
-) -> Option<Vec<JsonValue>> {
+) -> Option<&'a [JsonValue]> {
     match artifact.payload().get("format")?.as_str()? {
         "oven.openai.responses.output.v1" => openai_responses::decode(artifact, normalized),
         "oven.azure.openai.responses.output.v4" => azure_responses::decode(artifact, normalized),
@@ -114,24 +114,30 @@ pub fn responses_items(
 
 /// Filters encrypted reasoning only after source integrity/semantic validation.
 /// Function-call continuations cannot silently lose their associated encrypted state.
-pub fn eligible_responses_items(
+///
+/// The returned items borrow from the validated artifact payload so callers can
+/// serialize them without copying.
+pub fn eligible_responses_items<'a>(
     artifact: &NativeReplayArtifact,
     target: &ModelId,
     reasoning_supported: bool,
-    mut items: Vec<JsonValue>,
+    items: &'a [JsonValue],
     warnings: &mut Vec<String>,
-) -> Result<Vec<JsonValue>, ModelError> {
+) -> Result<Vec<&'a JsonValue>, ModelError> {
     let same_model = artifact.source_wire_model_id() == Some(target);
     let before = items.len();
-    items.retain(|item| {
-        item.get("type").and_then(JsonValue::as_str) != Some("reasoning")
-            || reasoning_supported
-                && (item
-                    .get("encrypted_content")
-                    .and_then(JsonValue::as_str)
-                    .is_none_or(str::is_empty)
-                    || same_model)
-    });
+    let items = items
+        .iter()
+        .filter(|item| {
+            item.get("type").and_then(JsonValue::as_str) != Some("reasoning")
+                || reasoning_supported
+                    && (item
+                        .get("encrypted_content")
+                        .and_then(JsonValue::as_str)
+                        .is_none_or(str::is_empty)
+                        || same_model)
+        })
+        .collect::<Vec<_>>();
     if items.len() != before {
         if items
             .iter()
@@ -149,6 +155,15 @@ pub fn eligible_responses_items(
 fn sha256_hex(value: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(value))
+}
+
+/// Hashes the compact JSON encoding of `value`, streaming it into the digest.
+/// Equal to `sha256_hex(&serde_json::to_vec(value)?)`.
+fn sha256_json_hex(value: &impl serde::Serialize) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    serde_json::to_writer(&mut hasher, value).ok()?;
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 /// Native array formats whose blocks have been validated by their source codec.

@@ -59,7 +59,7 @@ pub(crate) fn validate_options(
     Ok(())
 }
 
-pub(crate) fn native_input(window: &NativeContextWindow) -> Result<Vec<JsonValue>, ModelError> {
+pub(crate) fn native_input(window: &NativeContextWindow) -> Result<&[JsonValue], ModelError> {
     let root = window.payload().as_object().ok_or_else(|| {
         ModelError::native_context("OpenAI native context payload must be an object")
             .with_stage(ErrorStage::NativeContextDecode)
@@ -80,13 +80,12 @@ pub(crate) fn native_input(window: &NativeContextWindow) -> Result<Vec<JsonValue
         .ok_or_else(|| {
             ModelError::native_context("OpenAI native context output is invalid")
                 .with_stage(ErrorStage::NativeContextDecode)
-        })?
-        .clone();
-    validate_output(&output).ok_or_else(|| {
+        })?;
+    validate_output(output).ok_or_else(|| {
         ModelError::native_context("OpenAI native context output is not canonical")
             .with_stage(ErrorStage::NativeContextDecode)
     })?;
-    let expected = output_fingerprint(&output).ok_or_else(|| {
+    let expected = output_fingerprint(output).ok_or_else(|| {
         ModelError::native_context("could not verify OpenAI native context")
             .with_stage(ErrorStage::NativeContextDecode)
     })?;
@@ -389,8 +388,9 @@ fn parse_usage(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
 }
 
 fn output_fingerprint(output: &[JsonValue]) -> Option<String> {
-    let encoded = serde_json::to_vec(output).ok()?;
-    Some(URL_SAFE_NO_PAD.encode(Sha256::digest(encoded)))
+    let mut hasher = Sha256::new();
+    serde_json::to_writer(&mut hasher, output).ok()?;
+    Some(URL_SAFE_NO_PAD.encode(hasher.finalize()))
 }
 
 fn validate_optional_text(

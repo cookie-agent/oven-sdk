@@ -1,19 +1,19 @@
 //! Current private Responses output replay codec.
 
-use std::collections::BTreeSet;
+use std::borrow::Cow;
 
 use crate::{AssistantPart, JsonValue, NativeReplayArtifact};
 
-use super::sha256_hex;
+use super::{sha256_hex, sha256_json_hex};
 const REPLAY_FORMAT: &str = "oven.openai.responses.output.v1";
 
 const CONTINUATION_KIND: &str = "openai.responses.reasoning_continuation";
 const MESSAGE_CONTINUATION_KIND: &str = "openai.responses.message_continuation";
 
-pub(crate) fn decode(
-    artifact: &NativeReplayArtifact,
+pub(crate) fn decode<'a>(
+    artifact: &'a NativeReplayArtifact,
     normalized: &[AssistantPart],
-) -> Option<Vec<JsonValue>> {
+) -> Option<&'a [JsonValue]> {
     let root = artifact.payload();
     exact_keys(
         root,
@@ -26,12 +26,34 @@ pub(crate) fn decode(
     if !matches!(root.get("status")?.as_str()?, "completed" | "incomplete") {
         return None;
     }
-    let items = root.get("items")?.as_array()?.clone();
-    (semantic_items(&items)? == semantic_normalized(normalized)?).then_some(items)
+    let items = root.get("items")?.as_array()?;
+    let semantic = semantic_items(items)?;
+    matches_normalized(&semantic, normalized).then_some(items.as_slice())
 }
 
-fn semantic_items(items: &[JsonValue]) -> Option<Vec<JsonValue>> {
-    let mut semantic = Vec::new();
+/// Replay-relevant meaning of one native item or normalized part. Native items
+/// and normalized history must produce the same sequence for replay to apply.
+#[derive(Debug, PartialEq)]
+enum Semantic<'a> {
+    Text(&'a str),
+    Reasoning(&'a str),
+    ToolCall {
+        id: &'a str,
+        provider_item_id: Option<&'a str>,
+        name: &'a str,
+        arguments: Cow<'a, str>,
+    },
+    ReasoningContinuation {
+        item_id: &'a str,
+        encrypted_sha256: Cow<'a, str>,
+    },
+    MessageContinuation {
+        item_sha256: Cow<'a, str>,
+    },
+}
+
+fn semantic_items(items: &[JsonValue]) -> Option<Vec<Semantic<'_>>> {
+    let mut semantic = Vec::with_capacity(items.len() + 2);
     for item in items {
         match item.get("type")?.as_str()? {
             "message" => message_semantics(item, &mut semantic)?,
@@ -43,7 +65,7 @@ fn semantic_items(items: &[JsonValue]) -> Option<Vec<JsonValue>> {
     Some(semantic)
 }
 
-fn message_semantics(item: &JsonValue, semantic: &mut Vec<JsonValue>) -> Option<()> {
+fn message_semantics<'a>(item: &'a JsonValue, semantic: &mut Vec<Semantic<'a>>) -> Option<()> {
     exact_keys(
         item,
         &["type", "id", "status", "role", "content", "phase"],
@@ -80,22 +102,17 @@ fn message_semantics(item: &JsonValue, semantic: &mut Vec<JsonValue>) -> Option<
             }
             has_metadata = true;
         }
-        semantic.push(serde_json::json!({
-            "type":"text",
-            "text":part.get("text")?.as_str()?
-        }));
+        semantic.push(Semantic::Text(part.get("text")?.as_str()?));
     }
     if has_metadata {
-        let encoded = serde_json::to_vec(item).ok()?;
-        semantic.push(serde_json::json!({
-            "type":"message_continuation",
-            "item_sha256":sha256_hex(&encoded)
-        }));
+        semantic.push(Semantic::MessageContinuation {
+            item_sha256: Cow::Owned(sha256_json_hex(item)?),
+        });
     }
     Some(())
 }
 
-fn reasoning_semantics(item: &JsonValue, semantic: &mut Vec<JsonValue>) -> Option<()> {
+fn reasoning_semantics<'a>(item: &'a JsonValue, semantic: &mut Vec<Semantic<'a>>) -> Option<()> {
     exact_keys(
         item,
         &[
@@ -116,10 +133,7 @@ fn reasoning_semantics(item: &JsonValue, semantic: &mut Vec<JsonValue>) -> Optio
         if part.get("type")?.as_str()? != "summary_text" {
             return None;
         }
-        semantic.push(serde_json::json!({
-            "type":"reasoning",
-            "text":part.get("text")?.as_str()?
-        }));
+        semantic.push(Semantic::Reasoning(part.get("text")?.as_str()?));
     }
     if let Some(content) = item.get("content") {
         for part in content.as_array()? {
@@ -127,88 +141,94 @@ fn reasoning_semantics(item: &JsonValue, semantic: &mut Vec<JsonValue>) -> Optio
             if part.get("type")?.as_str()? != "reasoning_text" {
                 return None;
             }
-            semantic.push(serde_json::json!({
-                "type":"reasoning",
-                "text":part.get("text")?.as_str()?
-            }));
+            semantic.push(Semantic::Reasoning(part.get("text")?.as_str()?));
         }
     }
-    semantic.push(continuation_semantic(item_id, encrypted));
+    semantic.push(Semantic::ReasoningContinuation {
+        item_id,
+        encrypted_sha256: Cow::Owned(sha256_hex(encrypted.as_bytes())),
+    });
     Some(())
 }
 
-fn function_semantics(item: &JsonValue, semantic: &mut Vec<JsonValue>) -> Option<()> {
+fn function_semantics<'a>(item: &'a JsonValue, semantic: &mut Vec<Semantic<'a>>) -> Option<()> {
     exact_keys(
         item,
         &["type", "id", "status", "call_id", "name", "arguments"],
         &["type", "id", "call_id", "name", "arguments"],
     )?;
     completed_status(item)?;
-    semantic.push(serde_json::json!({
-        "type":"tool_call",
-        "id":non_empty_string(item, "call_id")?,
-        "provider_item_id":non_empty_string(item, "id")?,
-        "name":non_empty_string(item, "name")?,
-        "arguments":non_empty_string(item, "arguments")?
-    }));
+    semantic.push(Semantic::ToolCall {
+        id: non_empty_string(item, "call_id")?,
+        provider_item_id: Some(non_empty_string(item, "id")?),
+        name: non_empty_string(item, "name")?,
+        arguments: Cow::Borrowed(non_empty_string(item, "arguments")?),
+    });
     Some(())
 }
 
-fn semantic_normalized(normalized: &[AssistantPart]) -> Option<Vec<JsonValue>> {
-    normalized
-        .iter()
-        .map(|part| match part {
-            AssistantPart::Text(part) => Some(serde_json::json!({
-                "type":"text",
-                "text":part.text
-            })),
-            AssistantPart::Reasoning(part) => Some(serde_json::json!({
-                "type":"reasoning",
-                "text":part.text
-            })),
-            AssistantPart::ToolCall(call) => Some(serde_json::json!({
-                "type":"tool_call",
-                "id":call.id,
-                "provider_item_id":call.provider_item_id,
-                "name":call.name,
-                "arguments":call.raw_input.clone().unwrap_or_else(|| call.input.to_string())
-            })),
+/// Walks normalized parts against the native semantics without copying text.
+/// Any part outside the replayable vocabulary, or a malformed continuation
+/// witness, rejects the artifact.
+fn matches_normalized(semantic: &[Semantic<'_>], normalized: &[AssistantPart]) -> bool {
+    let mut expected = semantic.iter();
+    for part in normalized {
+        let actual = match part {
+            AssistantPart::Text(part) => Semantic::Text(&part.text),
+            AssistantPart::Reasoning(part) => Semantic::Reasoning(&part.text),
+            AssistantPart::ToolCall(call) => Semantic::ToolCall {
+                id: &call.id,
+                provider_item_id: call.provider_item_id.as_deref(),
+                name: &call.name,
+                arguments: call
+                    .raw_input
+                    .as_deref()
+                    .map_or_else(|| Cow::Owned(call.input.to_string()), Cow::Borrowed),
+            },
             AssistantPart::Custom(part) if part.kind == CONTINUATION_KIND => {
-                exact_keys(
-                    &part.data,
-                    &["item_id", "encrypted_sha256"],
-                    &["item_id", "encrypted_sha256"],
-                )?;
-                Some(serde_json::json!({
-                    "type":"reasoning_continuation",
-                    "item_id":non_empty_string(&part.data, "item_id")?,
-                    "encrypted_sha256":non_empty_string(&part.data, "encrypted_sha256")?
-                }))
+                let witness = (|| {
+                    exact_keys(
+                        &part.data,
+                        &["item_id", "encrypted_sha256"],
+                        &["item_id", "encrypted_sha256"],
+                    )?;
+                    Some(Semantic::ReasoningContinuation {
+                        item_id: non_empty_string(&part.data, "item_id")?,
+                        encrypted_sha256: Cow::Borrowed(non_empty_string(
+                            &part.data,
+                            "encrypted_sha256",
+                        )?),
+                    })
+                })();
+                let Some(witness) = witness else {
+                    return false;
+                };
+                witness
             }
             AssistantPart::Custom(part) if part.kind == MESSAGE_CONTINUATION_KIND => {
-                exact_keys(&part.data, &["item_sha256"], &["item_sha256"])?;
-                Some(serde_json::json!({
-                    "type":"message_continuation",
-                    "item_sha256":non_empty_string(&part.data, "item_sha256")?
-                }))
+                let witness = (|| {
+                    exact_keys(&part.data, &["item_sha256"], &["item_sha256"])?;
+                    Some(Semantic::MessageContinuation {
+                        item_sha256: Cow::Borrowed(non_empty_string(&part.data, "item_sha256")?),
+                    })
+                })();
+                let Some(witness) = witness else {
+                    return false;
+                };
+                witness
             }
-            _ => None,
-        })
-        .collect()
-}
-
-fn continuation_semantic(item_id: &str, encrypted: &str) -> JsonValue {
-    serde_json::json!({
-        "type":"reasoning_continuation",
-        "item_id":item_id,
-        "encrypted_sha256":sha256_hex(encrypted.as_bytes())
-    })
+            _ => return false,
+        };
+        if expected.next() != Some(&actual) {
+            return false;
+        }
+    }
+    expected.next().is_none()
 }
 
 fn exact_keys(value: &JsonValue, allowed: &[&str], required: &[&str]) -> Option<()> {
     let object = value.as_object()?;
-    let allowed = allowed.iter().copied().collect::<BTreeSet<_>>();
-    if object.keys().any(|key| !allowed.contains(key.as_str()))
+    if object.keys().any(|key| !allowed.contains(&key.as_str()))
         || required.iter().any(|key| !object.contains_key(*key))
     {
         return None;

@@ -707,7 +707,7 @@ fn encode_request(
                     },
                 };
                 if let Some(items) = replayed {
-                    input.extend(items)
+                    input.extend(items.into_iter().cloned())
                 } else {
                     replay.decisions.push(ReplayDecision {
                         history_index,
@@ -3092,11 +3092,11 @@ fn normalized_semantics(parts: &[AssistantPart]) -> Option<JsonValue> {
     }
     Some(JsonValue::Array(semantics))
 }
-fn decode_replay(
-    artifact: &NativeReplayArtifact,
+fn decode_replay<'a>(
+    artifact: &'a NativeReplayArtifact,
     normalized: &[AssistantPart],
     _binding: &JsonValue,
-) -> Option<Vec<JsonValue>> {
+) -> Option<&'a [JsonValue]> {
     let object = artifact.payload().as_object()?;
     let keys = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
     if keys
@@ -3110,9 +3110,9 @@ fn decode_replay(
     let binding = object.get("binding")?;
     binding.get("version")?.as_str()?;
     binding.get("sha256")?.as_str()?;
-    let items = object.get("items")?.as_array()?.clone();
+    let items = object.get("items")?.as_array()?.as_slice();
     let fingerprint = object.get("fingerprint")?.as_str()?;
-    if replay_fingerprint(&items)?.as_str() != fingerprint {
+    if replay_fingerprint(items)?.as_str() != fingerprint {
         return None;
     }
     let normalized_fingerprints = normalized
@@ -3125,7 +3125,7 @@ fn decode_replay(
         })
         .collect::<Vec<_>>();
     if normalized_fingerprints.as_slice() != [fingerprint]
-        || replay_semantics(&items)? != normalized_semantics(normalized)?
+        || replay_semantics(items)? != normalized_semantics(normalized)?
     {
         return None;
     }

@@ -1,6 +1,7 @@
 //! OpenAI Responses request validation and translation.
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use std::borrow::Cow;
+
 use oven_sdk::{
     AssistantPart, CompactionRequest, ContentValue, ErrorStage, FilePart, FileSource, HistoryTurn,
     InputPart, JsonValue, LanguageModelDescriptor, ModelCapabilities, ModelError,
@@ -13,11 +14,19 @@ use crate::{
         OpenAiResponsesCompactionOptions, OpenAiResponsesOptions, prompt_cache_breakpoint,
         validate_prompt_cache_key,
     },
-    responses::{compaction, replay},
+    responses::{
+        body::{self, Content, Item, Output, TypedItem},
+        compaction, replay,
+    },
+    wire::encode::{
+        FileRef, Text, arguments, breakpoint, encoding_error, join, json_size_hint, push_text,
+        to_body,
+    },
 };
 
 pub(crate) struct Encoded {
-    pub(crate) body: JsonValue,
+    /// Serialized JSON request body.
+    pub(crate) body: Vec<u8>,
     pub(crate) replay: ReplayOutcome,
     pub(crate) warnings: Vec<String>,
 }
@@ -112,73 +121,60 @@ pub(crate) fn encode_request(
     scope: &NativeContextScope,
     policy: ReplayPolicy,
 ) -> Result<Encoded, ModelError> {
-    let verbosity = options.verbosity.clone();
     let (input, replay_outcome, warnings) = encode_input(request, descriptor, scope, policy)?;
-    let mut include = options.include.clone();
-    if !include
+    let mut size_hint = input.iter().map(Item::size_hint).sum::<usize>();
+    let mut include = options
+        .include
         .iter()
-        .any(|value| value == "reasoning.encrypted_content")
-    {
-        include.push("reasoning.encrypted_content".into());
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if !include.contains(&"reasoning.encrypted_content") {
+        include.push("reasoning.encrypted_content");
     }
-    let mut body = serde_json::json!({
-        "model":descriptor.identity.model_id.as_str(),
-        "input":input,
-        "stream":true,
-        "store":false,
-        "include":include
-    });
-    if let Some(maximum) = request.inference.max_output_tokens {
-        body["max_output_tokens"] = maximum.into();
-    }
-    if let Some(value) = request.inference.temperature {
-        body["temperature"] = value.into();
-    }
-    if let Some(value) = request.inference.top_p {
-        body["top_p"] = value.into();
-    }
-    if request.inference.reasoning_effort.is_some()
+    let reasoning = (request.inference.reasoning_effort.is_some()
         || options.reasoning_summary.is_some()
-        || options.reasoning_mode.is_some()
-    {
-        let mut reasoning = serde_json::Map::new();
-        if let Some(effort) = &request.inference.reasoning_effort {
-            reasoning.insert("effort".into(), effort.clone().into());
-        }
-        if let Some(summary) = &options.reasoning_summary {
-            reasoning.insert("summary".into(), summary.clone().into());
-        }
-        if let Some(mode) = &options.reasoning_mode {
-            reasoning.insert("mode".into(), mode.clone().into());
-        }
-        body["reasoning"] = JsonValue::Object(reasoning);
-    }
-    if let Some(user) = &options.user {
-        body["user"] = user.clone().into();
-    }
-    if let Some(service_tier) = &options.service_tier {
-        body["service_tier"] = service_tier.clone().into();
-    }
-    if let Some(truncation) = &options.truncation {
-        body["truncation"] = truncation.clone().into();
-    }
-    if let Some(parallel) = options.parallel_tool_calls {
-        body["parallel_tool_calls"] = parallel.into();
-    }
-    if let Some(key) = &options.prompt_cache_key {
-        body["prompt_cache_key"] = key.clone().into();
-    }
-    if let Some(retention) = options.prompt_cache_retention {
-        body["prompt_cache_retention"] =
-            serde_json::to_value(retention).expect("prompt-cache retention is serializable");
-    }
-    if let Some(cache_options) = &options.prompt_cache_options {
-        body["prompt_cache_options"] =
-            serde_json::to_value(cache_options).expect("prompt-cache options are serializable");
-    }
-    add_tools_and_output(request, verbosity.as_deref(), &mut body);
+        || options.reasoning_mode.is_some())
+    .then_some(body::Reasoning {
+        effort: request.inference.reasoning_effort.as_deref(),
+        summary: options.reasoning_summary.as_deref(),
+        mode: options.reasoning_mode.as_deref(),
+    });
+    let (tools, tool_choice) = tools(request);
+    size_hint += tools.as_ref().map_or(0, |tools| {
+        tools
+            .iter()
+            .map(|tool| {
+                tool.name.len() + tool.description.len() + json_size_hint(tool.parameters) + 64
+            })
+            .sum()
+    });
+    let body = body::Body {
+        model: descriptor.identity.model_id.as_str(),
+        input,
+        stream: true,
+        store: false,
+        include,
+        max_output_tokens: request.inference.max_output_tokens,
+        temperature: request.inference.temperature,
+        top_p: request.inference.top_p,
+        reasoning,
+        user: options.user.as_deref(),
+        service_tier: options.service_tier.as_deref(),
+        truncation: options.truncation.as_deref(),
+        parallel_tool_calls: options.parallel_tool_calls,
+        prompt_cache_key: options.prompt_cache_key.as_deref(),
+        prompt_cache_retention: options.prompt_cache_retention,
+        prompt_cache_options: options.prompt_cache_options.as_ref(),
+        tools,
+        tool_choice,
+        text: text_config(request, options.verbosity.as_deref()),
+    };
     Ok(Encoded {
-        body,
+        body: to_body(
+            &body,
+            size_hint,
+            encoding_error("could not encode OpenAI Responses request"),
+        )?,
         replay: replay_outcome,
         warnings,
     })
@@ -192,47 +188,43 @@ pub(crate) fn encode_compaction_request(
     policy: ReplayPolicy,
 ) -> Result<Encoded, ModelError> {
     let (input, replay, warnings) = encode_input(&request.request, descriptor, scope, policy)?;
-    let mut body = serde_json::json!({
-        "model": descriptor.identity.model_id.as_str(),
-        "input": input,
-    });
-    if let Some(value) = &options.instructions {
-        body["instructions"] = value.clone().into();
-    }
-    if let Some(value) = &options.prompt_cache_key {
-        body["prompt_cache_key"] = value.clone().into();
-    }
-    if let Some(value) = &options.prompt_cache_options {
-        body["prompt_cache_options"] = serde_json::to_value(value).map_err(|_| {
-            ModelError::invalid_request("could not encode OpenAI compaction cache options")
-                .with_stage(ErrorStage::NativeContextEncode)
-        })?;
-    }
-    if let Some(value) = &options.prompt_cache_retention {
-        body["prompt_cache_retention"] = value.clone().into();
-    }
-    if let Some(value) = &options.service_tier {
-        body["service_tier"] = value.clone().into();
-    }
+    let size_hint = input.iter().map(Item::size_hint).sum::<usize>();
+    let body = body::CompactionBody {
+        model: descriptor.identity.model_id.as_str(),
+        input,
+        instructions: options.instructions.as_deref(),
+        prompt_cache_key: options.prompt_cache_key.as_deref(),
+        prompt_cache_options: options.prompt_cache_options.as_ref(),
+        prompt_cache_retention: options.prompt_cache_retention.as_deref(),
+        service_tier: options.service_tier.as_deref(),
+    };
     Ok(Encoded {
-        body,
+        body: to_body(&body, size_hint, || {
+            ModelError::invalid_request("could not encode OpenAI compaction request")
+                .with_stage(ErrorStage::NativeContextEncode)
+        })?,
         replay,
         warnings,
     })
 }
 
-fn encode_input(
-    request: &Request,
+type EncodedInput<'a> = (Vec<Item<'a>>, ReplayOutcome, Vec<String>);
+
+fn encode_input<'a>(
+    request: &'a Request,
     descriptor: &LanguageModelDescriptor,
     _scope: &NativeContextScope,
     policy: ReplayPolicy,
-) -> Result<(Vec<JsonValue>, ReplayOutcome, Vec<String>), ModelError> {
+) -> Result<EncodedInput<'a>, ModelError> {
     let mut input = request
         .native_context
         .as_ref()
         .map(compaction::native_input)
         .transpose()?
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .iter()
+        .map(Item::Native)
+        .collect::<Vec<_>>();
     let mut replay_outcome = ReplayOutcome::default();
     let mut warnings = Vec::new();
     for (history_index, turn) in request.history.iter().enumerate() {
@@ -247,29 +239,30 @@ fn encode_input(
                         .iter()
                         .filter_map(|part| match part {
                             oven_sdk::SystemPart::Text(text) if !text.text.is_empty() => {
-                                Some(attach_prompt_cache_breakpoint(
-                                    serde_json::json!({"type":"input_text","text":text.text}),
-                                    &text.metadata,
-                                ))
+                                Some(input_text(Text::Borrowed(&text.text), &text.metadata))
                             }
                             _ => None,
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     if !content.is_empty() {
-                        input.push(serde_json::json!({"type":"message","role":"developer","content":content}));
+                        input.push(Item::message("developer", content));
                     }
                 } else {
-                    let content = message
-                        .content
-                        .iter()
-                        .filter_map(|part| match part {
+                    let content = join(
+                        message.content.iter().filter_map(|part| match part {
                             oven_sdk::SystemPart::Text(text) => Some(text.text.as_str()),
                             oven_sdk::SystemPart::Custom(_) => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                        }),
+                        "\n",
+                    );
                     if !content.is_empty() {
-                        input.push(serde_json::json!({"type":"message","role":"developer","content":[{"type":"input_text","text":content}]}));
+                        input.push(Item::message(
+                            "developer",
+                            vec![Content::InputText {
+                                text: cow_text(content),
+                                prompt_cache_breakpoint: None,
+                            }],
+                        ));
                     }
                 }
             }
@@ -278,28 +271,21 @@ fn encode_input(
                     .content
                     .iter()
                     .filter_map(|part| match part {
-                        InputPart::Text(text) => Some(attach_prompt_cache_breakpoint(
-                            serde_json::json!({"type":"input_text","text":text.text}),
-                            &text.metadata,
-                        )),
+                        InputPart::Text(text) => {
+                            Some(input_text(Text::Borrowed(&text.text), &text.metadata))
+                        }
                         InputPart::File(file) => Some(input_file(file)),
                         InputPart::Custom(_) => None,
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 if !content.is_empty() {
-                    input.push(
-                        serde_json::json!({"type":"message","role":"user","content":content}),
-                    );
+                    input.push(Item::message("user", content));
                 }
             }
             HistoryTurn::Tool(message) => {
-                input.extend(
-                    message
-                        .results
-                        .iter()
-                        .map(function_output)
-                        .collect::<Result<Vec<_>, _>>()?,
-                );
+                for result in &message.results {
+                    input.push(function_output(result)?);
+                }
             }
             HistoryTurn::Assistant(turn) => {
                 let mut replayed = None;
@@ -336,7 +322,7 @@ fn encode_input(
                     });
                 }
                 if let Some(items) = replayed {
-                    input.extend(items);
+                    input.extend(items.into_iter().map(Item::Native));
                 } else {
                     if policy != ReplayPolicy::Never {
                         replay_outcome.decisions.push(ReplayDecision {
@@ -344,7 +330,7 @@ fn encode_input(
                             disposition: ReplayDisposition::ReconstructedNormalized,
                         });
                     }
-                    input.extend(normalized_assistant(&turn.message.content, &mut warnings)?);
+                    normalized_assistant(&turn.message.content, &mut input, &mut warnings)?;
                 }
             }
         }
@@ -361,36 +347,59 @@ fn discard_reason(artifact: &oven_sdk::NativeReplayArtifact) -> String {
     }
 }
 
-fn add_tools_and_output(request: &Request, verbosity: Option<&str>, body: &mut JsonValue) {
-    if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {
-        body["tools"] = JsonValue::Array(request.tools.iter().map(|tool| {
-            let strict = tool.provider_options.get("openai").and_then(|value| value.get("strict")).and_then(JsonValue::as_bool).unwrap_or(false);
-            serde_json::json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.input_schema.as_value(),"strict":strict})
-        }).collect());
-        body["tool_choice"] = match &request.tool_choice {
-            ToolChoice::Auto => JsonValue::String("auto".into()),
-            ToolChoice::Required => JsonValue::String("required".into()),
-            ToolChoice::None => JsonValue::String("none".into()),
-            ToolChoice::Tool(name) => serde_json::json!({"type":"function","name":name}),
-        };
+fn tools(
+    request: &Request,
+) -> (
+    Option<Vec<body::FunctionTool<'_>>>,
+    Option<body::ToolChoice<'_>>,
+) {
+    if request.tools.is_empty() || matches!(request.tool_choice, ToolChoice::None) {
+        return (None, None);
     }
-    match &request.response_format {
-        ResponseFormat::Text => {}
-        ResponseFormat::Json { schema: None } => {
-            body["text"] = serde_json::json!({"format":{"type":"json_object"}});
-        }
+    let tools = request
+        .tools
+        .iter()
+        .map(|tool| body::FunctionTool {
+            kind: "function",
+            name: &tool.name,
+            description: &tool.description,
+            parameters: tool.input_schema.as_value(),
+            strict: tool
+                .provider_options
+                .get("openai")
+                .and_then(|value| value.get("strict"))
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(false),
+        })
+        .collect();
+    let choice = match &request.tool_choice {
+        ToolChoice::Auto => body::ToolChoice::Mode("auto"),
+        ToolChoice::Required => body::ToolChoice::Mode("required"),
+        ToolChoice::None => body::ToolChoice::Mode("none"),
+        ToolChoice::Tool(name) => body::ToolChoice::Function {
+            kind: "function",
+            name,
+        },
+    };
+    (Some(tools), Some(choice))
+}
+
+fn text_config<'a>(
+    request: &'a Request,
+    verbosity: Option<&'a str>,
+) -> Option<body::TextConfig<'a>> {
+    let format = match &request.response_format {
+        ResponseFormat::Text => None,
+        ResponseFormat::Json { schema: None } => Some(body::TextFormat::JsonObject),
         ResponseFormat::Json {
             schema: Some(schema),
-        } => {
-            body["text"] = serde_json::json!({"format":{"type":"json_schema","name":"response","strict":true,"schema":schema.as_value()}});
-        }
-    }
-    if let Some(verbosity) = verbosity {
-        if body.get("text").is_none() {
-            body["text"] = serde_json::json!({});
-        }
-        body["text"]["verbosity"] = verbosity.into();
-    }
+        } => Some(body::TextFormat::JsonSchema {
+            name: "response",
+            strict: true,
+            schema: schema.as_value(),
+        }),
+    };
+    (format.is_some() || verbosity.is_some()).then_some(body::TextConfig { format, verbosity })
 }
 
 fn validate_native_context(
@@ -413,8 +422,10 @@ fn validate_native_context(
         )
         .with_stage(ErrorStage::NativeContextDecode));
     }
-    let input = compaction::native_input(window)?;
-    Ok(input.iter().map(count_wire_prompt_cache_breakpoints).sum())
+    Ok(compaction::native_input(window)?
+        .iter()
+        .map(count_wire_prompt_cache_breakpoints)
+        .sum())
 }
 
 fn count_wire_prompt_cache_breakpoints(value: &JsonValue) -> usize {
@@ -431,43 +442,52 @@ fn count_wire_prompt_cache_breakpoints(value: &JsonValue) -> usize {
     }
 }
 
-fn input_file(file: &FilePart) -> Result<JsonValue, ModelError> {
-    let data = match &file.source {
-        FileSource::Bytes(bytes) => {
-            format!("data:{};base64,{}", file.media_type, STANDARD.encode(bytes))
-        }
-        FileSource::Text(text) => {
-            format!("data:{};base64,{}", file.media_type, STANDARD.encode(text))
-        }
-        FileSource::Url(url) => {
-            if file.media_type.starts_with("image/") {
-                return attach_prompt_cache_breakpoint(
-                    serde_json::json!({"type":"input_image","image_url":url}),
-                    &file.metadata,
-                );
-            }
-            return attach_prompt_cache_breakpoint(
-                serde_json::json!({
-                    "type":"input_file",
-                    "filename":file.filename.clone().unwrap_or_else(|| "document.pdf".into()),
-                    "file_url":url
-                }),
-                &file.metadata,
-            );
-        }
-        FileSource::ProviderReference { .. } => {
-            return Err(
-                ModelError::unsupported("provider file references are unsupported")
-                    .with_stage(ErrorStage::RequestEncoding),
-            );
-        }
+fn cow_text(text: Cow<'_, str>) -> Text<'_> {
+    match text {
+        Cow::Borrowed(text) => Text::Borrowed(text),
+        Cow::Owned(text) => Text::Owned(text),
+    }
+}
+
+fn input_text<'a>(
+    text: Text<'a>,
+    metadata: &oven_sdk::PartMetadata,
+) -> Result<Content<'a>, ModelError> {
+    Ok(Content::InputText {
+        text,
+        prompt_cache_breakpoint: breakpoint(metadata)?,
+    })
+}
+
+fn input_file(file: &FilePart) -> Result<Content<'_>, ModelError> {
+    let Some(source) = FileRef::of(file) else {
+        return Err(
+            ModelError::unsupported("provider file references are unsupported")
+                .with_stage(ErrorStage::RequestEncoding),
+        );
     };
-    let value = if file.media_type.starts_with("image/") {
-        serde_json::json!({"type":"input_image","image_url":data})
+    let prompt_cache_breakpoint = breakpoint(&file.metadata)?;
+    let filename = file.filename.as_deref().unwrap_or("document.pdf");
+    Ok(if file.media_type.starts_with("image/") {
+        Content::InputImage {
+            image_url: source,
+            prompt_cache_breakpoint,
+        }
+    } else if let FileRef::Url(url) = source {
+        Content::InputFile {
+            filename,
+            file_data: None,
+            file_url: Some(url),
+            prompt_cache_breakpoint,
+        }
     } else {
-        serde_json::json!({"type":"input_file","filename":file.filename.clone().unwrap_or_else(|| "document.pdf".into()),"file_data":data})
-    };
-    attach_prompt_cache_breakpoint(value, &file.metadata)
+        Content::InputFile {
+            filename,
+            file_data: Some(source),
+            file_url: None,
+            prompt_cache_breakpoint,
+        }
+    })
 }
 
 fn validate_prompt_cache_breakpoints(request: &Request) -> Result<usize, ModelError> {
@@ -547,53 +567,48 @@ fn tool_content_has_prompt_cache_breakpoint(content: &ToolContent) -> Result<boo
     }
 }
 
-fn attach_prompt_cache_breakpoint(
-    mut block: JsonValue,
-    metadata: &oven_sdk::PartMetadata,
-) -> Result<JsonValue, ModelError> {
-    if prompt_cache_breakpoint(metadata)? {
-        block["prompt_cache_breakpoint"] = serde_json::json!({"mode":"explicit"});
-    }
-    Ok(block)
-}
-
-fn function_output(result: &ToolResultPart) -> Result<JsonValue, ModelError> {
+fn function_output(result: &ToolResultPart) -> Result<Item<'_>, ModelError> {
     let output = match &result.content {
-        ToolContent::Text(value) => JsonValue::String(value.clone()),
-        ToolContent::Json(value) => JsonValue::String(value.to_string()),
+        ToolContent::Text(value) => Output::Text(Text::Borrowed(value)),
+        ToolContent::Json(value) => Output::Text(Text::Json(value)),
         ToolContent::Mixed(values)
             if values
                 .iter()
                 .any(|value| matches!(value, ContentValue::File(_))) =>
         {
-            JsonValue::Array(
-            values
-                .iter()
-                .map(|value| match value {
-                    ContentValue::Text(value) => {
-                        Ok(serde_json::json!({"type":"input_text","text":value}))
-                    }
-                    ContentValue::Json(value) => {
-                        Ok(serde_json::json!({"type":"input_text","text":value.to_string()}))
-                    }
-                    ContentValue::File(file) if tool_result_file_supported(file) => {
-                        input_file(file)
-                    }
-                    ContentValue::File(_) => Err(ModelError::unsupported(
-                        "only image and PDF files in tool results are deliverable via openai-responses",
-                    )),
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+            Output::Parts(
+                values
+                    .iter()
+                    .map(|value| match value {
+                        ContentValue::Text(value) => Ok(Content::InputText {
+                            text: Text::Borrowed(value),
+                            prompt_cache_breakpoint: None,
+                        }),
+                        ContentValue::Json(value) => Ok(Content::InputText {
+                            text: Text::Json(value),
+                            prompt_cache_breakpoint: None,
+                        }),
+                        ContentValue::File(file) if tool_result_file_supported(file) => {
+                            input_file(file)
+                        }
+                        ContentValue::File(_) => Err(ModelError::unsupported(
+                            "only image and PDF files in tool results are deliverable via openai-responses",
+                        )),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
             )
         }
         ToolContent::Mixed(values) => {
-            JsonValue::String(serde_json::to_string(values).unwrap_or_default())
+            Output::Text(Text::Owned(serde_json::to_string(values).unwrap_or_default()))
         }
-        ToolContent::Denied { reason } => JsonValue::String(reason.clone().unwrap_or_default()),
+        ToolContent::Denied { reason } => {
+            Output::Text(Text::Borrowed(reason.as_deref().unwrap_or_default()))
+        }
     };
-    Ok(
-        serde_json::json!({"type":"function_call_output","call_id":result.tool_call_id,"output":output}),
-    )
+    Ok(Item::Typed(TypedItem::FunctionCallOutput {
+        call_id: &result.tool_call_id,
+        output,
+    }))
 }
 
 fn validate_tool_result_files(result: &ToolResultPart) -> Result<(), ModelError> {
@@ -614,38 +629,34 @@ fn tool_result_file_supported(file: &FilePart) -> bool {
     file.media_type.starts_with("image/") || file.media_type == "application/pdf"
 }
 
-fn normalized_assistant(
-    parts: &[AssistantPart],
+fn normalized_assistant<'a>(
+    parts: &'a [AssistantPart],
+    output: &mut Vec<Item<'a>>,
     warnings: &mut Vec<String>,
-) -> Result<Vec<JsonValue>, ModelError> {
+) -> Result<(), ModelError> {
     if parts.iter().any(|part| matches!(part, AssistantPart::ToolCall(_)))
         && parts.iter().any(|part| matches!(part, AssistantPart::Custom(custom) if matches!(custom.kind.as_str(), "openai.responses.reasoning_continuation" | "azure.openai.responses.reasoning_continuation")))
     {
         return Err(ModelError::replay("Responses tool continuation requires valid native reasoning state"));
     }
-    let mut output = Vec::new();
     // Contiguous text runs stay in position relative to tool items so the
     // reconstructed input preserves the original turn's interleaving instead
     // of hoisting all text ahead of the tool calls.
-    let mut text_run = String::new();
+    let mut text_run = Cow::Borrowed("");
     for part in parts {
         match part {
-            AssistantPart::Text(part) => text_run.push_str(&part.text),
+            AssistantPart::Text(part) => push_text(&mut text_run, &part.text),
             AssistantPart::ToolCall(call) => {
-                push_text_run(&mut output, &mut text_run);
-                let mut item = serde_json::json!({
-                    "type":"function_call",
-                    "call_id":call.id,
-                    "name":call.name,
-                    "arguments":call.raw_input.clone().unwrap_or_else(|| call.input.to_string())
-                });
-                if let Some(provider_item_id) = &call.provider_item_id {
-                    item["id"] = provider_item_id.clone().into();
-                }
-                output.push(item);
+                push_text_run(output, &mut text_run);
+                output.push(Item::Typed(TypedItem::FunctionCall {
+                    call_id: &call.id,
+                    name: &call.name,
+                    arguments: arguments(call),
+                    id: call.provider_item_id.as_deref(),
+                }));
             }
             AssistantPart::ToolResult(result) => {
-                push_text_run(&mut output, &mut text_run);
+                push_text_run(output, &mut text_run);
                 output.push(function_output(result)?);
             }
             AssistantPart::Custom(part)
@@ -668,12 +679,17 @@ fn normalized_assistant(
             _ => {}
         }
     }
-    push_text_run(&mut output, &mut text_run);
-    Ok(output)
+    push_text_run(output, &mut text_run);
+    Ok(())
 }
 
-fn push_text_run(output: &mut Vec<JsonValue>, text_run: &mut String) {
+fn push_text_run<'a>(output: &mut Vec<Item<'a>>, text_run: &mut Cow<'a, str>) {
     if !text_run.is_empty() {
-        output.push(serde_json::json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":std::mem::take(text_run)}]}));
+        output.push(Item::message(
+            "assistant",
+            vec![Content::OutputText {
+                text: std::mem::take(text_run),
+            }],
+        ));
     }
 }

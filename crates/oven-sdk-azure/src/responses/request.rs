@@ -200,7 +200,7 @@ pub(crate) fn encode_input(
                     });
                 }
                 if let Some(items) = replayed {
-                    input.extend(items);
+                    input.extend(items.into_iter().cloned());
                 } else {
                     if policy != ReplayPolicy::Never {
                         replay_outcome.decisions.push(ReplayDecision {

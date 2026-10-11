@@ -1,6 +1,7 @@
 //! OpenAI wire protocol constants.
 
 pub(crate) mod chat;
+pub(crate) mod encode;
 pub(crate) mod responses;
 
 /// Stable official OpenAI provider identity.

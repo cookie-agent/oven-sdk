@@ -22,10 +22,10 @@ pub fn capture(items: &[JsonValue]) -> Option<(Vec<JsonValue>, String)> {
     Some((sanitized, fingerprint))
 }
 
-pub(crate) fn decode(
-    artifact: &NativeReplayArtifact,
+pub(crate) fn decode<'a>(
+    artifact: &'a NativeReplayArtifact,
     normalized: &[AssistantPart],
-) -> Option<Vec<JsonValue>> {
+) -> Option<&'a [JsonValue]> {
     let root = artifact.payload().as_object()?;
     exact_keys(root, &["binding", "fingerprint", "format", "items"])?;
     if root.get("format")?.as_str()? != REPLAY_FORMAT {
@@ -35,7 +35,7 @@ pub(crate) fn decode(
     exact_keys(binding, &["version", "sha256"])?;
     binding.get("version")?.as_str()?;
     binding.get("sha256")?.as_str()?;
-    let items = root.get("items")?.as_array()?.clone();
+    let items = root.get("items")?.as_array()?.as_slice();
     let exact = items
         .iter()
         .map(sanitize_item)
@@ -43,7 +43,7 @@ pub(crate) fn decode(
     if exact != items {
         return None;
     }
-    validate_item_relations(&items)?;
+    validate_item_relations(items)?;
     let witnesses = normalized
         .iter()
         .filter_map(|part| match part {
@@ -64,9 +64,9 @@ pub(crate) fn decode(
         return None;
     }
     let artifact_fingerprint = root.get("fingerprint")?.as_str()?;
-    if fingerprint(&items)?.as_str() != artifact_fingerprint
+    if fingerprint(items)?.as_str() != artifact_fingerprint
         || normalized_fingerprint(normalized)? != artifact_fingerprint
-        || semantic_items(&items) != semantic_normalized(normalized)
+        || semantic_items(items) != semantic_normalized(normalized)
     {
         return None;
     }
@@ -181,8 +181,9 @@ fn sanitize_function_call(item: &JsonValue) -> Option<JsonValue> {
 }
 
 fn fingerprint(items: &[JsonValue]) -> Option<String> {
-    let encoded = serde_json::to_vec(items).ok()?;
-    Some(URL_SAFE_NO_PAD.encode(Sha256::digest(encoded)))
+    let mut hasher = Sha256::new();
+    serde_json::to_writer(&mut hasher, items).ok()?;
+    Some(URL_SAFE_NO_PAD.encode(hasher.finalize()))
 }
 
 fn validate_item_relations(items: &[JsonValue]) -> Option<()> {

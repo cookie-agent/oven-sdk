@@ -269,7 +269,8 @@ impl LanguageModel for OpenAiResponsesModel {
                 .client
                 .post(format!("{}/{PATH}", self.runtime.api.trim_end_matches('/')))
                 .headers(headers)
-                .json(&encoded.body)
+                .header(CONTENT_TYPE, "application/json")
+                .body(encoded.body)
                 .send();
             let response = tokio::select! {
                 value = tokio::time::timeout(self.runtime.timeouts.headers, send) => value
@@ -396,10 +397,7 @@ impl LanguageModel for OpenAiResponsesModel {
                 )
                 .with_stage(ErrorStage::NativeContextEncode));
             }
-            let body = serde_json::to_vec(&encoded.body).map_err(|_| {
-                ModelError::invalid_request("could not encode OpenAI compaction request")
-                    .with_stage(ErrorStage::NativeContextEncode)
-            })?;
+            let body = encoded.body;
             compaction::validate_request_size(body.len())?;
             let headers = self
                 .runtime
