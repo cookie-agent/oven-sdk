@@ -1,0 +1,36 @@
+{
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Question"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "reasoningContent": {
+            "reasoningText": {
+              "signature": "kept-anyway",
+              "text": "plain thought"
+            }
+          }
+        },
+        {
+          "text": "Answer"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "text": "Again"
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

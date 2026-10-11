@@ -1,0 +1,125 @@
+{
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Find a"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "reasoningContent": {
+            "reasoningText": {
+              "signature": "sig-abc",
+              "text": "Let me think.\n"
+            }
+          }
+        },
+        {
+          "reasoningContent": {
+            "redactedContent": "b3BhcXVlLXJlZGFjdGVk"
+          }
+        },
+        {
+          "text": "Checking."
+        },
+        {
+          "toolUse": {
+            "input": {
+              "id": "a"
+            },
+            "name": "lookup",
+            "toolUseId": "tooluse_1"
+          }
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "toolResult": {
+            "content": [
+              {
+                "text": "record a"
+              }
+            ],
+            "status": "success",
+            "toolUseId": "tooluse_1"
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "reasoningContent": {
+            "reasoningText": {
+              "text": "unsigned thought"
+            }
+          }
+        },
+        {
+          "text": "Found it.  \n"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "text": "Continue"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "toolChoice": {
+      "auto": {}
+    },
+    "tools": [
+      {
+        "toolSpec": {
+          "description": "Find a record",
+          "inputSchema": {
+            "json": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "description": "Record id",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "type": "object"
+            }
+          },
+          "name": "lookup"
+        }
+      },
+      {
+        "toolSpec": {
+          "description": "Write a file",
+          "inputSchema": {
+            "json": {
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "name": "write_file"
+        }
+      }
+    ]
+  }
+}

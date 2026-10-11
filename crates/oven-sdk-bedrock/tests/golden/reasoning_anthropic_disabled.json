@@ -1,0 +1,20 @@
+{
+  "additionalModelRequestFields": {
+    "thinking": {
+      "type": "disabled"
+    }
+  },
+  "inferenceConfig": {
+    "temperature": 0.2
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Quick"
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

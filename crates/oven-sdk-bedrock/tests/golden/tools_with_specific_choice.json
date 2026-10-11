@@ -1,0 +1,58 @@
+{
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Use a tool"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "toolChoice": {
+      "tool": {
+        "name": "write_file"
+      }
+    },
+    "tools": [
+      {
+        "toolSpec": {
+          "description": "Find a record",
+          "inputSchema": {
+            "json": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "description": "Record id",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "type": "object"
+            }
+          },
+          "name": "lookup"
+        }
+      },
+      {
+        "toolSpec": {
+          "description": "Write a file",
+          "inputSchema": {
+            "json": {
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "name": "write_file"
+        }
+      }
+    ]
+  }
+}

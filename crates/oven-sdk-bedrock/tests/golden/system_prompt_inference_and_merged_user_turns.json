@@ -1,0 +1,35 @@
+{
+  "inferenceConfig": {
+    "maxTokens": 1000,
+    "stopSequences": [
+      "STOP",
+      "\n\nHuman:"
+    ],
+    "temperature": 0.7,
+    "topP": 0.9
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "first"
+        },
+        {
+          "text": "second\twith\u0001control"
+        },
+        {
+          "text": "consecutive user turn"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "system": [
+    {
+      "text": "You are terse."
+    },
+    {
+      "text": "Answer in \"quotes\" 😀\n"
+    }
+  ]
+}

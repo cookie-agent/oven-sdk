@@ -1,0 +1,274 @@
+{
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Run the tools"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "Calling tools."
+        },
+        {
+          "toolUse": {
+            "input": {
+              "id": "a"
+            },
+            "name": "lookup",
+            "toolUseId": "call-1"
+          }
+        },
+        {
+          "toolUse": {
+            "input": {
+              "id": "b",
+              "nested": {
+                "list": [
+                  1,
+                  2.5,
+                  null,
+                  true
+                ]
+              }
+            },
+            "name": "lookup",
+            "toolUseId": "call-2"
+          }
+        },
+        {
+          "toolUse": {
+            "input": "not an object",
+            "name": "lookup",
+            "toolUseId": "call-3"
+          }
+        },
+        {
+          "toolUse": {
+            "input": {},
+            "name": "lookup",
+            "toolUseId": "call-4"
+          }
+        },
+        {
+          "toolUse": {
+            "input": {},
+            "name": "lookup",
+            "toolUseId": "call-5"
+          }
+        },
+        {
+          "toolUse": {
+            "input": {},
+            "name": "lookup",
+            "toolUseId": "call-6"
+          }
+        },
+        {
+          "toolUse": {
+            "input": {},
+            "name": "lookup",
+            "toolUseId": "call-7"
+          }
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "toolResult": {
+            "content": [
+              {
+                "text": "plain result"
+              }
+            ],
+            "status": "success",
+            "toolUseId": "call-1"
+          }
+        },
+        {
+          "toolResult": {
+            "content": [
+              {
+                "json": {
+                  "answer": 42,
+                  "items": [
+                    "x",
+                    "y"
+                  ]
+                }
+              }
+            ],
+            "status": "success",
+            "toolUseId": "call-2"
+          }
+        },
+        {
+          "toolResult": {
+            "content": [
+              {
+                "text": "boom"
+              }
+            ],
+            "status": "error",
+            "toolUseId": "call-3"
+          }
+        },
+        {
+          "toolResult": {
+            "content": [
+              {
+                "text": "user said no"
+              }
+            ],
+            "status": "success",
+            "toolUseId": "call-4"
+          }
+        },
+        {
+          "toolResult": {
+            "content": [
+              {
+                "text": "Tool call execution denied."
+              }
+            ],
+            "status": "success",
+            "toolUseId": "call-5"
+          }
+        },
+        {
+          "toolResult": {
+            "content": [
+              {
+                "text": "caption"
+              },
+              {
+                "json": {
+                  "k": "v"
+                }
+              }
+            ],
+            "status": "success",
+            "toolUseId": "call-6"
+          }
+        },
+        {
+          "toolResult": {
+            "content": [
+              {
+                "text": "screenshot"
+              },
+              {
+                "image": {
+                  "format": "png",
+                  "source": {
+                    "bytes": "iVBORw0K"
+                  }
+                }
+              },
+              {
+                "document": {
+                  "format": "pdf",
+                  "name": "tool report",
+                  "source": {
+                    "bytes": "JVBERi0xLjc="
+                  }
+                }
+              }
+            ],
+            "status": "success",
+            "toolUseId": "call-7"
+          }
+        },
+        {
+          "text": "Thanks"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "One more."
+        },
+        {
+          "toolUse": {
+            "input": {
+              "path": "/tmp/x"
+            },
+            "name": "write_file",
+            "toolUseId": "call-8"
+          }
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "toolResult": {
+            "content": [
+              {
+                "text": "written"
+              }
+            ],
+            "status": "success",
+            "toolUseId": "call-8"
+          }
+        },
+        {
+          "text": "Done?"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "toolChoice": {
+      "auto": {}
+    },
+    "tools": [
+      {
+        "toolSpec": {
+          "description": "Find a record",
+          "inputSchema": {
+            "json": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "description": "Record id",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "type": "object"
+            }
+          },
+          "name": "lookup"
+        }
+      },
+      {
+        "toolSpec": {
+          "description": "Write a file",
+          "inputSchema": {
+            "json": {
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "name": "write_file"
+        }
+      }
+    ]
+  }
+}

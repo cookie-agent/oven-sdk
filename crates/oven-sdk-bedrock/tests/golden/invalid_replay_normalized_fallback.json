@@ -1,0 +1,91 @@
+{
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Question"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "normalized text"
+        },
+        {
+          "toolUse": {
+            "input": {
+              "id": "z"
+            },
+            "name": "lookup",
+            "toolUseId": "call-1"
+          }
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "toolResult": {
+            "content": [
+              {
+                "json": {
+                  "found": false
+                }
+              }
+            ],
+            "status": "success",
+            "toolUseId": "call-1"
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "toolChoice": {
+      "auto": {}
+    },
+    "tools": [
+      {
+        "toolSpec": {
+          "description": "Find a record",
+          "inputSchema": {
+            "json": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "description": "Record id",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "type": "object"
+            }
+          },
+          "name": "lookup"
+        }
+      },
+      {
+        "toolSpec": {
+          "description": "Write a file",
+          "inputSchema": {
+            "json": {
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "name": "write_file"
+        }
+      }
+    ]
+  }
+}

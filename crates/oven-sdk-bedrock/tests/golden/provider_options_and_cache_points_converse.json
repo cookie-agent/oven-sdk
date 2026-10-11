@@ -1,0 +1,157 @@
+{
+  "additionalModelRequestFields": {
+    "anthropic_beta": [
+      "some-beta"
+    ],
+    "nested": {
+      "deep": {
+        "value": null
+      }
+    },
+    "top_k": 40
+  },
+  "additionalModelResponseFieldPaths": [
+    "/stop_sequence",
+    "/usage/x"
+  ],
+  "guardrailConfig": {
+    "guardrailIdentifier": "gr-123",
+    "guardrailVersion": "DRAFT",
+    "trace": "enabled_full"
+  },
+  "inferenceConfig": {
+    "maxTokens": 2000,
+    "stopSequences": [
+      "END"
+    ],
+    "topP": 0.5
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Question one"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "Looking"
+        },
+        {
+          "toolUse": {
+            "input": {
+              "id": "1"
+            },
+            "name": "lookup",
+            "toolUseId": "call-1"
+          }
+        },
+        {
+          "cachePoint": {
+            "ttl": "5m",
+            "type": "default"
+          }
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "toolResult": {
+            "content": [
+              {
+                "text": "one"
+              }
+            ],
+            "status": "success",
+            "toolUseId": "call-1"
+          }
+        },
+        {
+          "text": "Question two"
+        },
+        {
+          "cachePoint": {
+            "type": "default"
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "performanceConfig": {
+    "latency": "optimized"
+  },
+  "requestMetadata": {
+    "tenant": "acme",
+    "trace": "abc-123"
+  },
+  "serviceTier": {
+    "type": "priority"
+  },
+  "system": [
+    {
+      "text": "Stable system prompt"
+    },
+    {
+      "cachePoint": {
+        "ttl": "1h",
+        "type": "default"
+      }
+    }
+  ],
+  "toolConfig": {
+    "toolChoice": {
+      "any": {}
+    },
+    "tools": [
+      {
+        "toolSpec": {
+          "description": "Find a record",
+          "inputSchema": {
+            "json": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "description": "Record id",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "type": "object"
+            }
+          },
+          "name": "lookup"
+        }
+      },
+      {
+        "toolSpec": {
+          "description": "Write a file",
+          "inputSchema": {
+            "json": {
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "name": "write_file"
+        }
+      },
+      {
+        "cachePoint": {
+          "ttl": "1h",
+          "type": "default"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "inferenceConfig": {
+    "maxTokens": 500
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Give JSON"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "outputConfig": {
+    "textFormat": {
+      "structure": {
+        "jsonSchema": {
+          "schema": "{\"additionalProperties\":false,\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"number\"}},\"required\":[\"answer\"],\"type\":\"object\"}"
+        }
+      },
+      "type": "json_schema"
+    }
+  },
+  "system": [
+    {
+      "text": "Reply in JSON"
+    }
+  ]
+}

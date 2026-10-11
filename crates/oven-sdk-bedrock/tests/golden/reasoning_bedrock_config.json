@@ -1,0 +1,19 @@
+{
+  "additionalModelRequestFields": {
+    "reasoningConfig": {
+      "budgetTokens": 1024,
+      "maxReasoningEffort": "future-effort",
+      "type": "enabled"
+    }
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Think"
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

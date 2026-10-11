@@ -1,0 +1,82 @@
+{
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Describe these"
+        },
+        {
+          "image": {
+            "format": "png",
+            "source": {
+              "bytes": "iVBORw0K"
+            }
+          }
+        },
+        {
+          "image": {
+            "format": "jpeg",
+            "source": {
+              "bytes": "anBlZy1ieXRlcw=="
+            }
+          }
+        },
+        {
+          "image": {
+            "format": "gif",
+            "source": {
+              "bytes": "R0lGODlh"
+            }
+          }
+        },
+        {
+          "image": {
+            "format": "webp",
+            "source": {
+              "bytes": "UklGRndlYnA="
+            }
+          }
+        },
+        {
+          "document": {
+            "format": "pdf",
+            "name": "Quarterly report-(final) v2-final",
+            "source": {
+              "bytes": "JVBERi0xLjc="
+            }
+          }
+        },
+        {
+          "document": {
+            "format": "pdf",
+            "name": "document",
+            "source": {
+              "bytes": "JVBERi0xLjc="
+            }
+          }
+        },
+        {
+          "document": {
+            "format": "pdf",
+            "name": "document-3",
+            "source": {
+              "bytes": "JVBERi0xLjc="
+            }
+          }
+        },
+        {
+          "video": {
+            "format": "mp4",
+            "source": {
+              "bytes": "bXA0LWJ5dGVz"
+            }
+          }
+        },
+        {
+          "text": "trailing text"
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

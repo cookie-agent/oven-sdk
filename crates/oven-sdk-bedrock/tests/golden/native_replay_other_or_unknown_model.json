@@ -1,0 +1,60 @@
+{
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Question"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "reasoningContent": {
+            "reasoningText": {
+              "signature": "sig",
+              "text": "hmm"
+            }
+          }
+        },
+        {
+          "text": "Answer"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "text": "Again"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "reasoningContent": {
+            "reasoningText": {
+              "signature": "sig",
+              "text": "hmm"
+            }
+          }
+        },
+        {
+          "text": "Answer"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "text": "Once more"
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

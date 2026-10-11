@@ -1,0 +1,24 @@
+{
+  "additionalModelRequestFields": {
+    "output_config": {
+      "effort": "medium"
+    },
+    "thinking": {
+      "budget_tokens": 2048,
+      "type": "enabled"
+    }
+  },
+  "inferenceConfig": {
+    "maxTokens": 4096
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Think"
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

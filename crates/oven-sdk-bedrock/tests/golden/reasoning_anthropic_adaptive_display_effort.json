@@ -1,0 +1,22 @@
+{
+  "additionalModelRequestFields": {
+    "output_config": {
+      "effort": "high"
+    },
+    "thinking": {
+      "display": "summarized",
+      "type": "adaptive"
+    },
+    "top_k": 40
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Think"
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

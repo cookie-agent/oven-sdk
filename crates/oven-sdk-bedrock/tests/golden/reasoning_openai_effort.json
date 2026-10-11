@@ -1,0 +1,21 @@
+{
+  "additionalModelRequestFields": {
+    "custom": {
+      "nested": [
+        1,
+        2
+      ]
+    },
+    "reasoning_effort": "low"
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Think"
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

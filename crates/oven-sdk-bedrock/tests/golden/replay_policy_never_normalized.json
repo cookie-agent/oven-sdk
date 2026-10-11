@@ -1,0 +1,28 @@
+{
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Question"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "Answer"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "text": "Again"
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}
