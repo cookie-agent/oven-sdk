@@ -1,0 +1,217 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Step one"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Looking up."
+        },
+        {
+          "functionCall": {
+            "args": {
+              "id": "1"
+            },
+            "id": "call-1",
+            "name": "lookup"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "call-1",
+            "name": "lookup",
+            "response": {
+              "output": "one"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "functionCall": {
+            "args": {
+              "path": "one.txt"
+            },
+            "id": "call-2",
+            "name": "write_file"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "call-2",
+            "name": "write_file",
+            "response": {
+              "output": {
+                "ok": true
+              }
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Step one finished."
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "text": "Step two"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "functionCall": {
+            "args": {
+              "id": "2"
+            },
+            "id": "call-3",
+            "name": "lookup"
+          },
+          "thoughtSignature": "skip_thought_signature_validator"
+        },
+        {
+          "functionCall": {
+            "args": {
+              "id": "3"
+            },
+            "id": "call-4",
+            "name": "lookup"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "call-3",
+            "name": "lookup",
+            "response": {
+              "output": "two"
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "id": "call-4",
+            "name": "lookup",
+            "response": {
+              "output": "three"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "functionCall": {
+            "args": {
+              "path": "two.txt"
+            },
+            "id": "call-5",
+            "name": "write_file"
+          },
+          "thoughtSignature": "skip_thought_signature_validator"
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "call-5",
+            "name": "write_file",
+            "response": {
+              "output": "written"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "Use tools when needed."
+      }
+    ]
+  },
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "AUTO"
+    }
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "Find a record",
+          "name": "lookup",
+          "parameters": {
+            "properties": {
+              "filters": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "id": {
+                "description": "Record id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Write a file",
+          "name": "write_file",
+          "parameters": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

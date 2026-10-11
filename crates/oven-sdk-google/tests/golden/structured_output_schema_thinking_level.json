@@ -1,0 +1,52 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Give JSON"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 2048,
+    "responseFormat": {
+      "text": {
+        "mimeType": "APPLICATION_JSON",
+        "schema": {
+          "properties": {
+            "answer": {
+              "type": "string"
+            },
+            "score": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "propertyOrdering": [
+            "answer",
+            "score",
+            "tags"
+          ],
+          "required": [
+            "answer"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    "thinkingConfig": {
+      "includeThoughts": true,
+      "thinkingBudget": null,
+      "thinkingLevel": "HIGH"
+    }
+  }
+}

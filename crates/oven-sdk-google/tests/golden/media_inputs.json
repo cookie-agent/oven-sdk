@@ -1,0 +1,69 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Describe these"
+        },
+        {
+          "inlineData": {
+            "data": "iVBORw0K",
+            "mimeType": "image/png"
+          }
+        },
+        {
+          "fileData": {
+            "fileUri": "https://example.test/image.jpg",
+            "mimeType": "image/jpeg"
+          }
+        },
+        {
+          "fileData": {
+            "fileUri": "files/uploaded-image",
+            "mimeType": "image/webp"
+          }
+        },
+        {
+          "inlineData": {
+            "data": "JVBERi0xLjc=",
+            "mimeType": "application/pdf"
+          }
+        },
+        {
+          "fileData": {
+            "fileUri": "https://example.test/file.pdf",
+            "mimeType": "application/pdf"
+          }
+        },
+        {
+          "inlineData": {
+            "data": "cGRmIGFzIHRleHQ=",
+            "mimeType": "application/pdf"
+          }
+        },
+        {
+          "inlineData": {
+            "data": "cGxhaW4gZG9jdW1lbnQKbGluZSB0d28=",
+            "mimeType": "text/plain"
+          }
+        },
+        {
+          "inlineData": {
+            "data": "SUQz",
+            "mimeType": "audio/mp3"
+          }
+        },
+        {
+          "fileData": {
+            "fileUri": "https://example.test/clip.mp4",
+            "mimeType": "video/mp4"
+          }
+        },
+        {
+          "text": "Thanks"
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

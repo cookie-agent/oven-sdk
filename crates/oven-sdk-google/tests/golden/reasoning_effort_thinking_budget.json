@@ -1,0 +1,19 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Think"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "thinkingConfig": {
+      "includeThoughts": null,
+      "thinkingBudget": 1024,
+      "thinkingLevel": null
+    }
+  }
+}

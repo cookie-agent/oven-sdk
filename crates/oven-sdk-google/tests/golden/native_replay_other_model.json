@@ -1,0 +1,32 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Question"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "hmm",
+          "thought": true
+        },
+        {
+          "text": "Answer"
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "text": "Again"
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

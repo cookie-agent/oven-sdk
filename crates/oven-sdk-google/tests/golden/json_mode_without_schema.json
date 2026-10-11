@@ -1,0 +1,19 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Any JSON"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "responseFormat": {
+      "text": {
+        "mimeType": "APPLICATION_JSON"
+      }
+    }
+  }
+}

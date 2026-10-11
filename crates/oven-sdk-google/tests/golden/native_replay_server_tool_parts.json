@@ -1,0 +1,146 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Search, compute, then look up"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "thoughtSignature": "sig-search",
+          "toolCall": {
+            "args": {
+              "q": "rust"
+            },
+            "id": "s1",
+            "toolName": "google_search",
+            "toolType": "GOOGLE_SEARCH_WEB"
+          }
+        },
+        {
+          "toolResponse": {
+            "id": "s1",
+            "response": {
+              "items": []
+            },
+            "toolType": "GOOGLE_SEARCH_WEB"
+          }
+        },
+        {
+          "executableCode": {
+            "code": "print(1)",
+            "id": "code-1",
+            "language": "PYTHON"
+          },
+          "thoughtSignature": "sig-code"
+        },
+        {
+          "codeExecutionResult": {
+            "id": "code-1",
+            "outcome": "OUTCOME_OK",
+            "output": "1"
+          }
+        },
+        {
+          "text": "Searched and ran code."
+        },
+        {
+          "functionCall": {
+            "args": {
+              "id": "x"
+            },
+            "id": "call-1",
+            "name": "lookup"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "call-1",
+            "name": "lookup",
+            "response": {
+              "output": {
+                "found": true
+              }
+            }
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "VALIDATED"
+    },
+    "includeServerSideToolInvocations": true
+  },
+  "tools": [
+    {
+      "googleSearch": {}
+    },
+    {
+      "urlContext": {}
+    },
+    {
+      "codeExecution": {}
+    },
+    {
+      "fileSearch": {
+        "fileSearchStoreNames": [
+          "fileSearchStores/store-a",
+          "fileSearchStores/b"
+        ]
+      }
+    },
+    {
+      "googleMaps": {}
+    },
+    {
+      "functionDeclarations": [
+        {
+          "description": "Find a record",
+          "name": "lookup",
+          "parameters": {
+            "properties": {
+              "filters": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "id": {
+                "description": "Record id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Write a file",
+          "name": "write_file",
+          "parameters": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

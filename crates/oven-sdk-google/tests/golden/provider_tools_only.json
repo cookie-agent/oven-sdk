@@ -1,0 +1,34 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Search the web"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "tools": [
+    {
+      "googleSearch": {}
+    },
+    {
+      "urlContext": {}
+    },
+    {
+      "codeExecution": {}
+    },
+    {
+      "fileSearch": {
+        "fileSearchStoreNames": [
+          "fileSearchStores/store-a",
+          "fileSearchStores/b"
+        ]
+      }
+    },
+    {
+      "googleMaps": {}
+    }
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Look up v"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Looking."
+        },
+        {
+          "functionCall": {
+            "args": {
+              "id": "v"
+            },
+            "id": "provider-call",
+            "name": "lookup"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "provider-call",
+            "name": "lookup",
+            "response": {
+              "output": "record v"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "AUTO"
+    }
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "Find a record",
+          "name": "lookup",
+          "parameters": {
+            "properties": {
+              "filters": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "id": {
+                "description": "Record id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Write a file",
+          "name": "write_file",
+          "parameters": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

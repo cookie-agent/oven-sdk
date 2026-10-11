@@ -1,0 +1,235 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Run the tools"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Calling tools."
+        },
+        {
+          "functionCall": {
+            "args": {
+              "id": "a"
+            },
+            "id": "call-1",
+            "name": "lookup"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {
+              "id": "b",
+              "nested": {
+                "list": [
+                  1,
+                  2.5,
+                  null,
+                  true
+                ]
+              }
+            },
+            "id": "call-2",
+            "name": "lookup"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {},
+            "id": "call-3",
+            "name": "lookup"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {},
+            "id": "call-4",
+            "name": "lookup"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {
+              "path": "a.txt"
+            },
+            "id": "call-5",
+            "name": "write_file"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {
+              "path": "b.txt"
+            },
+            "id": "call-6",
+            "name": "write_file"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {},
+            "id": "call-7",
+            "name": "lookup"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {},
+            "id": "call-8",
+            "name": "lookup"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "call-1",
+            "name": "lookup",
+            "response": {
+              "output": "plain result"
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "id": "call-2",
+            "name": "lookup",
+            "response": {
+              "output": {
+                "answer": 42,
+                "items": [
+                  "x",
+                  "y"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "id": "call-3",
+            "name": "lookup",
+            "response": {
+              "error": "boom"
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "id": "call-4",
+            "name": "lookup",
+            "response": {
+              "error": {
+                "code": 500
+              }
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "id": "call-5",
+            "name": "write_file",
+            "response": {
+              "output": "user said no"
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "id": "call-6",
+            "name": "write_file",
+            "response": {
+              "output": "Tool call execution denied."
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "id": "call-7",
+            "name": "lookup",
+            "response": {
+              "output": [
+                "caption",
+                {
+                  "k": "v"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "id": "call-8",
+            "name": "lookup",
+            "response": {
+              "output": "bare string json"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Thanks"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "AUTO"
+    }
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "Find a record",
+          "name": "lookup",
+          "parameters": {
+            "properties": {
+              "filters": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "id": {
+                "description": "Record id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Write a file",
+          "name": "write_file",
+          "parameters": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

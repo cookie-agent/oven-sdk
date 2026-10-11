@@ -1,0 +1,81 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Search and look up"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "allowedFunctionNames": [
+        "lookup"
+      ],
+      "mode": "ANY"
+    },
+    "includeServerSideToolInvocations": true
+  },
+  "tools": [
+    {
+      "googleSearch": {}
+    },
+    {
+      "urlContext": {}
+    },
+    {
+      "codeExecution": {}
+    },
+    {
+      "fileSearch": {
+        "fileSearchStoreNames": [
+          "fileSearchStores/store-a",
+          "fileSearchStores/b"
+        ]
+      }
+    },
+    {
+      "googleMaps": {}
+    },
+    {
+      "functionDeclarations": [
+        {
+          "description": "Find a record",
+          "name": "lookup",
+          "parameters": {
+            "properties": {
+              "filters": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "id": {
+                "description": "Record id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Write a file",
+          "name": "write_file",
+          "parameters": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}
