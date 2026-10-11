@@ -347,8 +347,8 @@ impl LanguageModel for OpenResponsesModel {
                 .config
                 .client
                 .post(self.config.endpoint.clone())
-                .headers(headers)
                 .header(CONTENT_TYPE, "application/json")
+                .headers(headers)
                 .body(encoded.body)
                 .send();
             let response = tokio::select! {value=tokio::time::timeout(self.config.settings.timeouts.headers,send)=>value.map_err(|_|ModelError::timeout("Open Responses headers timed out").with_stage(ErrorStage::ResponseHeaders))?.map_err(|_|ModelError::transport("Open Responses request failed").with_stage(ErrorStage::Connect))?,_=abort.aborted()=>return Err(ModelError::abort("request was aborted before response headers").with_stage(ErrorStage::Connect))};

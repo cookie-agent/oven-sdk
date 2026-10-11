@@ -272,8 +272,8 @@ impl LanguageModel for OpenAiResponsesModel {
                 .runtime
                 .client
                 .post(format!("{}/{PATH}", self.runtime.api.trim_end_matches('/')))
-                .headers(headers)
                 .header(CONTENT_TYPE, "application/json")
+                .headers(headers)
                 .body(encoded.body)
                 .send();
             let response = tokio::select! {
@@ -413,8 +413,8 @@ impl LanguageModel for OpenAiResponsesModel {
                     "{}/{COMPACT_PATH}",
                     self.runtime.api.trim_end_matches('/')
                 ))
-                .headers(headers)
                 .header(CONTENT_TYPE, "application/json")
+                .headers(headers)
                 .body(body)
                 .send();
             let response = tokio::select! {

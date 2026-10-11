@@ -122,8 +122,8 @@ impl LanguageModel for AzureOpenAiResponsesModel {
                 .config
                 .client
                 .post(url)
-                .headers(headers)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .headers(headers)
                 .body(encoded.body)
                 .send();
             let response = tokio::select! {
@@ -275,8 +275,8 @@ impl LanguageModel for AzureOpenAiResponsesModel {
                 .config
                 .client
                 .post(url)
-                .headers(headers)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .headers(headers)
                 .body(encoded.body)
                 .send();
             let response = tokio::select! {

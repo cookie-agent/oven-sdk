@@ -219,8 +219,8 @@ async fn start_stream(
     let send = settings
         .client
         .post(url)
-        .headers(settings.headers)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .headers(settings.headers)
         .body(encoded.body)
         .send();
     let response = tokio::select! {
