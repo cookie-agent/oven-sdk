@@ -230,10 +230,7 @@ impl GoogleModel {
                 &self.config.settings,
                 &self.config.native_context_scope,
             )?;
-            let body = serde_json::to_vec(&encoded.body).map_err(|_| {
-                ModelError::invalid_request("could not serialize Google Gemini request")
-                    .with_stage(ErrorStage::RequestEncoding)
-            })?;
+            let body = encoded.body;
             crate::request::validate_request_body_size(body.len())?;
             let mut headers = self.config.base_headers.clone();
             if let Some(provider) = &self.config.provider.headers.dynamic_headers {
