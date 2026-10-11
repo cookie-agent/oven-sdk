@@ -1,6 +1,7 @@
 //! Chat Completions request validation and translation.
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use std::borrow::Cow;
+
 use oven_sdk::{
     AssistantPart, ContentValue, ErrorStage, FilePart, FileSource, HistoryTurn, InputPart,
     JsonValue, LanguageModelDescriptor, ModelCapabilities, ModelError, NativeContextScope,
@@ -9,11 +10,18 @@ use oven_sdk::{
 };
 
 use crate::{
-    chat::replay,
+    chat::{
+        body::{self, Content, Message, Part, TypedMessage},
+        replay,
+    },
     configuration::{MaxTokensField, ReasoningField, StructuredOutputSupport, SystemMessageRole},
     options::{
         CompatibleChatOptions, OpenAiChatOptions, chat_options, compatible_options,
         prompt_cache_breakpoint, validate_prompt_cache_key,
+    },
+    wire::encode::{
+        FileRef, Text, arguments, breakpoint, encoding_error, join, json_size_hint, push_text,
+        to_body,
     },
 };
 
@@ -27,7 +35,8 @@ pub(crate) struct ChatWireProfile {
 }
 
 pub(crate) struct Encoded {
-    pub(crate) body: JsonValue,
+    /// Serialized JSON request body.
+    pub(crate) body: Vec<u8>,
     pub(crate) replay: ReplayOutcome,
     pub(crate) warnings: Vec<String>,
 }
@@ -127,12 +136,13 @@ pub(crate) fn encode_request(
     let mut replay_outcome = ReplayOutcome::default();
     let mut messages = Vec::new();
     let mut warnings = Vec::new();
+    let mut size_hint = 0_usize;
     for (history_index, turn) in request.history.iter().enumerate() {
         match turn {
             HistoryTurn::System(message) => {
                 let role = match profile.system_role {
-                    SystemMessageRole::System => "system",
-                    SystemMessageRole::Developer => "developer",
+                    SystemMessageRole::System => SystemRole::System,
+                    SystemMessageRole::Developer => SystemRole::Developer,
                     SystemMessageRole::Omit => {
                         warnings.push("Chat profile omitted a system message".into());
                         continue;
@@ -147,48 +157,39 @@ pub(crate) fn encode_request(
                         .iter()
                         .filter_map(|part| match part {
                             oven_sdk::SystemPart::Text(text) if !text.text.is_empty() => {
-                                Some(attach_prompt_cache_breakpoint(
-                                    serde_json::json!({"type":"text","text":text.text}),
-                                    &text.metadata,
-                                ))
+                                Some(text_part(&text.text, &text.metadata))
                             }
                             _ => None,
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     if !content.is_empty() {
-                        messages.push(serde_json::json!({"role":role,"content":content}));
+                        messages.push(role.message(Content::Parts(content)));
                     }
                 } else {
-                    let content = message
-                        .content
-                        .iter()
-                        .filter_map(|part| match part {
+                    let content = join(
+                        message.content.iter().filter_map(|part| match part {
                             oven_sdk::SystemPart::Text(text) => Some(text.text.as_str()),
                             oven_sdk::SystemPart::Custom(_) => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                        }),
+                        "\n",
+                    );
                     if !content.is_empty() {
-                        messages.push(serde_json::json!({"role":role,"content":content}));
+                        messages.push(role.message(Content::Text(content)));
                     }
                 }
             }
             HistoryTurn::User(message) => {
                 let content = user_content(&message.content, profile)?;
-                if !content.as_array().is_some_and(Vec::is_empty)
-                    && content.as_str().is_none_or(|value| !value.is_empty())
+                if !matches!(&content, Content::Parts(parts) if parts.is_empty())
+                    && !matches!(&content, Content::Text(text) if text.is_empty())
                 {
-                    messages.push(serde_json::json!({"role":"user","content":content}));
+                    messages.push(Message::Typed(TypedMessage::User { content }));
                 }
             }
             HistoryTurn::Tool(message) => {
-                messages.extend(
-                    message
-                        .results
-                        .iter()
-                        .map(tool_result_message)
-                        .collect::<Result<Vec<_>, _>>()?,
-                );
+                for result in &message.results {
+                    messages.push(tool_result_message(result)?);
+                }
             }
             HistoryTurn::Assistant(turn) => {
                 let mut replayed = None;
@@ -221,8 +222,18 @@ pub(crate) fn encode_request(
                         disposition: ReplayDisposition::NoArtifact,
                     });
                 }
-                let mut message = if let Some(message) = replayed {
-                    message
+                // Interleaved-thinking compatible providers (DeepSeek in thinking
+                // mode) reject a tool loop whose assistant messages omit
+                // `reasoning_content`, including turns that produced no reasoning
+                // or came from another model. An empty field satisfies them.
+                let empty_reasoning_content = profile.compatible
+                    && profile.reasoning_field == ReasoningField::ReasoningContent;
+                let message = if let Some(mut message) = replayed {
+                    if empty_reasoning_content {
+                        message = message.with_empty_reasoning_content();
+                    }
+                    size_hint += replayed_size_hint(&turn.message.content);
+                    Message::Replayed(message)
                 } else {
                     if policy != ReplayPolicy::Never {
                         replay_outcome.decisions.push(ReplayDecision {
@@ -230,114 +241,43 @@ pub(crate) fn encode_request(
                             disposition: ReplayDisposition::ReconstructedNormalized,
                         });
                     }
-                    assistant_message(&turn.message.content, profile.reasoning_field)?
+                    assistant_message(
+                        &turn.message.content,
+                        profile.reasoning_field,
+                        empty_reasoning_content,
+                    )?
                 };
-                // Interleaved-thinking compatible providers (DeepSeek in thinking
-                // mode) reject a tool loop whose assistant messages omit
-                // `reasoning_content`, including turns that produced no reasoning
-                // or came from another model. An empty field satisfies them.
-                if profile.compatible
-                    && profile.reasoning_field == ReasoningField::ReasoningContent
-                    && message.get("reasoning_content").is_none()
-                {
-                    message["reasoning_content"] = "".into();
-                }
                 messages.push(message);
             }
         }
     }
-    let mut body = serde_json::json!({
-        "model": descriptor.identity.model_id.as_str(),
-        "messages": messages,
-        "stream": true
-    });
-    if profile.stream_usage {
-        body["stream_options"] = serde_json::json!({"include_usage":true});
-    }
+    size_hint += messages.iter().map(Message::size_hint).sum::<usize>();
+    let (mut max_tokens, mut max_completion_tokens) = (None, None);
     if let Some(maximum) = request.inference.max_output_tokens {
         match profile.max_tokens_field {
-            MaxTokensField::MaxTokens => body["max_tokens"] = maximum.into(),
-            MaxTokensField::MaxCompletionTokens => {
-                body["max_completion_tokens"] = maximum.into();
-            }
+            MaxTokensField::MaxTokens => max_tokens = Some(maximum),
+            MaxTokensField::MaxCompletionTokens => max_completion_tokens = Some(maximum),
             MaxTokensField::Omit => warnings.push("Chat profile omitted max output tokens".into()),
         }
     }
-    if let Some(value) = request.inference.temperature {
-        body["temperature"] = value.into();
-    }
-    if let Some(value) = request.inference.top_p {
-        body["top_p"] = value.into();
-    }
-    if let Some(effort) = official_options
-        .reasoning_effort
-        .clone()
-        .or_else(|| request.inference.reasoning_effort.clone())
-    {
-        body["reasoning_effort"] = effort.into();
-    }
-    if let Some(user) = &official_options.user {
-        body["user"] = user.clone().into();
-    }
-    if let Some(service_tier) = &official_options.service_tier {
-        body["service_tier"] = service_tier.clone().into();
-    }
-    if let Some(verbosity) = &official_options.verbosity {
-        body["verbosity"] = verbosity.clone().into();
-    }
-    if let Some(parallel) = official_options.parallel_tool_calls {
-        body["parallel_tool_calls"] = parallel.into();
-    }
-    if let Some(key) = &official_options.prompt_cache_key {
-        body["prompt_cache_key"] = key.clone().into();
-    }
-    if let Some(retention) = official_options.prompt_cache_retention {
-        body["prompt_cache_retention"] =
-            serde_json::to_value(retention).expect("prompt-cache retention is serializable");
-    }
-    if let Some(cache_options) = &official_options.prompt_cache_options {
-        body["prompt_cache_options"] =
-            serde_json::to_value(cache_options).expect("prompt-cache options are serializable");
-    }
-    if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {
-        body["tools"] = JsonValue::Array(
-            request
-                .tools
-                .iter()
-                .map(|tool| {
-                    let strict = tool
-                        .provider_options
-                        .get("openai")
-                        .and_then(|value| value.get("strict"))
-                        .and_then(JsonValue::as_bool)
-                        .unwrap_or(false);
-                    serde_json::json!({"type":"function","function":{"name":tool.name,"description":tool.description,"parameters":tool.input_schema.as_value(),"strict":strict}})
-                })
-                .collect(),
-        );
-        body["tool_choice"] = match &request.tool_choice {
-            ToolChoice::Auto => JsonValue::String("auto".into()),
-            ToolChoice::Required => JsonValue::String("required".into()),
-            ToolChoice::None => JsonValue::String("none".into()),
-            ToolChoice::Tool(name) => {
-                serde_json::json!({"type":"function","function":{"name":name}})
-            }
-        };
-    }
-    match &request.response_format {
-        ResponseFormat::Text => {}
-        ResponseFormat::Json { schema: None } => {
-            body["response_format"] = serde_json::json!({"type":"json_object"});
-        }
+    let (tools, tool_choice) = tools(request);
+    size_hint += body::tools_size_hint(tools.as_ref());
+    let response_format = match &request.response_format {
+        ResponseFormat::Text => None,
+        ResponseFormat::Json { schema: None } => Some(body::ResponseFormat::JsonObject),
         ResponseFormat::Json {
             schema: Some(schema),
         } => match profile.structured_output {
-            StructuredOutputSupport::JsonSchema => {
-                body["response_format"] = serde_json::json!({"type":"json_schema","json_schema":{"name":"response","strict":true,"schema":schema.as_value()}});
-            }
+            StructuredOutputSupport::JsonSchema => Some(body::ResponseFormat::JsonSchema {
+                json_schema: body::JsonSchemaFormat {
+                    name: "response",
+                    strict: true,
+                    schema: schema.as_value(),
+                },
+            }),
             StructuredOutputSupport::JsonObject => {
                 warnings.push("Chat profile downgraded JSON Schema to JSON object mode".into());
-                body["response_format"] = serde_json::json!({"type":"json_object"});
+                Some(body::ResponseFormat::JsonObject)
             }
             StructuredOutputSupport::Unsupported => {
                 return Err(ModelError::unsupported(
@@ -345,75 +285,189 @@ pub(crate) fn encode_request(
                 ));
             }
         },
-    }
-    if profile.compatible
-        && let Some(object) = body.as_object_mut()
-    {
-        object.extend(compatible.extra_body.clone());
-    }
+    };
+    let extra =
+        (profile.compatible && !compatible.extra_body.is_empty()).then_some(&compatible.extra_body);
+    size_hint += extra.map_or(0, |extra| {
+        extra
+            .iter()
+            .map(|(key, value)| key.len() + 4 + json_size_hint(value))
+            .sum()
+    });
+    let body = body::Body {
+        model: descriptor.identity.model_id.as_str(),
+        messages,
+        stream: true,
+        stream_options: profile.stream_usage.then_some(body::StreamOptions {
+            include_usage: true,
+        }),
+        max_tokens,
+        max_completion_tokens,
+        temperature: request.inference.temperature,
+        top_p: request.inference.top_p,
+        reasoning_effort: official_options
+            .reasoning_effort
+            .as_deref()
+            .or(request.inference.reasoning_effort.as_deref()),
+        user: official_options.user.as_deref(),
+        service_tier: official_options.service_tier.as_deref(),
+        verbosity: official_options.verbosity.as_deref(),
+        parallel_tool_calls: official_options.parallel_tool_calls,
+        prompt_cache_key: official_options.prompt_cache_key.as_deref(),
+        prompt_cache_retention: official_options.prompt_cache_retention,
+        prompt_cache_options: official_options.prompt_cache_options.as_ref(),
+        tools,
+        tool_choice,
+        response_format,
+        extra,
+    };
     Ok(Encoded {
-        body,
+        body: to_body(
+            &body,
+            size_hint,
+            encoding_error("could not encode OpenAI Chat request"),
+        )?,
         replay: replay_outcome,
         warnings,
     })
 }
 
-fn user_content(parts: &[InputPart], profile: &ChatWireProfile) -> Result<JsonValue, ModelError> {
+#[derive(Clone, Copy)]
+enum SystemRole {
+    System,
+    Developer,
+}
+
+impl SystemRole {
+    fn message(self, content: Content<'_>) -> Message<'_> {
+        Message::Typed(match self {
+            Self::System => TypedMessage::System { content },
+            Self::Developer => TypedMessage::Developer { content },
+        })
+    }
+}
+
+/// Approximates a replayed message from the normalized parts it matched.
+fn replayed_size_hint(parts: &[AssistantPart]) -> usize {
+    96 + parts
+        .iter()
+        .map(|part| match part {
+            AssistantPart::Text(part) => part.text.len(),
+            AssistantPart::Reasoning(part) => part.text.len(),
+            AssistantPart::ToolCall(call) => {
+                96 + call.id.len()
+                    + call.name.len()
+                    + call.raw_input.as_ref().map_or(64, String::len) * 9 / 8
+            }
+            _ => 16,
+        })
+        .sum::<usize>()
+}
+
+type Tools<'a> = (Option<Vec<body::Tool<'a>>>, Option<body::ToolChoice<'a>>);
+
+fn tools(request: &Request) -> Tools<'_> {
+    if request.tools.is_empty() || matches!(request.tool_choice, ToolChoice::None) {
+        return (None, None);
+    }
+    let tools = request
+        .tools
+        .iter()
+        .map(|tool| body::Tool {
+            kind: "function",
+            function: body::Function {
+                name: &tool.name,
+                description: &tool.description,
+                parameters: tool.input_schema.as_value(),
+                strict: tool
+                    .provider_options
+                    .get("openai")
+                    .and_then(|value| value.get("strict"))
+                    .and_then(JsonValue::as_bool)
+                    .unwrap_or(false),
+            },
+        })
+        .collect();
+    let choice = match &request.tool_choice {
+        ToolChoice::Auto => body::ToolChoice::Mode("auto"),
+        ToolChoice::Required => body::ToolChoice::Mode("required"),
+        ToolChoice::None => body::ToolChoice::Mode("none"),
+        ToolChoice::Tool(name) => body::ToolChoice::Function {
+            kind: "function",
+            function: body::Named { name },
+        },
+    };
+    (Some(tools), Some(choice))
+}
+
+fn text_part<'a>(text: &'a str, metadata: &oven_sdk::PartMetadata) -> Result<Part<'a>, ModelError> {
+    Ok(Part::Text {
+        text,
+        prompt_cache_breakpoint: breakpoint(metadata)?,
+    })
+}
+
+fn user_content<'a>(
+    parts: &'a [InputPart],
+    profile: &ChatWireProfile,
+) -> Result<Content<'a>, ModelError> {
     if parts.iter().all(|part| matches!(part, InputPart::Text(_)))
         && !parts.iter().any(|part| {
             matches!(part, InputPart::Text(text) if prompt_cache_breakpoint(&text.metadata).unwrap_or(false))
         })
     {
-        return Ok(JsonValue::String(
-            parts
-                .iter()
-                .filter_map(|part| match part {
-                    InputPart::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(""),
-        ));
+        return Ok(Content::Text(join(
+            parts.iter().filter_map(|part| match part {
+                InputPart::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            }),
+            "",
+        )));
     }
     parts
         .iter()
         .filter_map(|part| match part {
-            InputPart::Text(text) => Some(attach_prompt_cache_breakpoint(
-                serde_json::json!({"type":"text","text":text.text}),
-                &text.metadata,
-            )),
+            InputPart::Text(text) => Some(text_part(&text.text, &text.metadata)),
             InputPart::File(file) => Some(file_content(file, profile)),
             InputPart::Custom(_) => None,
         })
         .collect::<Result<Vec<_>, _>>()
-        .map(JsonValue::Array)
+        .map(Content::Parts)
 }
 
-fn file_content(file: &FilePart, profile: &ChatWireProfile) -> Result<JsonValue, ModelError> {
-    let data = match &file.source {
-        FileSource::Bytes(bytes) => {
-            format!("data:{};base64,{}", file.media_type, STANDARD.encode(bytes))
-        }
-        FileSource::Text(text) => {
-            format!("data:{};base64,{}", file.media_type, STANDARD.encode(text))
-        }
-        FileSource::Url(url) if file.media_type.starts_with("image/") => url.to_string(),
+fn file_content<'a>(file: &'a FilePart, profile: &ChatWireProfile) -> Result<Part<'a>, ModelError> {
+    let image = file.media_type.starts_with("image/");
+    let data = match FileRef::of(file) {
+        Some(data @ FileRef::Data { .. }) => data,
+        Some(url @ FileRef::Url(_)) if image => url,
         _ => {
             return Err(ModelError::unsupported("unsupported Chat media source")
                 .with_stage(ErrorStage::RequestEncoding));
         }
     };
-    let value = if file.media_type.starts_with("image/") {
-        serde_json::json!({"type":"image_url","image_url":{"url":data}})
+    let prompt_cache_breakpoint = breakpoint(&file.metadata)?;
+    if image {
+        Ok(Part::ImageUrl {
+            image_url: body::Url { url: data },
+            prompt_cache_breakpoint,
+        })
     } else if profile.compatible && file.media_type.starts_with("video/") {
-        serde_json::json!({"type":"video_url","video_url":{"url":data}})
+        Ok(Part::VideoUrl {
+            video_url: body::Url { url: data },
+            prompt_cache_breakpoint,
+        })
     } else if file.media_type == "application/pdf" {
-        serde_json::json!({"type":"file","file":{"filename":file.filename.clone().unwrap_or_else(|| "document.pdf".into()),"file_data":data}})
+        Ok(Part::File {
+            file: body::File {
+                filename: file.filename.as_deref().unwrap_or("document.pdf"),
+                file_data: data,
+            },
+            prompt_cache_breakpoint,
+        })
     } else {
-        return Err(ModelError::unsupported("unsupported Chat media type")
-            .with_stage(ErrorStage::RequestEncoding));
-    };
-    attach_prompt_cache_breakpoint(value, &file.metadata)
+        Err(ModelError::unsupported("unsupported Chat media type")
+            .with_stage(ErrorStage::RequestEncoding))
+    }
 }
 
 fn validate_prompt_cache_breakpoints(
@@ -501,31 +555,31 @@ fn tool_content_has_prompt_cache_breakpoint(content: &ToolContent) -> Result<boo
     }
 }
 
-fn attach_prompt_cache_breakpoint(
-    mut block: JsonValue,
-    metadata: &oven_sdk::PartMetadata,
-) -> Result<JsonValue, ModelError> {
-    if prompt_cache_breakpoint(metadata)? {
-        block["prompt_cache_breakpoint"] = serde_json::json!({"mode":"explicit"});
-    }
-    Ok(block)
-}
-
-pub(crate) fn assistant_message(
+fn assistant_message(
     parts: &[AssistantPart],
     reasoning_field: ReasoningField,
-) -> Result<JsonValue, ModelError> {
-    let mut text = String::new();
-    let mut reasoning = String::new();
-    let mut refusal = String::new();
+    empty_reasoning_content: bool,
+) -> Result<Message<'_>, ModelError> {
+    let mut text = Cow::Borrowed("");
+    let mut reasoning = Cow::Borrowed("");
+    let mut refusal = Cow::Borrowed("");
     let mut calls = Vec::new();
     for part in parts {
         match part {
-            AssistantPart::Text(part) => text.push_str(&part.text),
-            AssistantPart::Reasoning(part) => reasoning.push_str(&part.text),
-            AssistantPart::ToolCall(call) => calls.push(serde_json::json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.raw_input.clone().unwrap_or_else(|| call.input.to_string())}})),
+            AssistantPart::Text(part) => push_text(&mut text, &part.text),
+            AssistantPart::Reasoning(part) => push_text(&mut reasoning, &part.text),
+            AssistantPart::ToolCall(call) => calls.push(body::ToolCall {
+                id: &call.id,
+                kind: "function",
+                function: body::CallFunction {
+                    name: &call.name,
+                    arguments: arguments(call),
+                },
+            }),
             AssistantPart::Custom(part) if part.kind == "openai.refusal" => {
-                if let Some(value) = part.data.as_str() { refusal.push_str(value); }
+                if let Some(value) = part.data.as_str() {
+                    push_text(&mut refusal, value);
+                }
             }
             AssistantPart::File(_) => {
                 return Err(ModelError::unsupported(
@@ -536,27 +590,28 @@ pub(crate) fn assistant_message(
             _ => {}
         }
     }
-    let mut message = serde_json::json!({"role":"assistant","content":if text.is_empty(){JsonValue::Null}else{JsonValue::String(text)}});
-    if !calls.is_empty() {
-        message["tool_calls"] = JsonValue::Array(calls);
+    let reasoning = (!reasoning.is_empty()).then_some(reasoning);
+    let (mut reasoning_content, reasoning) = match reasoning_field {
+        ReasoningField::ReasoningContent => (reasoning, None),
+        ReasoningField::Reasoning => (None, reasoning),
+        ReasoningField::None => (None, None),
+    };
+    if empty_reasoning_content && reasoning_content.is_none() {
+        reasoning_content = Some(Cow::Borrowed(""));
     }
-    if !reasoning.is_empty() {
-        match reasoning_field {
-            ReasoningField::ReasoningContent => message["reasoning_content"] = reasoning.into(),
-            ReasoningField::Reasoning => message["reasoning"] = reasoning.into(),
-            ReasoningField::None => {}
-        }
-    }
-    if !refusal.is_empty() {
-        message["refusal"] = refusal.into();
-    }
-    Ok(message)
+    Ok(Message::Typed(TypedMessage::Assistant {
+        content: (!text.is_empty()).then_some(text),
+        tool_calls: (!calls.is_empty()).then_some(calls),
+        reasoning_content,
+        reasoning,
+        refusal: (!refusal.is_empty()).then_some(refusal),
+    }))
 }
 
-fn tool_result_message(result: &ToolResultPart) -> Result<JsonValue, ModelError> {
+fn tool_result_message(result: &ToolResultPart) -> Result<Message<'_>, ModelError> {
     let content = match &result.content {
-        ToolContent::Text(value) => value.clone(),
-        ToolContent::Json(value) => value.to_string(),
+        ToolContent::Text(value) => Text::Borrowed(value),
+        ToolContent::Json(value) => Text::Json(value),
         ToolContent::Mixed(values)
             if values
                 .iter()
@@ -566,10 +621,15 @@ fn tool_result_message(result: &ToolResultPart) -> Result<JsonValue, ModelError>
                 "files in tool results are not deliverable via openai-chat",
             ));
         }
-        ToolContent::Mixed(values) => serde_json::to_string(values).unwrap_or_default(),
-        ToolContent::Denied { reason } => reason.clone().unwrap_or_default(),
+        ToolContent::Mixed(values) => {
+            Text::Owned(serde_json::to_string(values).unwrap_or_default())
+        }
+        ToolContent::Denied { reason } => Text::Borrowed(reason.as_deref().unwrap_or_default()),
     };
-    Ok(serde_json::json!({"role":"tool","tool_call_id":result.tool_call_id,"content":content}))
+    Ok(Message::Typed(TypedMessage::Tool {
+        tool_call_id: &result.tool_call_id,
+        content,
+    }))
 }
 
 fn reject_tool_result_files(result: &ToolResultPart) -> Result<(), ModelError> {

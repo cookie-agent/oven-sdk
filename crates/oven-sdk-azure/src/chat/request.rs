@@ -164,7 +164,10 @@ pub(crate) fn encode_request(
                     });
                 }
                 if let Some(message) = replayed {
-                    messages.push(message);
+                    messages.push(serde_json::to_value(message).map_err(|_| {
+                        ModelError::invalid_request("could not encode Azure Chat replay")
+                            .with_stage(ErrorStage::RequestEncoding)
+                    })?);
                 } else {
                     if policy != ReplayPolicy::Never {
                         replay_outcome.decisions.push(ReplayDecision {

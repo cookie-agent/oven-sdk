@@ -5,7 +5,7 @@ mod chat;
 mod continuation;
 mod openai_responses;
 
-pub use chat::{ChatReasoningField, decode as chat_message};
+pub use chat::{ChatReasoningField, ChatReplayMessage, decode as chat_message};
 pub use continuation::{
     AZURE_RESPONSES_CONTINUATION, VERTEX_REQUIRED_SIGNATURE, azure_responses_continuation,
     has_required_vertex_signature, mark_required_vertex_signature, vertex_signatures_match,

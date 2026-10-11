@@ -1,6 +1,6 @@
 //! Current private Chat assistant replay codec.
 
-use std::collections::BTreeSet;
+use std::{borrow::Cow, collections::BTreeSet};
 
 use crate::{AssistantPart, JsonValue, NativeReplayArtifact, is_semantic_text};
 
@@ -15,12 +15,57 @@ pub enum ChatReasoningField {
     Reasoning,
 }
 
+/// A validated replayed Chat assistant message, borrowed from its artifact.
+///
+/// Serializes as the native message with visible reasoning moved to the
+/// target's reasoning field (or dropped when the target has none).
+#[derive(Clone, Copy, Debug)]
+pub struct ChatReplayMessage<'a> {
+    message: &'a serde_json::Map<String, JsonValue>,
+    reasoning: Option<(&'static str, &'a JsonValue)>,
+}
+
+static EMPTY_STRING: JsonValue = JsonValue::String(String::new());
+
+impl ChatReplayMessage<'_> {
+    /// Returns whether the emitted message carries a reasoning field.
+    #[must_use]
+    pub fn has_reasoning(&self) -> bool {
+        self.reasoning.is_some()
+    }
+
+    /// Emits an empty `reasoning_content` when the message carries no reasoning.
+    #[must_use]
+    pub fn with_empty_reasoning_content(mut self) -> Self {
+        if self.reasoning.is_none() {
+            self.reasoning = Some(("reasoning_content", &EMPTY_STRING));
+        }
+        self
+    }
+}
+
+impl serde::Serialize for ChatReplayMessage<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        for (key, value) in self.message {
+            if !matches!(key.as_str(), "reasoning" | "reasoning_content") {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        if let Some((field, value)) = self.reasoning {
+            map.serialize_entry(field, value)?;
+        }
+        map.end()
+    }
+}
+
 /// Validates current OpenAI/Azure Chat envelopes and emits supported Chat fields.
-pub fn decode(
-    artifact: &NativeReplayArtifact,
+pub fn decode<'a>(
+    artifact: &'a NativeReplayArtifact,
     normalized: &[AssistantPart],
     target_field: ChatReasoningField,
-) -> Option<JsonValue> {
+) -> Option<ChatReplayMessage<'a>> {
     let root = artifact.payload().as_object()?;
     match root.get("format")?.as_str()? {
         "oven.azure.openai.chat.assistant.v4" => {
@@ -35,7 +80,7 @@ pub fn decode(
         }
         _ => return None,
     }
-    let mut message = root.get("message")?.clone();
+    let message = root.get("message")?;
     let reasoning_field = if message.get("reasoning").is_some() {
         ChatReasoningField::Reasoning
     } else if message.get("reasoning_content").is_some() {
@@ -43,26 +88,20 @@ pub fn decode(
     } else {
         ChatReasoningField::None
     };
-    validate_message(&message, reasoning_field)?;
-    if semantic_message(&message, reasoning_field) != semantic_normalized(normalized) {
+    validate_message(message, reasoning_field)?;
+    if !semantic_message(message, reasoning_field).matches(normalized) {
         return None;
     }
-    let object = message.as_object_mut()?;
-    let reasoning = object
-        .remove("reasoning")
-        .or_else(|| object.remove("reasoning_content"));
-    if let Some(reasoning) = reasoning {
-        match target_field {
-            ChatReasoningField::None => {}
-            ChatReasoningField::ReasoningContent => {
-                object.insert("reasoning_content".into(), reasoning);
-            }
-            ChatReasoningField::Reasoning => {
-                object.insert("reasoning".into(), reasoning);
-            }
-        }
-    }
-    Some(message)
+    let message = message.as_object()?;
+    let reasoning = message
+        .get("reasoning")
+        .or_else(|| message.get("reasoning_content"))
+        .and_then(|reasoning| match target_field {
+            ChatReasoningField::None => None,
+            ChatReasoningField::ReasoningContent => Some(("reasoning_content", reasoning)),
+            ChatReasoningField::Reasoning => Some(("reasoning", reasoning)),
+        });
+    Some(ChatReplayMessage { message, reasoning })
 }
 
 fn validate_message(message: &JsonValue, reasoning_field: ChatReasoningField) -> Option<()> {
@@ -114,7 +153,69 @@ fn validate_message(message: &JsonValue, reasoning_field: ChatReasoningField) ->
     Some(())
 }
 
-fn semantic_message(message: &JsonValue, reasoning_field: ChatReasoningField) -> JsonValue {
+/// Replay-relevant meaning of a Chat assistant message.
+struct Semantic<'a> {
+    text: &'a str,
+    reasoning: &'a str,
+    refusal: &'a str,
+    tools: Vec<(&'a str, &'a str, &'a str)>,
+}
+
+impl Semantic<'_> {
+    /// Compares against normalized parts without copying their text.
+    fn matches(&self, normalized: &[AssistantPart]) -> bool {
+        let mut text = Cow::Borrowed("");
+        let mut reasoning = Cow::Borrowed("");
+        let mut refusal = Cow::Borrowed("");
+        let mut tools = self.tools.iter();
+        for part in normalized {
+            match part {
+                // Whitespace-only text parts carry no semantic content
+                // (see `is_semantic_text`).
+                AssistantPart::Text(part) if !is_semantic_text(&part.text) => {}
+                AssistantPart::Text(part) => push(&mut text, &part.text),
+                AssistantPart::Reasoning(part) => push(&mut reasoning, &part.text),
+                AssistantPart::ToolCall(call) => {
+                    let arguments = call
+                        .raw_input
+                        .as_deref()
+                        .map_or_else(|| Cow::Owned(call.input.to_string()), Cow::Borrowed);
+                    if tools.next()
+                        != Some(&(call.id.as_str(), call.name.as_str(), arguments.as_ref()))
+                    {
+                        return false;
+                    }
+                }
+                AssistantPart::Custom(part)
+                    if matches!(
+                        part.kind.as_str(),
+                        "azure.openai.refusal" | "openai.refusal"
+                    ) =>
+                {
+                    if let Some(value) = part.data.as_str() {
+                        push(&mut refusal, value);
+                    }
+                }
+                _ => {}
+            }
+        }
+        tools.next().is_none()
+            && text == self.text
+            && reasoning == self.reasoning
+            && refusal == self.refusal
+    }
+}
+
+fn push<'a>(run: &mut Cow<'a, str>, text: &'a str) {
+    if run.is_empty() {
+        *run = Cow::Borrowed(text);
+    } else {
+        run.to_mut().push_str(text);
+    }
+}
+
+/// Reads the semantic fields of a message that passed `validate_message`.
+fn semantic_message(message: &JsonValue, reasoning_field: ChatReasoningField) -> Semantic<'_> {
     let text = message
         .get("content")
         .and_then(JsonValue::as_str)
@@ -140,49 +241,27 @@ fn semantic_message(message: &JsonValue, reasoning_field: ChatReasoningField) ->
             calls
                 .iter()
                 .map(|call| {
-                    serde_json::json!({
-                        "id": call.get("id"),
-                        "name": call.pointer("/function/name").and_then(JsonValue::as_str).unwrap_or_default(),
-                        "arguments": call.pointer("/function/arguments")
-                    })
+                    (
+                        call.get("id")
+                            .and_then(JsonValue::as_str)
+                            .unwrap_or_default(),
+                        call.pointer("/function/name")
+                            .and_then(JsonValue::as_str)
+                            .unwrap_or_default(),
+                        call.pointer("/function/arguments")
+                            .and_then(JsonValue::as_str)
+                            .unwrap_or_default(),
+                    )
                 })
-                .collect::<Vec<_>>()
+                .collect()
         })
         .unwrap_or_default();
-    serde_json::json!({"text":text,"reasoning":reasoning,"refusal":refusal,"tools":tools})
-}
-
-fn semantic_normalized(normalized: &[AssistantPart]) -> JsonValue {
-    let mut text = String::new();
-    let mut reasoning = String::new();
-    let mut refusal = String::new();
-    let mut tools = Vec::new();
-    for part in normalized {
-        match part {
-            // Whitespace-only text parts carry no semantic content
-            // (see `is_semantic_text`).
-            AssistantPart::Text(part) if !is_semantic_text(&part.text) => {}
-            AssistantPart::Text(part) => text.push_str(&part.text),
-            AssistantPart::Reasoning(part) => reasoning.push_str(&part.text),
-            AssistantPart::ToolCall(call) => tools.push(serde_json::json!({
-                "id": call.id,
-                "name": call.name,
-                "arguments": call.raw_input.clone().unwrap_or_else(|| call.input.to_string())
-            })),
-            AssistantPart::Custom(part)
-                if matches!(
-                    part.kind.as_str(),
-                    "azure.openai.refusal" | "openai.refusal"
-                ) =>
-            {
-                if let Some(value) = part.data.as_str() {
-                    refusal.push_str(value);
-                }
-            }
-            _ => {}
-        }
+    Semantic {
+        text,
+        reasoning,
+        refusal,
+        tools,
     }
-    serde_json::json!({"text":text,"reasoning":reasoning,"refusal":refusal,"tools":tools})
 }
 
 fn exact_keys(object: &serde_json::Map<String, JsonValue>, expected: &[&str]) -> Option<()> {
