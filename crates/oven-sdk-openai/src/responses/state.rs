@@ -1,14 +1,54 @@
 //! OpenAI Responses event state machine.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use oven_sdk::{
     AdapterId, ErrorStage, Finish, FinishReason, JsonValue, ModelError, ModelErrorKind,
     NativeContextScope, NativeReplayArtifact, ReplayPolicy, StreamPart, ToolCallPart, Usage,
 };
 
+use oven_sdk::provider_support::KeyPresent;
+use serde::Deserialize;
+
 use crate::responses::replay;
 use crate::wire::responses::REPLAY_FORMAT;
+
+/// A streamed text, reasoning, or function-argument delta event.
+///
+/// The SSE loop decodes these hot events straight into typed fields; anything
+/// the typed decode declines takes the `JsonValue` path in [`State::apply`].
+#[derive(Deserialize)]
+pub(crate) struct DeltaEvent<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Cow<'a, str>,
+    #[serde(default)]
+    error: KeyPresent,
+    #[serde(default)]
+    output_index: Option<u64>,
+    #[serde(default)]
+    content_index: Option<u64>,
+    #[serde(default)]
+    summary_index: Option<u64>,
+    #[serde(default, borrow)]
+    delta: Option<Cow<'a, str>>,
+}
+
+impl DeltaEvent<'_> {
+    /// Returns whether the typed path handles this event exactly like [`State::apply`].
+    pub(crate) fn is_fast(&self) -> bool {
+        !self.error.0
+            && matches!(
+                self.kind.as_ref(),
+                "response.output_text.delta"
+                    | "response.reasoning_summary_text.delta"
+                    | "response.reasoning_text.delta"
+                    | "response.function_call_arguments.delta"
+            )
+    }
+}
 
 #[derive(Default)]
 struct FunctionState {
@@ -78,9 +118,76 @@ impl State {
         &self.response_metadata
     }
 
+    /// Applies a text, reasoning, or function-argument delta event.
+    ///
+    /// Callers only pass events whose kind is one of the delta kinds; the typed
+    /// SSE path additionally guarantees the payload has no `error` key.
+    pub(crate) fn apply_delta(
+        &mut self,
+        event: DeltaEvent<'_>,
+        parts: &mut Vec<StreamPart>,
+        bytes: u64,
+    ) -> Result<(), ModelError> {
+        if self.done {
+            return Err(invalid_event("Responses event after terminal event", bytes));
+        }
+        let output_index = event.output_index.unwrap_or(0);
+        self.ensure_unfinalized(output_index, bytes)?;
+        let delta = event.delta.unwrap_or_default();
+        match event.kind.as_ref() {
+            "response.output_text.delta" => {
+                let content_index = event.content_index.unwrap_or(0);
+                self.patch_text(output_index, content_index, &delta, bytes)?;
+                self.text_deltas.insert((output_index, content_index));
+                let id = self.text_id(output_index, content_index);
+                if !self.open_text.contains(&id) {
+                    self.open_text.insert(id.clone());
+                    parts.push(StreamPart::TextStart {
+                        id: id.clone(),
+                        metadata: None,
+                    });
+                }
+                parts.push(StreamPart::TextDelta {
+                    id,
+                    delta: delta.into_owned(),
+                    metadata: None,
+                });
+            }
+            "response.reasoning_summary_text.delta" => {
+                let summary_index = event.summary_index.unwrap_or(0);
+                self.patch_summary(output_index, summary_index, &delta, bytes)?;
+                self.prepare_summary_slots(output_index, summary_index, parts, bytes)?;
+                self.reasoning_delta(output_index, summary_index, "summary", delta, parts);
+            }
+            "response.reasoning_text.delta" => {
+                let content_index = event.content_index.unwrap_or(0);
+                self.patch_reasoning_content(output_index, content_index, &delta, bytes)?;
+                self.reasoning_deltas
+                    .insert((output_index, "raw".into(), content_index));
+                self.reasoning_delta(output_index, content_index, "raw", delta, parts);
+            }
+            "response.function_call_arguments.delta" => {
+                let function = self.functions.entry(output_index).or_default();
+                start_function(function, parts);
+                function.arguments.push_str(&delta);
+                if function.started
+                    && let Some(call_id) = &function.call_id
+                {
+                    parts.push(StreamPart::ToolCallDelta {
+                        id: call_id.clone(),
+                        delta: delta.into_owned(),
+                        metadata: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub(crate) fn apply(
         &mut self,
-        value: JsonValue,
+        mut value: JsonValue,
         parts: &mut Vec<StreamPart>,
         bytes: u64,
     ) -> Result<(), ModelError> {
@@ -96,80 +203,28 @@ impl State {
             "response.output_item.added" => {
                 let output_index = output_index(&value, bytes)?;
                 self.ensure_unfinalized(output_index, bytes)?;
-                let item = value.get("item").cloned().ok_or_else(|| {
+                let item = value.get_mut("item").map(JsonValue::take).ok_or_else(|| {
                     invalid_event("Responses item-added event is missing item", bytes)
                 })?;
                 self.add_item(output_index, item, parts);
                 Ok(())
             }
-            "response.output_text.delta" => {
-                let output_index = output_index(&value, bytes)?;
-                self.ensure_unfinalized(output_index, bytes)?;
-                let content_index = value
-                    .get("content_index")
-                    .and_then(JsonValue::as_u64)
-                    .unwrap_or(0);
-                let delta = value.get("delta").and_then(JsonValue::as_str).unwrap_or("");
-                self.patch_text(output_index, content_index, delta, bytes)?;
-                self.text_deltas.insert((output_index, content_index));
-                let id = self.text_id(output_index, content_index);
-                if self.open_text.insert(id.clone()) {
-                    parts.push(StreamPart::TextStart {
-                        id: id.clone(),
-                        metadata: None,
-                    });
-                }
-                parts.push(StreamPart::TextDelta {
-                    id,
-                    delta: delta.into(),
-                    metadata: None,
-                });
-                Ok(())
-            }
-            "response.reasoning_summary_text.delta" => {
-                let output_index = output_index(&value, bytes)?;
-                self.ensure_unfinalized(output_index, bytes)?;
-                let summary_index = value
-                    .get("summary_index")
-                    .and_then(JsonValue::as_u64)
-                    .unwrap_or(0);
-                let delta = value.get("delta").and_then(JsonValue::as_str).unwrap_or("");
-                self.patch_summary(output_index, summary_index, delta, bytes)?;
-                self.prepare_summary_slots(output_index, summary_index, parts, bytes)?;
-                self.reasoning_delta(output_index, summary_index, "summary", delta, parts);
-                Ok(())
-            }
-            "response.reasoning_text.delta" => {
-                let output_index = output_index(&value, bytes)?;
-                self.ensure_unfinalized(output_index, bytes)?;
-                let content_index = value
-                    .get("content_index")
-                    .and_then(JsonValue::as_u64)
-                    .unwrap_or(0);
-                let delta = value.get("delta").and_then(JsonValue::as_str).unwrap_or("");
-                self.patch_reasoning_content(output_index, content_index, delta, bytes)?;
-                self.reasoning_deltas
-                    .insert((output_index, "raw".into(), content_index));
-                self.reasoning_delta(output_index, content_index, "raw", delta, parts);
-                Ok(())
-            }
-            "response.function_call_arguments.delta" => {
-                let output_index = output_index(&value, bytes)?;
-                self.ensure_unfinalized(output_index, bytes)?;
-                let delta = value.get("delta").and_then(JsonValue::as_str).unwrap_or("");
-                let function = self.functions.entry(output_index).or_default();
-                start_function(function, parts);
-                function.arguments.push_str(delta);
-                if function.started
-                    && let Some(call_id) = &function.call_id
-                {
-                    parts.push(StreamPart::ToolCallDelta {
-                        id: call_id.clone(),
-                        delta: delta.into(),
-                        metadata: None,
-                    });
-                }
-                Ok(())
+            "response.output_text.delta"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_text.delta"
+            | "response.function_call_arguments.delta" => {
+                let event = DeltaEvent {
+                    kind: Cow::Borrowed(event),
+                    error: KeyPresent(false),
+                    output_index: value.get("output_index").and_then(JsonValue::as_u64),
+                    content_index: value.get("content_index").and_then(JsonValue::as_u64),
+                    summary_index: value.get("summary_index").and_then(JsonValue::as_u64),
+                    delta: value
+                        .get("delta")
+                        .and_then(JsonValue::as_str)
+                        .map(Cow::Borrowed),
+                };
+                self.apply_delta(event, parts, bytes)
             }
             "response.function_call_arguments.done" => {
                 let output_index = output_index(&value, bytes)?;
@@ -183,7 +238,7 @@ impl State {
             "response.output_item.done" => {
                 let output_index = output_index(&value, bytes)?;
                 self.ensure_unfinalized(output_index, bytes)?;
-                let item = value.get("item").cloned().ok_or_else(|| {
+                let item = value.get_mut("item").map(JsonValue::take).ok_or_else(|| {
                     invalid_event("Responses item-done event is missing item", bytes)
                 })?;
                 self.finish_item(output_index, item, parts, bytes)
@@ -310,17 +365,22 @@ impl State {
 
     fn finish_response(
         &mut self,
-        value: JsonValue,
+        mut value: JsonValue,
         incomplete_reason: Option<String>,
         parts: &mut Vec<StreamPart>,
         bytes: u64,
     ) -> Result<(), ModelError> {
-        let response = value.get("response").unwrap_or(&value);
+        let response = if value.get("response").is_some() {
+            &mut value["response"]
+        } else {
+            &mut value
+        };
         self.capture_response(response);
+        // The terminal event is owned, so its output items move into state.
         let output = response
-            .get("output")
-            .and_then(JsonValue::as_array)
-            .cloned()
+            .get_mut("output")
+            .and_then(JsonValue::as_array_mut)
+            .map(std::mem::take)
             .unwrap_or_default();
         let output_len = output.len() as u64;
         if self
@@ -334,7 +394,7 @@ impl State {
                 bytes,
             ));
         }
-        for (index, mut item) in output.iter().cloned().enumerate() {
+        for (index, mut item) in output.into_iter().enumerate() {
             let output_index = index as u64;
             if item.get("type").and_then(JsonValue::as_str) == Some("function_call") {
                 self.normalize_function_id(output_index, &mut item);
@@ -363,8 +423,8 @@ impl State {
             .and_then(JsonValue::as_str)
             .map(str::to_owned);
         self.incomplete_details = response
-            .get("incomplete_details")
-            .cloned()
+            .get_mut("incomplete_details")
+            .map(JsonValue::take)
             .unwrap_or(JsonValue::Null);
         let finish_reason = match incomplete_reason.as_deref() {
             Some("max_output_tokens") => FinishReason::Length,
@@ -645,7 +705,7 @@ impl State {
         output_index: u64,
         index: u64,
         kind: &str,
-        delta: &str,
+        delta: Cow<'_, str>,
         parts: &mut Vec<StreamPart>,
     ) {
         let item_id = self
@@ -656,7 +716,8 @@ impl State {
             .map(str::to_owned)
             .unwrap_or_else(|| format!("reasoning-{output_index}"));
         let id = format!("{item_id}:{kind}:{index}");
-        if self.open_reasoning.insert(id.clone()) {
+        if !self.open_reasoning.contains(&id) {
+            self.open_reasoning.insert(id.clone());
             parts.push(StreamPart::ReasoningStart {
                 id: id.clone(),
                 metadata: None,
@@ -664,7 +725,7 @@ impl State {
         }
         parts.push(StreamPart::ReasoningDelta {
             id,
-            delta: delta.into(),
+            delta: delta.into_owned(),
             metadata: None,
         });
     }
@@ -747,13 +808,19 @@ impl State {
             .ok_or_else(|| {
                 invalid_event("Responses message content part is not an object", bytes)
             })?;
-        let current = match part.get("text") {
-            Some(value) => value
-                .as_str()
-                .ok_or_else(|| invalid_event("Responses message text is not a string", bytes))?,
-            None => "",
-        };
-        part.insert("text".into(), format!("{current}{delta}").into());
+        // Append in place: rebuilding the accumulated text per delta is quadratic.
+        match part.get_mut("text") {
+            Some(JsonValue::String(text)) => text.push_str(delta),
+            Some(_) => {
+                return Err(invalid_event(
+                    "Responses message text is not a string",
+                    bytes,
+                ));
+            }
+            None => {
+                part.insert("text".into(), delta.into());
+            }
+        }
         Ok(())
     }
 
@@ -783,13 +850,19 @@ impl State {
             .ok_or_else(|| {
                 invalid_event("Responses reasoning summary part is not an object", bytes)
             })?;
-        let current = match part.get("text") {
-            Some(value) => value.as_str().ok_or_else(|| {
-                invalid_event("Responses reasoning summary text is not a string", bytes)
-            })?,
-            None => "",
-        };
-        part.insert("text".into(), format!("{current}{delta}").into());
+        // Append in place: rebuilding the accumulated text per delta is quadratic.
+        match part.get_mut("text") {
+            Some(JsonValue::String(text)) => text.push_str(delta),
+            Some(_) => {
+                return Err(invalid_event(
+                    "Responses reasoning summary text is not a string",
+                    bytes,
+                ));
+            }
+            None => {
+                part.insert("text".into(), delta.into());
+            }
+        }
         Ok(())
     }
 
@@ -819,13 +892,19 @@ impl State {
             .ok_or_else(|| {
                 invalid_event("Responses reasoning content part is not an object", bytes)
             })?;
-        let current = match part.get("text") {
-            Some(value) => value.as_str().ok_or_else(|| {
-                invalid_event("Responses reasoning content text is not a string", bytes)
-            })?,
-            None => "",
-        };
-        part.insert("text".into(), format!("{current}{delta}").into());
+        // Append in place: rebuilding the accumulated text per delta is quadratic.
+        match part.get_mut("text") {
+            Some(JsonValue::String(text)) => text.push_str(delta),
+            Some(_) => {
+                return Err(invalid_event(
+                    "Responses reasoning content text is not a string",
+                    bytes,
+                ));
+            }
+            None => {
+                part.insert("text".into(), delta.into());
+            }
+        }
         Ok(())
     }
 
@@ -1090,6 +1169,90 @@ pub(crate) fn usage_from(value: &JsonValue, bytes: u64) -> Result<Usage, ModelEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn replay_state() -> State {
+        State::new(
+            AdapterId::new("openai-responses"),
+            NativeContextScope::new(
+                oven_sdk::ProviderId::new("openai"),
+                oven_sdk::ModelId::new("gpt-5"),
+                oven_sdk::ResourceId::new("test-resource").expect("valid resource"),
+            )
+            .expect("valid scope"),
+            ReplayPolicy::IfValid,
+        )
+    }
+
+    /// Drives payloads like the SSE loop, optionally forcing the `JsonValue` path.
+    fn drive_events(events: &[&str], typed: bool) -> (Vec<StreamPart>, usize) {
+        let mut state = replay_state();
+        let mut parts = Vec::new();
+        let mut typed_hits = 0;
+        for data in events {
+            if typed
+                && let Some(delta) =
+                    oven_sdk::provider_support::parse_json_object::<DeltaEvent<'_>>(data)
+                && delta.is_fast()
+            {
+                typed_hits += 1;
+                state.apply_delta(delta, &mut parts, 0).unwrap();
+                continue;
+            }
+            state
+                .apply(serde_json::from_str(data).unwrap(), &mut parts, 0)
+                .unwrap();
+        }
+        (parts, typed_hits)
+    }
+
+    #[test]
+    fn typed_delta_decode_matches_json_value_path() {
+        let events = [
+            r#"{"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}"#,
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}"#,
+            r#"{"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"plan "}"#,
+            r#"{"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"\"more\""}"#,
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"plan \"more\""}]}}"#,
+            r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}"#,
+            r#"{"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"hé","sequence_number":4}"#,
+            // Declined by the typed decode: mistyped delta and duplicate keys.
+            r#"{"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":7}"#,
+            r#"{"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"x","delta":"\nllo"}"#,
+            r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hé\nllo"}]}}"#,
+            r#"{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}}"#,
+            r#"{"type":"response.function_call_arguments.delta","output_index":2,"delta":"{\"q\":"}"#,
+            r#"{"type":"response.function_call_arguments.delta","output_index":2,"delta":"1}"}"#,
+            r#"{"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}}"#,
+            r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"plan \"more\""}]},{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hé\nllo"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}],"usage":{"input_tokens":3,"output_tokens":5}}}"#,
+        ];
+        let (typed, typed_hits) = drive_events(&events, true);
+        let (dom, dom_hits) = drive_events(&events, false);
+        assert_eq!(typed_hits, 5);
+        assert_eq!(dom_hits, 0);
+        assert_eq!(typed, dom);
+        assert!(typed.contains(&StreamPart::TextDelta {
+            id: "msg_1".into(),
+            delta: "\nllo".into(),
+            metadata: None,
+        }));
+        let Some(StreamPart::Finish { finish }) = typed.last() else {
+            panic!("missing finish");
+        };
+        assert_eq!(
+            finish.native_replay.as_ref().unwrap().payload(),
+            &serde_json::json!({
+                "format": REPLAY_FORMAT,
+                "items": [
+                    {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "plan \"more\""}]},
+                    {"type": "message", "id": "msg_1", "role": "assistant", "content": [{"type": "output_text", "text": "hé\nllo"}]},
+                    {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "lookup", "arguments": "{\"q\":1}"},
+                ],
+                "store": false,
+                "status": "completed",
+                "incomplete_details": null,
+            })
+        );
+    }
 
     #[test]
     fn cache_write_usage_is_optional_and_validated() {

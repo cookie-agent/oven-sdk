@@ -18,13 +18,17 @@ use crate::{
         validate_routing_discriminator,
     },
     error::classify_error,
-    responses::{compaction, request, state::State},
+    responses::{
+        compaction, request,
+        state::{DeltaEvent, State},
+    },
     transport::OpenAiTimeouts,
     wire::{
         OPENAI_RESPONSES_ADAPTER_ID,
         responses::{COMPACT_PATH, PATH},
     },
 };
+use oven_sdk::provider_support::parse_json_object;
 use reqwest::header::{CONTENT_TYPE, HeaderMap};
 
 /// A configured official OpenAI Responses model.
@@ -574,6 +578,21 @@ fn process_events(live: &mut LiveState, stop_after_event: bool) -> Result<bool, 
             continue;
         }
         semantic = true;
+        // Hot path: text, reasoning, and argument deltas decode into typed
+        // fields. Everything else, including error envelopes, takes the
+        // JsonValue path below.
+        if let Some(delta) = parse_json_object::<DeltaEvent<'_>>(&event.data)
+            && delta.is_fast()
+        {
+            live.saw_provider_event = true;
+            let mut parts = Vec::new();
+            live.state.apply_delta(delta, &mut parts, live.count)?;
+            live.queue.extend(parts.into_iter().map(Ok));
+            if stop_after_event {
+                return Ok(true);
+            }
+            continue;
+        }
         let value: JsonValue = serde_json::from_str(&event.data).map_err(|_| {
             ModelError::invalid_response("OpenAI Responses SSE event is invalid JSON")
                 .with_stage(ErrorStage::StreamDecode)
