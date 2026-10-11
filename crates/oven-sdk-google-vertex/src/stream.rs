@@ -387,7 +387,7 @@ impl State {
 
     pub(crate) fn apply(
         &mut self,
-        value: JsonValue,
+        mut value: JsonValue,
         parts: &mut Vec<StreamPart>,
         bytes: u64,
     ) -> Result<(), ModelError> {
@@ -425,6 +425,15 @@ impl State {
             self.done = true;
             return Ok(());
         }
+        // The chunk is owned, so the first candidate's native parts move into
+        // state instead of being cloned one by one.
+        let mut native_parts = None;
+        if let Some(JsonValue::Array(candidates)) = value.get_mut("candidates")
+            && let Some(candidate) = candidates.first_mut()
+            && let Some(JsonValue::Array(native)) = candidate.pointer_mut("/content/parts")
+        {
+            native_parts = Some(std::mem::take(native));
+        }
         self.capture_metadata(&value);
         if let Some(usage) = value.get("usageMetadata") {
             self.usage = parse_usage(usage, bytes)?;
@@ -439,13 +448,8 @@ impl State {
         }
         if let Some(candidate) = candidate {
             self.capture_candidate_metadata(candidate);
-            if let Some(native) = candidate
-                .pointer("/content/parts")
-                .and_then(JsonValue::as_array)
-            {
-                for native_part in native {
-                    self.apply_part(native_part.clone(), parts, bytes)?;
-                }
+            for native_part in native_parts.into_iter().flatten() {
+                self.apply_part(native_part, parts, bytes)?;
             }
             self.emit_sources(candidate, parts);
             if let Some(reason) = candidate.get("finishReason").and_then(JsonValue::as_str) {
@@ -1085,7 +1089,9 @@ pub(crate) async fn read_live(
         })?;
         semantic = true;
         let mut parts = Vec::new();
-        if let Err(error) = live.state.apply(value.clone(), &mut parts, live.count) {
+        // Only clone the event when the caller asked for raw chunks.
+        let raw = live.include_raw.then(|| value.clone());
+        if let Err(error) = live.state.apply(value, &mut parts, live.count) {
             live.queue.extend(parts.into_iter().map(Ok));
             live.pending_error = Some(error);
             return Ok(true);
@@ -1104,7 +1110,7 @@ pub(crate) async fn read_live(
                 live.count,
             ));
         }
-        if live.include_raw {
+        if let Some(value) = raw {
             live.queue.push_back(Ok(StreamPart::Raw { value }));
         }
         live.queue.extend(parts.into_iter().map(Ok));
