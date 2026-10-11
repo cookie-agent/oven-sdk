@@ -1,0 +1,38 @@
+{
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "old context",
+          "type": "input_text"
+        }
+      ],
+      "id": "msg_user_1",
+      "role": "user",
+      "status": "completed",
+      "type": "message"
+    },
+    {
+      "created_by": "azure-openai",
+      "encrypted_content": "opaque-encrypted-context",
+      "id": "cmp_1",
+      "type": "compaction"
+    },
+    {
+      "content": [
+        {
+          "text": "continue",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "deployment",
+  "store": false,
+  "stream": true
+}

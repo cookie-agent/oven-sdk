@@ -1,0 +1,109 @@
+{
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "look up x",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "encrypted_content": "enc-state-1",
+      "id": "rs_1",
+      "summary": [
+        {
+          "text": "plan the lookup",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
+          "text": "Checking.",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_1",
+      "role": "assistant",
+      "type": "message"
+    },
+    {
+      "arguments": "{\"q\":\"x\"}",
+      "call_id": "call_1",
+      "id": "fc_1",
+      "name": "lookup",
+      "type": "function_call"
+    },
+    {
+      "call_id": "call_1",
+      "output": "value-of-x",
+      "type": "function_call_output"
+    },
+    {
+      "content": [
+        {
+          "text": "x is value-of-x",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "and y?",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "deployment",
+  "parallel_tool_calls": false,
+  "reasoning": {
+    "effort": "medium"
+  },
+  "store": false,
+  "stream": true,
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "description": "Looks a key up",
+      "name": "lookup",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "q": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
+      "description": "",
+      "name": "list_files",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      },
+      "strict": false,
+      "type": "function"
+    }
+  ]
+}

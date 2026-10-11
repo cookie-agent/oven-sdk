@@ -1,0 +1,39 @@
+{
+  "input": [
+    {
+      "content": [
+        {
+          "text": "You are terse.\nAnswer in English.",
+          "type": "input_text"
+        }
+      ],
+      "role": "developer",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "long history",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "noted",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "type": "message"
+    }
+  ],
+  "instructions": "Keep decisions.",
+  "model": "deployment",
+  "prompt_cache_key": "compact-key",
+  "prompt_cache_retention": "in_memory",
+  "service_tier": "default"
+}

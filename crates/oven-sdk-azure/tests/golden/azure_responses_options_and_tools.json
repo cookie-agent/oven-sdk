@@ -1,0 +1,83 @@
+{
+  "include": [
+    "message.output_text.logprobs",
+    "reasoning.encrypted_content"
+  ],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "You are terse.\nAnswer in English.",
+          "type": "input_text"
+        }
+      ],
+      "role": "developer",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "look up x",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "max_output_tokens": 2048,
+  "model": "deployment",
+  "parallel_tool_calls": false,
+  "prompt_cache_key": "cache-key",
+  "prompt_cache_options": {
+    "mode": "explicit",
+    "ttl": "30m"
+  },
+  "prompt_cache_retention": "24h",
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
+  "service_tier": "flex",
+  "store": false,
+  "stream": true,
+  "text": {
+    "verbosity": "low"
+  },
+  "tool_choice": {
+    "name": "lookup",
+    "type": "function"
+  },
+  "tools": [
+    {
+      "description": "Looks a key up",
+      "name": "lookup",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "q": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
+      "description": "",
+      "name": "list_files",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      },
+      "strict": false,
+      "type": "function"
+    }
+  ],
+  "truncation": "auto",
+  "user": "user-123"
+}

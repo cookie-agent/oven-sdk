@@ -1,0 +1,21 @@
+{
+  "max_completion_tokens": 99,
+  "messages": [
+    {
+      "content": "You are terse.\nAnswer in English.",
+      "role": "developer"
+    },
+    {
+      "content": "score it",
+      "role": "user"
+    }
+  ],
+  "model": "fixture-model",
+  "response_format": {
+    "type": "json_object"
+  },
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  }
+}

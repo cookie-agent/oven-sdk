@@ -1,0 +1,71 @@
+{
+  "max_tokens": 2048,
+  "messages": [
+    {
+      "content": "You are terse.\nAnswer in English.",
+      "role": "system"
+    },
+    {
+      "content": "look up x",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini",
+  "parallel_tool_calls": true,
+  "prompt_cache_key": "chat-key",
+  "prompt_cache_options": {
+    "mode": "implicit",
+    "ttl": "30m"
+  },
+  "prompt_cache_retention": "in_memory",
+  "reasoning_effort": "low",
+  "service_tier": "priority",
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "temperature": 0.25,
+  "tool_choice": {
+    "function": {
+      "name": "lookup"
+    },
+    "type": "function"
+  },
+  "tools": [
+    {
+      "function": {
+        "description": "Looks a key up",
+        "name": "lookup",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "q": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "q"
+          ],
+          "type": "object"
+        },
+        "strict": true
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "",
+        "name": "list_files",
+        "parameters": {
+          "properties": {},
+          "type": "object"
+        },
+        "strict": false
+      },
+      "type": "function"
+    }
+  ],
+  "top_p": 0.5,
+  "user": "user-123",
+  "verbosity": "medium"
+}

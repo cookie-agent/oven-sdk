@@ -1,0 +1,25 @@
+{
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "any json",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "gpt-5-mini",
+  "store": false,
+  "stream": true,
+  "text": {
+    "format": {
+      "type": "json_object"
+    }
+  }
+}

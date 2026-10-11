@@ -1,0 +1,23 @@
+{
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "just verbose",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "gpt-5-mini",
+  "store": false,
+  "stream": true,
+  "text": {
+    "verbosity": "medium"
+  }
+}

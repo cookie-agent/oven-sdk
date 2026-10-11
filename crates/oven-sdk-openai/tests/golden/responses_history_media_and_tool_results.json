@@ -1,0 +1,280 @@
+{
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "input": [
+    {
+      "content": [
+        {
+          "prompt_cache_breakpoint": {
+            "mode": "explicit"
+          },
+          "text": "Stable prefix.",
+          "type": "input_text"
+        },
+        {
+          "text": "Second block.",
+          "type": "input_text"
+        }
+      ],
+      "role": "developer",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "prompt_cache_breakpoint": {
+            "mode": "explicit"
+          },
+          "text": "Describe these.",
+          "type": "input_text"
+        },
+        {
+          "image_url": "data:image/png;base64,cG5nLWJ5dGVz",
+          "prompt_cache_breakpoint": {
+            "mode": "explicit"
+          },
+          "type": "input_image"
+        },
+        {
+          "image_url": "https://example.test/a.jpg",
+          "type": "input_image"
+        },
+        {
+          "file_data": "data:application/pdf;base64,JVBERi0xLjc=",
+          "filename": "report.pdf",
+          "type": "input_file"
+        },
+        {
+          "file_data": "data:application/pdf;base64,JVBERi0xLjQ=",
+          "filename": "document.pdf",
+          "type": "input_file"
+        },
+        {
+          "file_url": "https://example.test/doc.pdf",
+          "filename": "document.pdf",
+          "type": "input_file"
+        },
+        {
+          "file_data": "data:application/pdf;base64,dGV4dC1zb3VyY2U=",
+          "filename": "document.pdf",
+          "type": "input_file"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "Let me check.",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "type": "message"
+    },
+    {
+      "arguments": "{\"q\": \"x\"}",
+      "call_id": "call_a",
+      "name": "lookup",
+      "type": "function_call"
+    },
+    {
+      "arguments": "{\"dir\":\"/tmp\"}",
+      "call_id": "call_b",
+      "id": "fc_item_b",
+      "name": "list_files",
+      "type": "function_call"
+    },
+    {
+      "content": [
+        {
+          "text": "Trailing text.",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "type": "message"
+    },
+    {
+      "call_id": "call_a",
+      "output": "found",
+      "type": "function_call_output"
+    },
+    {
+      "call_id": "call_b",
+      "output": [
+        {
+          "text": "screenshot",
+          "type": "input_text"
+        },
+        {
+          "text": "{\"w\":10}",
+          "type": "input_text"
+        },
+        {
+          "image_url": "data:image/png;base64,dG9vbC1wbmc=",
+          "type": "input_image"
+        },
+        {
+          "file_data": "data:application/pdf;base64,dG9vbC1wZGY=",
+          "filename": "tool.pdf",
+          "type": "input_file"
+        }
+      ],
+      "type": "function_call_output"
+    },
+    {
+      "content": [
+        {
+          "text": "Done with files.",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "type": "message"
+    },
+    {
+      "arguments": "{\"q\":\"call_a\"}",
+      "call_id": "call_a",
+      "name": "lookup",
+      "type": "function_call"
+    },
+    {
+      "arguments": "{\"q\":\"call_b\"}",
+      "call_id": "call_b",
+      "name": "lookup",
+      "type": "function_call"
+    },
+    {
+      "arguments": "{\"q\":\"call_c\"}",
+      "call_id": "call_c",
+      "name": "lookup",
+      "type": "function_call"
+    },
+    {
+      "arguments": "{\"q\":\"call_d\"}",
+      "call_id": "call_d",
+      "name": "lookup",
+      "type": "function_call"
+    },
+    {
+      "arguments": "{\"q\":\"call_e\"}",
+      "call_id": "call_e",
+      "name": "lookup",
+      "type": "function_call"
+    },
+    {
+      "arguments": "{\"q\":\"call_f\"}",
+      "call_id": "call_f",
+      "name": "lookup",
+      "type": "function_call"
+    },
+    {
+      "call_id": "call_a",
+      "output": "plain \"quoted\"\nresult",
+      "type": "function_call_output"
+    },
+    {
+      "call_id": "call_b",
+      "output": "boom: not found",
+      "type": "function_call_output"
+    },
+    {
+      "call_id": "call_c",
+      "output": "{\"nested\":{\"ok\":true,\"s\":\"é\"},\"rows\":[1,2,3]}",
+      "type": "function_call_output"
+    },
+    {
+      "call_id": "call_d",
+      "output": "user declined",
+      "type": "function_call_output"
+    },
+    {
+      "call_id": "call_e",
+      "output": "",
+      "type": "function_call_output"
+    },
+    {
+      "call_id": "call_f",
+      "output": "[{\"type\":\"text\",\"value\":\"caption\"},{\"type\":\"json\",\"value\":{\"answer\":42}}]",
+      "type": "function_call_output"
+    },
+    {
+      "content": [
+        {
+          "text": "Inline result follows.",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "type": "message"
+    },
+    {
+      "arguments": "{}",
+      "call_id": "call_inline",
+      "name": "lookup",
+      "type": "function_call"
+    },
+    {
+      "call_id": "call_inline",
+      "output": "inline output",
+      "type": "function_call_output"
+    },
+    {
+      "content": [
+        {
+          "text": "After inline.",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "thanks",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "gpt-5-mini",
+  "store": false,
+  "stream": true,
+  "tool_choice": "required",
+  "tools": [
+    {
+      "description": "Looks a key up",
+      "name": "lookup",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "q": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
+      "description": "",
+      "name": "list_files",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      },
+      "strict": false,
+      "type": "function"
+    }
+  ]
+}

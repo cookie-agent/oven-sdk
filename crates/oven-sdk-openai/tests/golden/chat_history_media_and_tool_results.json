@@ -1,0 +1,245 @@
+{
+  "messages": [
+    {
+      "content": [
+        {
+          "prompt_cache_breakpoint": {
+            "mode": "explicit"
+          },
+          "text": "Stable prefix.",
+          "type": "text"
+        },
+        {
+          "text": "Second block.",
+          "type": "text"
+        }
+      ],
+      "role": "system"
+    },
+    {
+      "content": "You are terse.\nAnswer in English.",
+      "role": "system"
+    },
+    {
+      "content": "plain user",
+      "role": "user"
+    },
+    {
+      "content": "joined text",
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "prompt_cache_breakpoint": {
+            "mode": "explicit"
+          },
+          "text": "Describe.",
+          "type": "text"
+        },
+        {
+          "image_url": {
+            "url": "data:image/png;base64,cG5nLWJ5dGVz"
+          },
+          "prompt_cache_breakpoint": {
+            "mode": "explicit"
+          },
+          "type": "image_url"
+        },
+        {
+          "image_url": {
+            "url": "https://example.test/a.jpg"
+          },
+          "type": "image_url"
+        },
+        {
+          "file": {
+            "file_data": "data:application/pdf;base64,JVBERi0xLjc=",
+            "filename": "report.pdf"
+          },
+          "type": "file"
+        },
+        {
+          "file": {
+            "file_data": "data:application/pdf;base64,JVBERi0xLjQ=",
+            "filename": "document.pdf"
+          },
+          "type": "file"
+        },
+        {
+          "image_url": {
+            "url": "data:image/png;base64,dGV4dC1zb3VyY2U="
+          },
+          "type": "image_url"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": "Let me check.Trailing text.",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"q\": \"x\"}",
+            "name": "lookup"
+          },
+          "id": "call_a",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"dir\":\"/tmp\"}",
+            "name": "list_files"
+          },
+          "id": "call_b",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "found",
+      "role": "tool",
+      "tool_call_id": "call_a"
+    },
+    {
+      "content": "[\"a.txt\",\"b.txt\"]",
+      "role": "tool",
+      "tool_call_id": "call_b"
+    },
+    {
+      "content": null,
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"q\":\"call_a\"}",
+            "name": "lookup"
+          },
+          "id": "call_a",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"q\":\"call_b\"}",
+            "name": "lookup"
+          },
+          "id": "call_b",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"q\":\"call_c\"}",
+            "name": "lookup"
+          },
+          "id": "call_c",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"q\":\"call_d\"}",
+            "name": "lookup"
+          },
+          "id": "call_d",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"q\":\"call_e\"}",
+            "name": "lookup"
+          },
+          "id": "call_e",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"q\":\"call_f\"}",
+            "name": "lookup"
+          },
+          "id": "call_f",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "plain \"quoted\"\nresult",
+      "role": "tool",
+      "tool_call_id": "call_a"
+    },
+    {
+      "content": "boom: not found",
+      "role": "tool",
+      "tool_call_id": "call_b"
+    },
+    {
+      "content": "{\"nested\":{\"ok\":true,\"s\":\"é\"},\"rows\":[1,2,3]}",
+      "role": "tool",
+      "tool_call_id": "call_c"
+    },
+    {
+      "content": "user declined",
+      "role": "tool",
+      "tool_call_id": "call_d"
+    },
+    {
+      "content": "",
+      "role": "tool",
+      "tool_call_id": "call_e"
+    },
+    {
+      "content": "[{\"type\":\"text\",\"value\":\"caption\"},{\"type\":\"json\",\"value\":{\"answer\":42}}]",
+      "role": "tool",
+      "tool_call_id": "call_f"
+    },
+    {
+      "content": null,
+      "refusal": "I can't.",
+      "role": "assistant"
+    },
+    {
+      "content": "thanks",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini",
+  "reasoning_effort": "minimal",
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "tool_choice": "required",
+  "tools": [
+    {
+      "function": {
+        "description": "Looks a key up",
+        "name": "lookup",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "q": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "q"
+          ],
+          "type": "object"
+        },
+        "strict": true
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "",
+        "name": "list_files",
+        "parameters": {
+          "properties": {},
+          "type": "object"
+        },
+        "strict": false
+      },
+      "type": "function"
+    }
+  ]
+}

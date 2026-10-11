@@ -1,0 +1,16 @@
+{
+  "messages": [
+    {
+      "content": "any json",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini",
+  "response_format": {
+    "type": "json_object"
+  },
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "input": [
+    {
+      "content": [
+        {
+          "prompt_cache_breakpoint": {
+            "mode": "explicit"
+          },
+          "text": "retained",
+          "type": "input_text"
+        },
+        {
+          "detail": "original",
+          "image_url": "https://example.test/image.png",
+          "prompt_cache_breakpoint": {
+            "mode": "explicit"
+          },
+          "type": "input_image"
+        },
+        {
+          "detail": "high",
+          "file_url": "https://example.test/document.pdf",
+          "filename": "document.pdf",
+          "prompt_cache_breakpoint": {
+            "mode": "explicit"
+          },
+          "type": "input_file"
+        }
+      ],
+      "id": "msg_retained_1",
+      "role": "user",
+      "status": "completed",
+      "type": "message"
+    },
+    {
+      "created_by": "openai",
+      "encrypted_content": "opaque-compacted-state",
+      "id": "cmp_item_1",
+      "type": "compaction"
+    },
+    {
+      "content": [
+        {
+          "text": "continue",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "gpt-5-mini",
+  "store": false,
+  "stream": true
+}

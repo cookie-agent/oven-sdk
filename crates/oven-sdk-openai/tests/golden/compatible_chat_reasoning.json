@@ -1,0 +1,214 @@
+{
+  "max_tokens": 2048,
+  "messages": [
+    {
+      "content": "You are terse.\nAnswer in English.",
+      "role": "system"
+    },
+    {
+      "content": "go",
+      "role": "user"
+    },
+    {
+      "content": "Calling.",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{}",
+            "name": "lookup"
+          },
+          "id": "call_1",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "tool says hi",
+      "role": "tool",
+      "tool_call_id": "call_1"
+    },
+    {
+      "content": "no reasoning here",
+      "role": "assistant"
+    },
+    {
+      "content": "Let me check.Trailing text.",
+      "reasoning": "visible thought",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"q\": \"x\"}",
+            "name": "lookup"
+          },
+          "id": "call_a",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"dir\":\"/tmp\"}",
+            "name": "list_files"
+          },
+          "id": "call_b",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "found",
+      "role": "tool",
+      "tool_call_id": "call_a"
+    },
+    {
+      "content": "[\"a.txt\",\"b.txt\"]",
+      "role": "tool",
+      "tool_call_id": "call_b"
+    },
+    {
+      "content": null,
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"q\":\"call_a\"}",
+            "name": "lookup"
+          },
+          "id": "call_a",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"q\":\"call_b\"}",
+            "name": "lookup"
+          },
+          "id": "call_b",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"q\":\"call_c\"}",
+            "name": "lookup"
+          },
+          "id": "call_c",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"q\":\"call_d\"}",
+            "name": "lookup"
+          },
+          "id": "call_d",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"q\":\"call_e\"}",
+            "name": "lookup"
+          },
+          "id": "call_e",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"q\":\"call_f\"}",
+            "name": "lookup"
+          },
+          "id": "call_f",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "plain \"quoted\"\nresult",
+      "role": "tool",
+      "tool_call_id": "call_a"
+    },
+    {
+      "content": "boom: not found",
+      "role": "tool",
+      "tool_call_id": "call_b"
+    },
+    {
+      "content": "{\"nested\":{\"ok\":true,\"s\":\"é\"},\"rows\":[1,2,3]}",
+      "role": "tool",
+      "tool_call_id": "call_c"
+    },
+    {
+      "content": "user declined",
+      "role": "tool",
+      "tool_call_id": "call_d"
+    },
+    {
+      "content": "",
+      "role": "tool",
+      "tool_call_id": "call_e"
+    },
+    {
+      "content": "[{\"type\":\"text\",\"value\":\"caption\"},{\"type\":\"json\",\"value\":{\"answer\":42}}]",
+      "role": "tool",
+      "tool_call_id": "call_f"
+    },
+    {
+      "content": [
+        {
+          "text": "watch",
+          "type": "text"
+        },
+        {
+          "type": "video_url",
+          "video_url": {
+            "url": "data:video/mp4;base64,bXA0"
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "fixture-model",
+  "seed": 7,
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "temperature": 0.25,
+  "thinking": {
+    "type": "enabled"
+  },
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "function": {
+        "description": "Looks a key up",
+        "name": "lookup",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "q": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "q"
+          ],
+          "type": "object"
+        },
+        "strict": true
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "",
+        "name": "list_files",
+        "parameters": {
+          "properties": {},
+          "type": "object"
+        },
+        "strict": false
+      },
+      "type": "function"
+    }
+  ],
+  "top_p": 0.5
+}
