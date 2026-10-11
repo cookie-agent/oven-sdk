@@ -74,7 +74,10 @@ pub struct SseEvent {
 
 /// Incremental SSE framer supporting arbitrary byte boundaries and standard line endings.
 pub struct SseParser {
+    /// Carried bytes of an unterminated line; never contains `\n` or `\r`.
     bytes: Vec<u8>,
+    /// The previous chunk ended in `\r`, so a leading `\n` completes that CRLF.
+    skip_lf: bool,
     name: String,
     data: String,
     saw_data: bool,
@@ -95,6 +98,7 @@ impl SseParser {
     pub const fn new(invalid_utf8_message: &'static str) -> Self {
         Self {
             bytes: Vec::new(),
+            skip_lf: false,
             name: String::new(),
             data: String::new(),
             saw_data: false,
@@ -123,35 +127,40 @@ impl SseParser {
     where
         C: Extend<SseEvent>,
     {
-        let mut bytes = std::mem::take(&mut self.bytes);
-        bytes.extend_from_slice(chunk);
-        let mut start = 0;
-        let mut index = 0;
-        while index < bytes.len() {
-            if bytes[index] == b'\n' || bytes[index] == b'\r' {
-                if bytes[index] == b'\r' && index + 1 == bytes.len() {
-                    break;
-                }
-                let end = index;
-                if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
-                    index += 1;
-                }
-                self.line(&bytes[start..end], events)?;
-                start = index + 1;
-            }
-            index += 1;
+        let mut position = 0;
+        if std::mem::take(&mut self.skip_lf) && chunk.first() == Some(&b'\n') {
+            position = 1;
         }
-        bytes.drain(..start);
-        self.bytes = bytes;
+        // Each byte is scanned exactly once: completed lines are parsed straight
+        // from the chunk, and only an unterminated tail is carried over.
+        while let Some(offset) = memchr::memchr2(b'\n', b'\r', &chunk[position..]) {
+            let end = position + offset;
+            if self.bytes.is_empty() {
+                self.line(&chunk[position..end], events)?;
+            } else {
+                let mut line = std::mem::take(&mut self.bytes);
+                line.extend_from_slice(&chunk[position..end]);
+                self.line(&line, events)?;
+                line.clear();
+                self.bytes = line;
+            }
+            position = end + 1;
+            if chunk[end] == b'\r' {
+                match chunk.get(position) {
+                    Some(b'\n') => position += 1,
+                    Some(_) => {}
+                    None => self.skip_lf = true,
+                }
+            }
+        }
+        self.bytes.extend_from_slice(&chunk[position..]);
         Ok(())
     }
 
     /// Flushes a final unterminated line and pending event.
     pub fn finish(&mut self) -> Result<Vec<SseEvent>, ModelError> {
         let mut events = Vec::new();
-        if self.bytes.last() == Some(&b'\r') {
-            self.bytes.pop();
-        }
+        self.skip_lf = false;
         if !self.bytes.is_empty() {
             let line = std::mem::take(&mut self.bytes);
             self.line(&line, &mut events)?;
@@ -263,6 +272,93 @@ mod tests {
                 data: "\nx".into(),
             }]
         );
+    }
+
+    /// Frames a complete body in one pass, splitting lines on CRLF, CR, or LF.
+    fn reference_events(input: &[u8]) -> Vec<super::SseEvent> {
+        let mut parser = SseParser::default();
+        let text = std::str::from_utf8(input).unwrap();
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut events = parser.feed(normalized.as_bytes()).unwrap();
+        events.extend(parser.finish().unwrap());
+        events
+    }
+
+    fn feed_split(input: &[u8], boundaries: &[usize]) -> Vec<super::SseEvent> {
+        let mut parser = SseParser::default();
+        let mut events = Vec::new();
+        let mut start = 0;
+        for &boundary in boundaries.iter().chain([&input.len()]) {
+            events.extend(parser.feed(&input[start..boundary]).unwrap());
+            start = boundary;
+        }
+        events.extend(parser.finish().unwrap());
+        events
+    }
+
+    const FRAMING_FIXTURES: &[&str] = &[
+        "\u{feff}event: start\r\ndata: {\"a\":1}\r\n\r\n: keepalive\r\ndata: hé\r\ndata: second\r\n\r\n",
+        "event: delta\rdata: one\rdata:\rdata: three\r\revent: tail\ndata: x\n\n",
+        "data: mixed\r\n\ndata: lf\n\r\ndata: cr\r\r\ndata: unterminated",
+        "data: trailing-cr\r",
+        "data: a\n\r\n\r\r\n\ndata: b\n\n",
+    ];
+
+    #[test]
+    fn every_two_chunk_boundary_matches_single_chunk_framing() {
+        for fixture in FRAMING_FIXTURES {
+            let input = fixture.as_bytes();
+            let expected = reference_events(input);
+            assert!(!expected.is_empty());
+            for boundary in 0..=input.len() {
+                assert_eq!(
+                    feed_split(input, &[boundary]),
+                    expected,
+                    "fixture {fixture:?} split at byte {boundary}"
+                );
+            }
+            let every_byte: Vec<usize> = (1..input.len()).collect();
+            assert_eq!(feed_split(input, &every_byte), expected, "{fixture:?}");
+        }
+    }
+
+    #[test]
+    fn crlf_split_between_chunks_is_one_line_ending() {
+        let mut parser = SseParser::default();
+        let mut events = parser.feed(b"data: x\r").unwrap();
+        events.extend(parser.feed(b"\n\r").unwrap());
+        events.extend(parser.feed(b"\ndata: y\n\n").unwrap());
+        assert_eq!(
+            events,
+            [
+                super::SseEvent {
+                    name: String::new(),
+                    data: "x".into(),
+                },
+                super::SseEvent {
+                    name: String::new(),
+                    data: "y".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn long_single_line_event_survives_small_chunks() {
+        let payload = "é".repeat(300_000);
+        let input = format!("event: big\ndata: {payload}\r\n\r\n");
+        let boundaries: Vec<usize> = (1..input.len()).step_by(1023).collect();
+        let events = feed_split(input.as_bytes(), &boundaries);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "big");
+        assert_eq!(events[0].data, payload);
+    }
+
+    #[test]
+    fn invalid_utf8_split_across_chunks_is_rejected() {
+        let mut parser = SseParser::default();
+        assert!(parser.feed(b"data: \xc3").unwrap().is_empty());
+        assert!(parser.feed(b"(\n\n").is_err());
     }
 
     #[test]

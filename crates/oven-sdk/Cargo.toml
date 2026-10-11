@@ -19,6 +19,7 @@ bytes.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 http.workspace = true
+memchr.workspace = true
 httpdate.workspace = true
 serde.workspace = true
 serde_json.workspace = true

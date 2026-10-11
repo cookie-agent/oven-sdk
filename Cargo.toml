@@ -39,3 +39,4 @@ time = { version = "0.3.41", features = ["formatting", "macros"] }
 tokio = { version = "1", features = ["macros", "time", "sync"] }
 gcp_auth = { version = "0.12.7", default-features = false, features = ["ring"] }
 crc32fast = "1"
+memchr = "2"
