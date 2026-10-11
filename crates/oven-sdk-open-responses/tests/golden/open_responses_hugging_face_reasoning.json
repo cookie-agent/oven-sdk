@@ -1,0 +1,74 @@
+{
+  "include": [],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "think",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "raw thinking",
+          "type": "reasoning_text"
+        }
+      ],
+      "status": "completed",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "content": [],
+      "status": "completed",
+      "summary": [
+        {
+          "text": "summarized",
+          "type": "reasoning_summary"
+        }
+      ],
+      "type": "reasoning"
+    },
+    {
+      "content": null,
+      "encrypted_content": null,
+      "status": "completed",
+      "summary": [
+        {
+          "text": "default kind",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
+          "annotations": [],
+          "text": "Answer.",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "more",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "org/model",
+  "store": false,
+  "stream": true
+}

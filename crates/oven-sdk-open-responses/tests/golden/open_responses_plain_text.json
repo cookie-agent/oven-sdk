@@ -1,0 +1,18 @@
+{
+  "include": [],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "hello",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "opaque",
+  "store": false,
+  "stream": true
+}

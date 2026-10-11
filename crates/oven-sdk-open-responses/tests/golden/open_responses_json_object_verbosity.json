@@ -1,0 +1,24 @@
+{
+  "include": [],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "format",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "opaque",
+  "store": false,
+  "stream": true,
+  "text": {
+    "format": {
+      "type": "json_object"
+    },
+    "verbosity": "low"
+  }
+}

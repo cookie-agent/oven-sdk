@@ -1,0 +1,49 @@
+{
+  "include": [],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "hi",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "annotations": [
+            {
+              "end_index": 2,
+              "start_index": 0,
+              "title": "Source",
+              "type": "url_citation",
+              "url": "https://example.com/source"
+            }
+          ],
+          "text": "ok",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_1",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "again",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "opaque",
+  "store": false,
+  "stream": true
+}

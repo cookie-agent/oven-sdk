@@ -1,0 +1,54 @@
+{
+  "include": [],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "summary only",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "opaque",
+  "parallel_tool_calls": true,
+  "reasoning": {
+    "summary": "concise"
+  },
+  "store": false,
+  "stream": true,
+  "tool_choice": "required",
+  "tools": [
+    {
+      "description": "Looks a key up",
+      "name": "lookup",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "q": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
+      "description": "",
+      "name": "list_files",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    }
+  ]
+}

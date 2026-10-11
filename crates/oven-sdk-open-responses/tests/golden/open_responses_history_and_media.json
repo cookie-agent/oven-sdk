@@ -1,0 +1,276 @@
+{
+  "include": [],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "You are terse.",
+          "type": "input_text"
+        }
+      ],
+      "role": "system",
+      "type": "message"
+    },
+    {
+      "id": "p_1",
+      "payload": {
+        "n": 1
+      },
+      "status": "completed",
+      "type": "acme:policy"
+    },
+    {
+      "content": [
+        {
+          "text": "Answer in English.",
+          "type": "input_text"
+        }
+      ],
+      "role": "system",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "Describe these.",
+          "type": "input_text"
+        },
+        {
+          "detail": "auto",
+          "image_url": "data:image/png;base64,cG5nLWJ5dGVz",
+          "type": "input_image"
+        },
+        {
+          "detail": "auto",
+          "image_url": "https://example.test/a.jpg",
+          "type": "input_image"
+        },
+        {
+          "file_data": "data:application/pdf;base64,JVBERg==",
+          "filename": "report.pdf",
+          "type": "input_file"
+        },
+        {
+          "file_data": "data:application/pdf;base64,JVBERi0y",
+          "filename": "file",
+          "type": "input_file"
+        },
+        {
+          "file_url": "https://example.test/doc.pdf",
+          "type": "input_file"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "id": "n_1",
+      "payload": {
+        "n": 1
+      },
+      "status": "completed",
+      "type": "acme:note"
+    },
+    {
+      "content": [
+        {
+          "text": "Thanks.",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "content": null,
+      "encrypted_content": null,
+      "status": "completed",
+      "summary": [
+        {
+          "text": "plan",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
+          "annotations": [
+            {
+              "end_index": 5,
+              "start_index": 0,
+              "title": "Doc",
+              "type": "url_citation",
+              "url": "https://example.com/doc"
+            }
+          ],
+          "text": "Checking the docs.",
+          "type": "output_text"
+        }
+      ],
+      "phase": "commentary",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "annotations": [],
+          "text": "Plain.",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    {
+      "id": "w_1",
+      "payload": {
+        "n": 1
+      },
+      "status": "completed",
+      "type": "acme:widget"
+    },
+    {
+      "content": [
+        {
+          "refusal": "I can't.",
+          "type": "refusal"
+        }
+      ],
+      "phase": "final_answer",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    },
+    {
+      "arguments": "{\"q\": \"x\"}",
+      "call_id": "call_a",
+      "name": "lookup",
+      "status": "completed",
+      "type": "function_call"
+    },
+    {
+      "arguments": "{}",
+      "call_id": "call_b",
+      "id": "fc_b",
+      "name": "list_files",
+      "status": "completed",
+      "type": "function_call"
+    },
+    {
+      "call_id": "call_a",
+      "output": "found \"x\"",
+      "status": "completed",
+      "type": "function_call_output"
+    },
+    {
+      "call_id": "call_b",
+      "output": [
+        {
+          "text": "files",
+          "type": "input_text"
+        },
+        {
+          "text": "[\"a\",\"b\"]",
+          "type": "input_text"
+        },
+        {
+          "detail": "auto",
+          "image_url": "data:image/png;base64,cG5n",
+          "type": "input_image"
+        }
+      ],
+      "status": "completed",
+      "type": "function_call_output"
+    },
+    {
+      "arguments": "{\"q\":\"y\"}",
+      "call_id": "call_c",
+      "name": "lookup",
+      "status": "completed",
+      "type": "function_call"
+    },
+    {
+      "arguments": "{\"q\":\"z\"}",
+      "call_id": "call_d",
+      "name": "lookup",
+      "status": "completed",
+      "type": "function_call"
+    },
+    {
+      "arguments": "{\"q\":\"w\"}",
+      "call_id": "call_e",
+      "name": "lookup",
+      "status": "completed",
+      "type": "function_call"
+    },
+    {
+      "call_id": "call_c",
+      "output": "{\"ok\":true,\"s\":\"é\"}",
+      "status": "completed",
+      "type": "function_call_output"
+    },
+    {
+      "call_id": "call_d",
+      "output": "user declined",
+      "status": "completed",
+      "type": "function_call_output"
+    },
+    {
+      "call_id": "call_e",
+      "output": "Tool call execution denied.",
+      "status": "completed",
+      "type": "function_call_output"
+    },
+    {
+      "content": [
+        {
+          "text": "continue",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "opaque",
+  "parallel_tool_calls": true,
+  "store": false,
+  "stream": true,
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "description": "Looks a key up",
+      "name": "lookup",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "q": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
+      "description": "",
+      "name": "list_files",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    }
+  ]
+}

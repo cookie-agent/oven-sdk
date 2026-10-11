@@ -1,0 +1,76 @@
+{
+  "include": [
+    "message.output_text.logprobs"
+  ],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "look up x",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "instructions": "Be brief.",
+  "max_output_tokens": 512,
+  "max_tool_calls": 3,
+  "metadata": {
+    "run": "7",
+    "tenant": "a"
+  },
+  "model": "opaque",
+  "parallel_tool_calls": true,
+  "prompt_cache_key": "cache-key",
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
+  "safety_identifier": "user-1",
+  "service_tier": "default",
+  "store": false,
+  "stream": true,
+  "temperature": 0.25,
+  "text": {
+    "verbosity": "low"
+  },
+  "tool_choice": {
+    "name": "lookup",
+    "type": "function"
+  },
+  "tools": [
+    {
+      "description": "Looks a key up",
+      "name": "lookup",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "q": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
+      "description": "",
+      "name": "list_files",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    }
+  ],
+  "top_p": 0.5,
+  "truncation": "auto"
+}

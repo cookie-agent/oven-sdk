@@ -1,0 +1,37 @@
+{
+  "include": [],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "format",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "opaque",
+  "store": false,
+  "stream": true,
+  "text": {
+    "format": {
+      "name": "response",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "answer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "answer"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "json_schema"
+    }
+  }
+}
