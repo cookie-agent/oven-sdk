@@ -35,6 +35,8 @@ pub const OPEN_RESPONSES_ADAPTER_ID: &str = "open.responses.http_sse";
 pub const HUGGING_FACE_PROVIDER_ID: &str = "huggingface";
 
 const NATIVE_CONTEXT_SCOPE_VERSION: &str = "open.responses.native_context_scope.v2";
+mod body;
+
 const REPLAY_FORMAT: &str = "open.responses.items.v2";
 const REPLAY_FINGERPRINT_KIND: &str = "open.responses.replay_fingerprint";
 const MAX_ITEMS: usize = 128;
@@ -346,7 +348,8 @@ impl LanguageModel for OpenResponsesModel {
                 .client
                 .post(self.config.endpoint.clone())
                 .headers(headers)
-                .json(&encoded.body)
+                .header(CONTENT_TYPE, "application/json")
+                .body(encoded.body)
                 .send();
             let response = tokio::select! {value=tokio::time::timeout(self.config.settings.timeouts.headers,send)=>value.map_err(|_|ModelError::timeout("Open Responses headers timed out").with_stage(ErrorStage::ResponseHeaders))?.map_err(|_|ModelError::transport("Open Responses request failed").with_stage(ErrorStage::Connect))?,_=abort.aborted()=>return Err(ModelError::abort("request was aborted before response headers").with_stage(ErrorStage::Connect))};
             let head = response_head(&response);
@@ -442,7 +445,8 @@ impl LanguageModel for OpenResponsesModel {
 }
 
 struct Encoded {
-    body: JsonValue,
+    /// Serialized JSON request body.
+    body: Vec<u8>,
     replay: ReplayOutcome,
     warnings: Vec<String>,
 }
@@ -542,7 +546,7 @@ fn validate_request(
                         "Open Responses assistant history does not support message provider options",
                     ));
                 }
-                normalized_assistant(&turn.message.content, &settings.transport)?;
+                normalized_assistant(&turn.message.content, &settings.transport, &mut Vec::new())?;
             }
             HistoryTurn::System(_) => {}
         }
@@ -655,10 +659,10 @@ fn encode_request(
     for (history_index, turn) in request.history.iter().enumerate() {
         match turn {
             HistoryTurn::System(message) => {
-                input.extend(encode_system_message(message)?);
+                encode_system_message(message, &mut input)?;
             }
             HistoryTurn::User(message) => {
-                input.extend(encode_user_message(message)?);
+                encode_user_message(message, &mut input)?;
             }
             HistoryTurn::Tool(message) => {
                 for result in &message.results {
@@ -671,10 +675,7 @@ fn encode_request(
                         history_index,
                         disposition: ReplayDisposition::ReconstructedNormalized,
                     });
-                    input.extend(normalized_assistant(
-                        &turn.message.content,
-                        &settings.transport,
-                    )?);
+                    normalized_assistant(&turn.message.content, &settings.transport, &mut input)?;
                     continue;
                 }
                 let replayed = match &turn.finish.native_replay {
@@ -707,125 +708,151 @@ fn encode_request(
                     },
                 };
                 if let Some(items) = replayed {
-                    input.extend(items.into_iter().cloned())
+                    input.extend(items.into_iter().map(body::Item::Native));
                 } else {
                     replay.decisions.push(ReplayDecision {
                         history_index,
                         disposition: ReplayDisposition::ReconstructedNormalized,
                     });
-                    input.extend(normalized_assistant(
-                        &turn.message.content,
-                        &settings.transport,
-                    )?);
+                    normalized_assistant(&turn.message.content, &settings.transport, &mut input)?;
                 }
             }
         }
     }
-    let mut include = settings.include.clone();
-    if descriptor.capabilities.replay.reasoning
-        && !include
-            .iter()
-            .any(|value| value == "reasoning.encrypted_content")
+    let mut size_hint = input.iter().map(body::Item::size_hint).sum::<usize>();
+    let mut include = settings
+        .include
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if descriptor.capabilities.replay.reasoning && !include.contains(&"reasoning.encrypted_content")
     {
-        include.push("reasoning.encrypted_content".into());
+        include.push("reasoning.encrypted_content");
     }
-    let mut body = serde_json::json!({"model":descriptor.identity.model_id.as_str(),"input":input,"stream":true,"store":settings.store,"include":include});
-    if let Some(value) = request.inference.max_output_tokens {
-        body["max_output_tokens"] = value.into();
-    }
-    if let Some(value) = request.inference.temperature {
-        body["temperature"] = value.into();
-    }
-    if let Some(value) = request.inference.top_p {
-        body["top_p"] = value.into();
-    }
-    if let Some(effort) = &request.inference.reasoning_effort {
-        let mut reasoning = serde_json::json!({"effort":effort});
-        if let Some(summary) = &settings.reasoning_summary {
-            reasoning["summary"] = summary.clone().into();
-        }
-        body["reasoning"] = reasoning;
-    } else if let Some(summary) = &settings.reasoning_summary {
-        body["reasoning"] = serde_json::json!({"summary":summary});
-    }
-    if let Some(value) = &options.instructions {
-        body["instructions"] = value.clone().into();
-    }
-    if !options.metadata.is_empty() {
-        body["metadata"] = serde_json::to_value(&options.metadata).expect("metadata serializes");
-    }
-    if let Some(value) = &options.service_tier {
-        body["service_tier"] = value.clone().into();
-    }
-    if let Some(value) = &options.truncation {
-        body["truncation"] = value.clone().into();
-    }
-    if let Some(value) = options.max_tool_calls {
-        body["max_tool_calls"] = value.into();
-    }
-    if let Some(value) = &options.safety_identifier {
-        body["safety_identifier"] = value.clone().into();
-    }
-    if let Some(value) = &options.prompt_cache_key {
-        body["prompt_cache_key"] = value.clone().into();
-    }
-    if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {
-        body["tools"]=JsonValue::Array(request.tools.iter().map(|tool|serde_json::json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.input_schema.as_value(),"strict":settings.strict_tools})).collect());
-        body["parallel_tool_calls"] = settings.parallel_tool_calls.into();
-        body["tool_choice"] = match &request.tool_choice {
-            ToolChoice::Auto => "auto".into(),
-            ToolChoice::Required => "required".into(),
-            ToolChoice::None => "none".into(),
-            ToolChoice::Tool(name) => serde_json::json!({"type":"function","name":name}),
-        };
-    }
-    match &request.response_format {
-        ResponseFormat::Text => {
-            if let Some(verbosity) = &options.text_verbosity {
-                body["text"] = serde_json::json!({"verbosity":verbosity});
-            }
-        }
-        ResponseFormat::Json { schema: None } => {
-            body["text"] = serde_json::json!({"format":{"type":"json_object"}});
-            if let Some(verbosity) = &options.text_verbosity {
-                body["text"]["verbosity"] = verbosity.clone().into();
-            }
-        }
+    let reasoning = (request.inference.reasoning_effort.is_some()
+        || settings.reasoning_summary.is_some())
+    .then_some(body::Reasoning {
+        effort: request.inference.reasoning_effort.as_deref(),
+        summary: settings.reasoning_summary.as_deref(),
+    });
+    let tools_enabled =
+        !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None);
+    let tools = tools_enabled.then(|| {
+        request
+            .tools
+            .iter()
+            .map(|tool| body::FunctionTool {
+                kind: "function",
+                name: &tool.name,
+                description: &tool.description,
+                parameters: tool.input_schema.as_value(),
+                strict: settings.strict_tools,
+            })
+            .collect::<Vec<_>>()
+    });
+    size_hint += tools.as_ref().map_or(0, |tools| {
+        tools
+            .iter()
+            .map(|tool| {
+                tool.name.len()
+                    + tool.description.len()
+                    + body::json_size_hint(tool.parameters)
+                    + 64
+            })
+            .sum()
+    });
+    let tool_choice = tools_enabled.then_some(match &request.tool_choice {
+        ToolChoice::Auto => body::ToolChoice::Mode("auto"),
+        ToolChoice::Required => body::ToolChoice::Mode("required"),
+        ToolChoice::None => body::ToolChoice::Mode("none"),
+        ToolChoice::Tool(name) => body::ToolChoice::Function {
+            kind: "function",
+            name,
+        },
+    });
+    let format = match &request.response_format {
+        ResponseFormat::Text => None,
+        ResponseFormat::Json { schema: None } => Some(body::TextFormat::JsonObject),
         ResponseFormat::Json {
             schema: Some(schema),
-        } => {
-            body["text"] = serde_json::json!({"format":{"type":"json_schema","name":"response","strict":settings.strict_json_schema,"schema":schema.as_value()}});
-            if let Some(verbosity) = &options.text_verbosity {
-                body["text"]["verbosity"] = verbosity.clone().into();
-            }
-        }
-    }
+        } => Some(body::TextFormat::JsonSchema {
+            name: "response",
+            strict: settings.strict_json_schema,
+            schema: schema.as_value(),
+        }),
+    };
+    let verbosity = options.text_verbosity.as_deref();
+    let body = body::Body {
+        model: descriptor.identity.model_id.as_str(),
+        input,
+        stream: true,
+        store: settings.store,
+        include,
+        max_output_tokens: request.inference.max_output_tokens,
+        temperature: request.inference.temperature,
+        top_p: request.inference.top_p,
+        reasoning,
+        instructions: options.instructions.as_deref(),
+        metadata: (!options.metadata.is_empty()).then_some(&options.metadata),
+        service_tier: options.service_tier.as_deref(),
+        truncation: options.truncation.as_deref(),
+        max_tool_calls: options.max_tool_calls,
+        safety_identifier: options.safety_identifier.as_deref(),
+        prompt_cache_key: options.prompt_cache_key.as_deref(),
+        tools,
+        parallel_tool_calls: tools_enabled.then_some(settings.parallel_tool_calls),
+        tool_choice,
+        text: (format.is_some() || verbosity.is_some())
+            .then_some(body::TextConfig { format, verbosity }),
+    };
+    // The hint ignores JSON escaping; leave headroom so the buffer is not
+    // reallocated (and copied) near the end of serialization.
+    let mut bytes = Vec::with_capacity(size_hint + size_hint / 8 + 256);
+    serde_json::to_writer(&mut bytes, &body).map_err(|_| {
+        ModelError::invalid_request("could not encode Open Responses request")
+            .with_stage(ErrorStage::RequestEncoding)
+    })?;
     Ok(Encoded {
-        body,
+        body: bytes,
         replay,
         warnings,
     })
 }
 
-fn input_file(file: &FilePart) -> Result<JsonValue, ModelError> {
+fn input_file(file: &FilePart) -> Result<body::Content<'_>, ModelError> {
     validate_media_file(file)?;
     let image = file.media_type.starts_with("image/");
     match &file.source {
         FileSource::Bytes(bytes) => {
-            let data = format!("data:{};base64,{}", file.media_type, STANDARD.encode(bytes));
+            let data = body::FileRef::Data {
+                media_type: &file.media_type,
+                data: bytes,
+            };
             if image {
-                Ok(serde_json::json!({"type":"input_image","image_url":data,"detail":"auto"}))
+                Ok(body::Content::InputImage {
+                    image_url: data,
+                    detail: "auto",
+                })
             } else {
-                Ok(
-                    serde_json::json!({"type":"input_file","filename":file.filename.clone().unwrap_or_else(||"file".into()),"file_data":data}),
-                )
+                Ok(body::Content::InputFile {
+                    filename: Some(file.filename.as_deref().unwrap_or("file")),
+                    file_data: Some(data),
+                    file_url: None,
+                })
             }
         }
         FileSource::Url(url) if matches!(url.scheme(), "http" | "https") => {
             if image {
-                Ok(serde_json::json!({"type":"input_image","image_url":url,"detail":"auto"}))
+                Ok(body::Content::InputImage {
+                    image_url: body::FileRef::Url(url.as_str()),
+                    detail: "auto",
+                })
             } else {
-                Ok(serde_json::json!({"type":"input_file","file_url":url}))
+                Ok(body::Content::InputFile {
+                    filename: None,
+                    file_data: None,
+                    file_url: Some(url.as_str()),
+                })
             }
         }
         FileSource::Url(_) => Err(ModelError::unsupported(
@@ -840,81 +867,97 @@ fn input_file(file: &FilePart) -> Result<JsonValue, ModelError> {
     }
 }
 
-fn function_output(result: &ToolResultPart) -> Result<JsonValue, ModelError> {
+fn function_output(result: &ToolResultPart) -> Result<body::Item<'_>, ModelError> {
     validate_tool_result(result)?;
     let output = match &result.content {
-        ToolContent::Text(value) => JsonValue::String(value.clone()),
-        ToolContent::Json(value) => JsonValue::String(value.to_string()),
-        ToolContent::Mixed(values) => JsonValue::Array(
+        ToolContent::Text(value) => body::Output::Text(body::Text::Borrowed(value)),
+        ToolContent::Json(value) => body::Output::Text(body::Text::Json(value)),
+        ToolContent::Mixed(values) => body::Output::Parts(
             values
                 .iter()
                 .map(|value| match value {
-                    ContentValue::Text(value) => {
-                        Ok(serde_json::json!({"type":"input_text","text":value}))
-                    }
-                    ContentValue::Json(value) => {
-                        Ok(serde_json::json!({"type":"input_text","text":value.to_string()}))
-                    }
+                    ContentValue::Text(value) => Ok(body::Content::InputText {
+                        text: body::Text::Borrowed(value),
+                    }),
+                    ContentValue::Json(value) => Ok(body::Content::InputText {
+                        text: body::Text::Json(value),
+                    }),
                     ContentValue::File(file) => input_file(file),
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        ToolContent::Denied { reason } => reason
-            .clone()
-            .unwrap_or_else(|| "Tool call execution denied.".into())
-            .into(),
+        ToolContent::Denied { reason } => body::Output::Text(body::Text::Borrowed(
+            reason.as_deref().unwrap_or("Tool call execution denied."),
+        )),
     };
-    Ok(
-        serde_json::json!({"type":"function_call_output","call_id":result.tool_call_id,"output":output,"status":"completed"}),
-    )
+    Ok(body::Item::Typed(body::TypedItem::FunctionCallOutput {
+        call_id: &result.tool_call_id,
+        output,
+        status: "completed",
+    }))
 }
 
-fn encode_system_message(message: &oven_sdk::SystemMessage) -> Result<Vec<JsonValue>, ModelError> {
-    let mut output = Vec::new();
+fn encode_system_message<'a>(
+    message: &'a oven_sdk::SystemMessage,
+    output: &mut Vec<body::Item<'a>>,
+) -> Result<(), ModelError> {
     let mut content = Vec::new();
     for part in &message.content {
         match part {
             oven_sdk::SystemPart::Text(text) => {
-                content.push(serde_json::json!({"type":"input_text","text":text.text}));
+                content.push(body::Content::InputText {
+                    text: body::Text::Borrowed(&text.text),
+                });
             }
             oven_sdk::SystemPart::Custom(custom) => {
-                flush_message(&mut output, "system", &mut content);
+                flush_message(output, "system", &mut content);
                 output.push(custom_item(custom)?);
             }
         }
     }
-    flush_message(&mut output, "system", &mut content);
-    Ok(output)
+    flush_message(output, "system", &mut content);
+    Ok(())
 }
 
-fn encode_user_message(message: &oven_sdk::UserMessage) -> Result<Vec<JsonValue>, ModelError> {
-    let mut output = Vec::new();
+fn encode_user_message<'a>(
+    message: &'a oven_sdk::UserMessage,
+    output: &mut Vec<body::Item<'a>>,
+) -> Result<(), ModelError> {
     let mut content = Vec::new();
     for part in &message.content {
         match part {
             InputPart::Text(text) => {
-                content.push(serde_json::json!({"type":"input_text","text":text.text}));
+                content.push(body::Content::InputText {
+                    text: body::Text::Borrowed(&text.text),
+                });
             }
             InputPart::File(file) => content.push(input_file(file)?),
             InputPart::Custom(custom) => {
-                flush_message(&mut output, "user", &mut content);
+                flush_message(output, "user", &mut content);
                 output.push(custom_item(custom)?);
             }
         }
     }
-    flush_message(&mut output, "user", &mut content);
-    Ok(output)
+    flush_message(output, "user", &mut content);
+    Ok(())
 }
 
-fn flush_message(output: &mut Vec<JsonValue>, role: &str, content: &mut Vec<JsonValue>) {
+fn flush_message<'a>(
+    output: &mut Vec<body::Item<'a>>,
+    role: &'static str,
+    content: &mut Vec<body::Content<'a>>,
+) {
     if !content.is_empty() {
-        output.push(
-            serde_json::json!({"type":"message","role":role,"content":std::mem::take(content)}),
-        );
+        output.push(body::Item::Typed(body::TypedItem::Message {
+            role,
+            content: std::mem::take(content),
+            status: None,
+            phase: None,
+        }));
     }
 }
 
-fn custom_item(part: &CustomPart) -> Result<JsonValue, ModelError> {
+fn custom_item(part: &CustomPart) -> Result<body::Item<'_>, ModelError> {
     if !part.kind.contains(':') {
         return Err(ModelError::unsupported(
             "Open Responses custom history requires a provider-prefixed item type",
@@ -937,14 +980,30 @@ fn custom_item(part: &CustomPart) -> Result<JsonValue, ModelError> {
             "Open Responses custom history items require matching type, non-empty id, and terminal status",
         ));
     }
-    Ok(JsonValue::Object(item.clone()))
+    Ok(body::Item::Native(&part.data))
 }
 
-fn normalized_assistant(
-    parts: &[AssistantPart],
+fn normalized_assistant<'a>(
+    parts: &'a [AssistantPart],
     transport: &OpenResponsesTransport,
-) -> Result<Vec<JsonValue>, ModelError> {
-    let mut output = Vec::new();
+    output: &mut Vec<body::Item<'a>>,
+) -> Result<(), ModelError> {
+    let reasoning = |summary, content, encrypted_content| {
+        body::Item::Typed(body::TypedItem::Reasoning {
+            summary,
+            content,
+            encrypted_content,
+            status: "completed",
+        })
+    };
+    let assistant = |content, phase| {
+        body::Item::Typed(body::TypedItem::Message {
+            role: "assistant",
+            content: vec![content],
+            status: Some("completed"),
+            phase,
+        })
+    };
     let mut index = 0;
     while index < parts.len() {
         match &parts[index] {
@@ -955,58 +1014,63 @@ fn normalized_assistant(
                     annotations.push(source_annotation(source)?);
                     index += 1;
                 }
-                let mut item = serde_json::json!({
-                    "type":"message",
-                    "role":"assistant",
-                    "content":[{"type":"output_text","text":text.text,"annotations":annotations}],
-                    "status":"completed"
-                });
-                apply_phase(&mut item, text.metadata.as_ref())?;
-                output.push(item);
+                let phase = phase(text.metadata.as_ref())?;
+                output.push(assistant(
+                    body::Content::OutputText {
+                        text: &text.text,
+                        annotations,
+                    },
+                    phase,
+                ));
                 continue;
             }
             AssistantPart::ToolCall(call) => {
-                let mut item = serde_json::json!({"type":"function_call","call_id":call.id,"name":call.name,"arguments":call.raw_input.clone().unwrap_or_else(||call.input.to_string()),"status":"completed"});
-                if let Some(id) = &call.provider_item_id {
-                    item["id"] = id.clone().into();
-                }
-                output.push(item);
+                output.push(body::Item::Typed(body::TypedItem::FunctionCall {
+                    call_id: &call.id,
+                    name: &call.name,
+                    arguments: match &call.raw_input {
+                        Some(raw) => body::Text::Borrowed(raw),
+                        None => body::Text::Json(&call.input),
+                    },
+                    id: call.provider_item_id.as_deref(),
+                    status: "completed",
+                }));
             }
             AssistantPart::ToolResult(result) => output.push(function_output(result)?),
-            AssistantPart::Reasoning(reasoning) => {
-                let kind = reasoning
+            AssistantPart::Reasoning(part) => {
+                let kind = part
                     .metadata
                     .as_ref()
                     .and_then(|metadata| metadata.get("open_responses.kind"))
                     .and_then(JsonValue::as_str)
                     .unwrap_or("summary_text");
+                let text = |kind| body::TypedText {
+                    kind,
+                    text: &part.text,
+                };
                 match kind {
-                    "summary_text" => output.push(serde_json::json!({
-                        "type":"reasoning",
-                        "summary":[{"type":"summary_text","text":reasoning.text}],
-                        "content":null,
-                        "encrypted_content":null,
-                        "status":"completed"
-                    })),
+                    "summary_text" => output.push(reasoning(
+                        vec![text("summary_text")],
+                        None,
+                        Some(body::Null),
+                    )),
                     "reasoning_text"
                         if matches!(transport, OpenResponsesTransport::HuggingFace(_)) =>
                     {
-                        output.push(serde_json::json!({
-                            "type":"reasoning",
-                            "summary":[],
-                            "content":[{"type":"reasoning_text","text":reasoning.text}],
-                            "status":"completed"
-                        }));
+                        output.push(reasoning(
+                            Vec::new(),
+                            Some(vec![text("reasoning_text")]),
+                            None,
+                        ));
                     }
                     "reasoning_summary"
                         if matches!(transport, OpenResponsesTransport::HuggingFace(_)) =>
                     {
-                        output.push(serde_json::json!({
-                            "type":"reasoning",
-                            "summary":[{"type":"reasoning_summary","text":reasoning.text}],
-                            "content":[],
-                            "status":"completed"
-                        }));
+                        output.push(reasoning(
+                            vec![text("reasoning_summary")],
+                            Some(Vec::new()),
+                            None,
+                        ));
                     }
                     _ => {
                         return Err(ModelError::unsupported(
@@ -1041,51 +1105,37 @@ fn normalized_assistant(
                 let refusal = custom.data.as_str().ok_or_else(|| {
                     ModelError::unsupported("Open Responses refusal history must contain a string")
                 })?;
-                let mut item = serde_json::json!({
-                    "type":"message",
-                    "role":"assistant",
-                    "content":[{"type":"refusal","refusal":refusal}],
-                    "status":"completed"
-                });
-                apply_phase(&mut item, custom.metadata.as_ref())?;
-                output.push(item);
+                let phase = phase(custom.metadata.as_ref())?;
+                output.push(assistant(body::Content::Refusal { refusal }, phase));
             }
             AssistantPart::Custom(custom) => output.push(custom_item(custom)?),
         }
         index += 1;
     }
-    Ok(output)
+    Ok(())
 }
 
-fn apply_phase(
-    item: &mut JsonValue,
-    metadata: Option<&BTreeMap<String, JsonValue>>,
-) -> Result<(), ModelError> {
+fn phase(metadata: Option<&BTreeMap<String, JsonValue>>) -> Result<Option<&str>, ModelError> {
     let Some(phase) = metadata
         .and_then(|metadata| metadata.get(PHASE_METADATA_KEY))
         .and_then(JsonValue::as_str)
     else {
-        return Ok(());
+        return Ok(None);
     };
     if !matches!(phase, "commentary" | "final_answer") {
         return Err(ModelError::invalid_request(
             "Open Responses assistant phase must be commentary or final_answer",
         ));
     }
-    item["phase"] = phase.into();
-    Ok(())
+    Ok(Some(phase))
 }
 
-fn source_annotation(source: &SourcePart) -> Result<JsonValue, ModelError> {
-    let annotation = source
-        .metadata
-        .as_ref()
-        .map(|metadata| JsonValue::Object(metadata.clone().into_iter().collect()))
-        .ok_or_else(|| {
-            ModelError::unsupported(
-                "Open Responses source history requires its exact URL-citation metadata",
-            )
-        })?;
+fn source_annotation(source: &SourcePart) -> Result<&BTreeMap<String, JsonValue>, ModelError> {
+    let annotation = source.metadata.as_ref().ok_or_else(|| {
+        ModelError::unsupported(
+            "Open Responses source history requires its exact URL-citation metadata",
+        )
+    })?;
     if annotation.get("type").and_then(JsonValue::as_str) != Some("url_citation")
         || annotation.get("url").and_then(JsonValue::as_str).is_none()
         || annotation
@@ -3067,7 +3117,7 @@ fn normalized_semantics(parts: &[AssistantPart]) -> Option<JsonValue> {
                 }));
             }
             AssistantPart::ToolResult(part) => {
-                let item = function_output(part).ok()?;
+                let item = serde_json::to_value(function_output(part).ok()?).ok()?;
                 semantics.push(serde_json::json!({
                     "type":"tool_result",
                     "call_id":item.get("call_id")?,
