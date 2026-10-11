@@ -1,0 +1,108 @@
+{
+  "max_tokens": 2000,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Watch",
+          "type": "text"
+        },
+        {
+          "source": {
+            "data": "cG5n",
+            "detail": "high",
+            "max_long_side_pixel": 1024,
+            "media_type": "image/png",
+            "type": "base64"
+          },
+          "type": "image"
+        },
+        {
+          "source": {
+            "fps": 1.5,
+            "type": "url",
+            "url": "https://example.test/v.mp4"
+          },
+          "type": "video"
+        },
+        {
+          "source": {
+            "type": "url",
+            "url": "mm_file://file-123"
+          },
+          "type": "video"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "id": "call-1",
+          "input": {
+            "id": "m"
+          },
+          "name": "lookup",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": "[{\"type\":\"text\",\"value\":\"only text\"}]",
+          "is_error": false,
+          "tool_use_id": "call-1",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "metadata": {
+    "user_id": "mm-user"
+  },
+  "model": "MiniMax-M3",
+  "service_tier": "priority",
+  "stream": true,
+  "temperature": 0.3,
+  "thinking": {
+    "type": "adaptive"
+  },
+  "tool_choice": {
+    "type": "auto"
+  },
+  "tools": [
+    {
+      "description": "Find a record",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Record id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "lookup"
+    },
+    {
+      "description": "Write a file",
+      "input_schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "write_file"
+    }
+  ],
+  "top_p": 0.8
+}

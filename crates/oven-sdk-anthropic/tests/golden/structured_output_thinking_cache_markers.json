@@ -1,0 +1,64 @@
+{
+  "cache_control": {
+    "ttl": "5m",
+    "type": "ephemeral"
+  },
+  "max_tokens": 3048,
+  "messages": [
+    {
+      "content": [
+        {
+          "cache_control": {
+            "ttl": "5m",
+            "type": "ephemeral"
+          },
+          "text": "Give JSON",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "metadata": {
+    "user_id": "user-9"
+  },
+  "model": "claude-sonnet-4-5",
+  "output_config": {
+    "effort": "high",
+    "format": {
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "answer": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "answer"
+        ],
+        "type": "object"
+      },
+      "type": "json_schema"
+    }
+  },
+  "stream": true,
+  "system": [
+    {
+      "cache_control": {
+        "ttl": "1h",
+        "type": "ephemeral"
+      },
+      "text": "Cached system",
+      "type": "text"
+    }
+  ],
+  "thinking": {
+    "budget_tokens": 2048,
+    "display": "omitted",
+    "type": "enabled"
+  },
+  "top_p": 0.95
+}

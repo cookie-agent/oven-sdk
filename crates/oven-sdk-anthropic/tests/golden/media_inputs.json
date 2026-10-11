@@ -1,0 +1,58 @@
+{
+  "max_tokens": 64000,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Describe these",
+          "type": "text"
+        },
+        {
+          "cache_control": {
+            "ttl": "5m",
+            "type": "ephemeral"
+          },
+          "source": {
+            "data": "anBlZy1ieXRlcw==",
+            "media_type": "image/jpeg",
+            "type": "base64"
+          },
+          "type": "image"
+        },
+        {
+          "source": {
+            "type": "url",
+            "url": "https://example.test/image.png"
+          },
+          "type": "image"
+        },
+        {
+          "source": {
+            "data": "JVBERi0xLjc=",
+            "media_type": "application/pdf",
+            "type": "base64"
+          },
+          "type": "document"
+        },
+        {
+          "source": {
+            "type": "url",
+            "url": "https://example.test/file.pdf"
+          },
+          "type": "document"
+        },
+        {
+          "source": {
+            "data": "plain document\nline two",
+            "media_type": "text/plain",
+            "type": "text"
+          },
+          "type": "document"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-sonnet-4-5",
+  "stream": true
+}

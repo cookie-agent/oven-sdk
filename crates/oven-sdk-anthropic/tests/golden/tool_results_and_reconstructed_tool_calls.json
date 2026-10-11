@@ -1,0 +1,216 @@
+{
+  "max_tokens": 64000,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Run the tools",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "Calling tools.",
+          "type": "text"
+        },
+        {
+          "id": "call-1",
+          "input": {
+            "id": "a"
+          },
+          "name": "lookup",
+          "type": "tool_use"
+        },
+        {
+          "id": "call-2",
+          "input": {
+            "id": "b",
+            "nested": {
+              "list": [
+                1,
+                2.5,
+                null,
+                true
+              ]
+            }
+          },
+          "name": "lookup",
+          "type": "tool_use"
+        },
+        {
+          "id": "call-3",
+          "input": {
+            "rawInvalidInput": "not an object"
+          },
+          "name": "lookup",
+          "type": "tool_use"
+        },
+        {
+          "id": "call-4",
+          "input": {},
+          "name": "lookup",
+          "type": "tool_use"
+        },
+        {
+          "id": "call-5",
+          "input": {},
+          "name": "lookup",
+          "type": "tool_use"
+        },
+        {
+          "id": "call-6",
+          "input": {},
+          "name": "lookup",
+          "type": "tool_use"
+        },
+        {
+          "id": "call-7",
+          "input": {},
+          "name": "lookup",
+          "type": "tool_use"
+        },
+        {
+          "id": "call-8",
+          "input": {},
+          "name": "lookup",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": "plain result",
+          "is_error": false,
+          "tool_use_id": "call-1",
+          "type": "tool_result"
+        },
+        {
+          "content": "{\"answer\":42,\"items\":[\"x\",\"y\"]}",
+          "is_error": false,
+          "tool_use_id": "call-2",
+          "type": "tool_result"
+        },
+        {
+          "content": "boom",
+          "is_error": true,
+          "tool_use_id": "call-3",
+          "type": "tool_result"
+        },
+        {
+          "content": "user said no",
+          "is_error": false,
+          "tool_use_id": "call-4",
+          "type": "tool_result"
+        },
+        {
+          "content": "",
+          "is_error": false,
+          "tool_use_id": "call-5",
+          "type": "tool_result"
+        },
+        {
+          "cache_control": {
+            "ttl": "5m",
+            "type": "ephemeral"
+          },
+          "content": "cached",
+          "is_error": false,
+          "tool_use_id": "call-6",
+          "type": "tool_result"
+        },
+        {
+          "content": "[{\"type\":\"text\",\"value\":\"caption\"},{\"type\":\"json\",\"value\":{\"k\":\"v\"}}]",
+          "is_error": false,
+          "tool_use_id": "call-7",
+          "type": "tool_result"
+        },
+        {
+          "content": [
+            {
+              "text": "screenshot",
+              "type": "text"
+            },
+            {
+              "text": "{\"w\":10}",
+              "type": "text"
+            },
+            {
+              "source": {
+                "data": "iVBORw0K",
+                "media_type": "image/png",
+                "type": "base64"
+              },
+              "type": "image"
+            },
+            {
+              "source": {
+                "type": "url",
+                "url": "https://example.test/report.pdf"
+              },
+              "type": "document"
+            }
+          ],
+          "is_error": false,
+          "tool_use_id": "call-8",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "Thanks",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-sonnet-4-5",
+  "stream": true,
+  "tool_choice": {
+    "type": "auto"
+  },
+  "tools": [
+    {
+      "description": "Find a record",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Record id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "lookup",
+      "strict": true
+    },
+    {
+      "cache_control": {
+        "ttl": "1h",
+        "type": "ephemeral"
+      },
+      "description": "Write a file",
+      "input_schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "write_file"
+    }
+  ]
+}

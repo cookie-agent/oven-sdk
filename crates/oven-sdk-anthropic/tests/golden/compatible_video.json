@@ -1,0 +1,33 @@
+{
+  "max_tokens": 64000,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Clip",
+          "type": "text"
+        },
+        {
+          "source": {
+            "data": "dmlkZW8=",
+            "fps": 2.5,
+            "media_type": "video/mp4",
+            "type": "base64"
+          },
+          "type": "video"
+        },
+        {
+          "source": {
+            "data": "d2VicA==",
+            "media_type": "image/webp",
+            "type": "base64"
+          },
+          "type": "image"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "opaque-video-model",
+  "stream": true
+}
