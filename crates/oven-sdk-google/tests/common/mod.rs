@@ -204,6 +204,7 @@ pub fn config_with(
             timeouts: GoogleTimeouts::default(),
             thinking,
             tools,
+            client: None,
         },
     )
 }

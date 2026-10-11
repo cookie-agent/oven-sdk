@@ -77,6 +77,9 @@ pub struct GoogleGenerateContentSettings {
     pub thinking: GoogleThinkingSettings,
     /// Explicit tool behavior; never inferred from the model ID.
     pub tools: GoogleToolSettings,
+    /// Optional injected HTTP client shared across models. When set, the
+    /// connect timeout is whatever the caller configured on that client.
+    pub client: Option<Client>,
 }
 
 #[derive(Clone)]
@@ -121,10 +124,13 @@ impl GoogleModel {
             &config.model.id,
             &config.settings.model_resource,
         )?;
-        let client = Client::builder()
-            .connect_timeout(config.settings.timeouts.connect)
-            .build()
-            .map_err(|_| ModelError::transport("could not construct Google HTTP client"))?;
+        let client = match &config.settings.client {
+            Some(client) => client.clone(),
+            None => Client::builder()
+                .connect_timeout(config.settings.timeouts.connect)
+                .build()
+                .map_err(|_| ModelError::transport("could not construct Google HTTP client"))?,
+        };
         let identity = ModelIdentity::new(config.provider.id.clone(), config.model.id.clone())?;
         let descriptor = LanguageModelDescriptor::new(
             identity,

@@ -116,6 +116,9 @@ pub struct CohereSettings {
     pub stop_sequences: Vec<String>,
     /// Optional request priority.
     pub priority: Option<i64>,
+    /// Optional injected HTTP client shared across models. When set, the
+    /// connect timeout is whatever the caller configured on that client.
+    pub client: Option<reqwest::Client>,
 }
 
 /// A caller-provided document available for Cohere grounding and citations.
@@ -217,10 +220,13 @@ impl Config {
             model.capabilities.clone(),
         )?;
         let replay_seed = replay_seed(&provider, &model, &settings)?;
-        let client = reqwest::Client::builder()
-            .connect_timeout(settings.timeouts.connect)
-            .build()
-            .map_err(|_| ModelError::transport("could not construct Cohere HTTP client"))?;
+        let client = match &settings.client {
+            Some(client) => client.clone(),
+            None => reqwest::Client::builder()
+                .connect_timeout(settings.timeouts.connect)
+                .build()
+                .map_err(|_| ModelError::transport("could not construct Cohere HTTP client"))?,
+        };
         let mut base_headers = provider.headers.static_headers.as_map().clone();
         base_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok((

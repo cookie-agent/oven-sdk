@@ -64,6 +64,7 @@ GoogleModel::new(ModelConfig::new(
             mixed_client_and_provider_tools: false,
             current_turn_signature_sentinel: false,
         },
+        client: None,
     },
 ))
 # }

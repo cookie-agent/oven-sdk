@@ -159,6 +159,9 @@ pub struct AzureOpenAiChatSettings {
     pub timeouts: AzureOpenAiTimeouts,
     /// Explicit Chat Completions wire behavior.
     pub completions: AzureOpenAiCompletionsConfig,
+    /// Optional injected HTTP client shared across models. When set, the
+    /// connect timeout is whatever the caller configured on that client.
+    pub client: Option<Client>,
 }
 
 impl Default for AzureOpenAiChatSettings {
@@ -168,6 +171,7 @@ impl Default for AzureOpenAiChatSettings {
             revision: None,
             timeouts: AzureOpenAiTimeouts::default(),
             completions: AzureOpenAiCompletionsConfig::default(),
+            client: None,
         }
     }
 }
@@ -183,6 +187,9 @@ pub struct AzureOpenAiResponsesSettings {
     pub timeouts: AzureOpenAiTimeouts,
     /// Explicit standalone Responses compaction behavior.
     pub compaction: AzureOpenAiResponsesCompaction,
+    /// Optional injected HTTP client shared across models. When set, the
+    /// connect timeout is whatever the caller configured on that client.
+    pub client: Option<Client>,
 }
 
 impl Default for AzureOpenAiResponsesSettings {
@@ -192,6 +199,7 @@ impl Default for AzureOpenAiResponsesSettings {
             revision: None,
             timeouts: AzureOpenAiTimeouts::default(),
             compaction: AzureOpenAiResponsesCompaction::Unsupported,
+            client: None,
         }
     }
 }
@@ -306,6 +314,7 @@ pub(crate) fn build_chat(
         settings.timeouts,
         settings.completions,
         AzureOpenAiResponsesCompaction::Unsupported,
+        settings.client,
         Endpoint::Chat,
         AZURE_OPENAI_CHAT_ADAPTER_ID,
     )
@@ -328,6 +337,7 @@ pub(crate) fn build_responses(
         settings.timeouts,
         AzureOpenAiCompletionsConfig::default(),
         settings.compaction,
+        settings.client,
         Endpoint::Responses,
         AZURE_OPENAI_RESPONSES_ADAPTER_ID,
     )
@@ -345,6 +355,7 @@ fn build(
     timeouts: AzureOpenAiTimeouts,
     completions: AzureOpenAiCompletionsConfig,
     compaction: AzureOpenAiResponsesCompaction,
+    client: Option<Client>,
     endpoint: Endpoint,
     adapter_id: &str,
 ) -> Result<(Arc<Config>, LanguageModelDescriptor), ModelError> {
@@ -396,10 +407,13 @@ fn build(
         }
         AzureOpenAiResponsesCompaction::Unsupported => None,
     };
-    let client = Client::builder()
-        .connect_timeout(timeouts.connect)
-        .build()
-        .map_err(|_| ModelError::transport("could not construct Azure OpenAI HTTP client"))?;
+    let client = match client {
+        Some(client) => client,
+        None => Client::builder()
+            .connect_timeout(timeouts.connect)
+            .build()
+            .map_err(|_| ModelError::transport("could not construct Azure OpenAI HTTP client"))?,
+    };
     let mut base_headers = provider.headers.static_headers.as_map().clone();
     base_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     Ok((

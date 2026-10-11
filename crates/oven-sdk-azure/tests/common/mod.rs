@@ -96,6 +96,7 @@ impl TestProvider {
                 revision: setup.revision,
                 timeouts: Default::default(),
                 completions: setup.completions,
+                client: None,
             },
         ))
     }
@@ -115,6 +116,7 @@ impl TestProvider {
                 revision: setup.revision,
                 timeouts: Default::default(),
                 compaction: setup.compaction,
+                client: None,
             },
         ))
     }
@@ -164,6 +166,7 @@ pub fn chat_config(
             revision: setup.revision,
             timeouts: Default::default(),
             completions: setup.completions,
+            client: None,
         },
     )
 }
@@ -192,6 +195,7 @@ pub fn responses_config(
             revision: setup.revision,
             timeouts: Default::default(),
             compaction: setup.compaction,
+            client: None,
         },
     )
 }
