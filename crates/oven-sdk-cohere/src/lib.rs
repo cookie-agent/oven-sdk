@@ -9,25 +9,24 @@ use std::{
     time::Duration,
 };
 
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use oven_sdk::provider_support::{SseEvent, SseParser, parse_retry_after};
 use oven_sdk::{
     AbortSignal, AdapterId, ApiEndpoint, AssistantPart, BoxFuture, BoxStream,
     CancellationCapability, Capability, CompactionCapability, ContentValue, CustomPart, ErrorStage,
-    FilePart, FileSource, Finish, FinishReason, HeaderConfig, HistoryTurn, InputPart, JsonValue,
-    LanguageModel, LanguageModelDescriptor, MediaSourceSupport, ModelCapabilities, ModelConfig,
-    ModelError, ModelErrorKind, ModelId, ModelIdentity, NativeContextScope, NativeReplayArtifact,
-    ProviderConfig, ProviderMetadata, ReplayCapability, ReplayDecision, ReplayDisposition,
-    ReplayOutcome, ReplayPayloadError, ReplayPolicy, Request, RequestMetadata, ResourceId,
-    ResponseFormat, ResponseHead, SanitizedBody, SecretString, SourcePart, StreamItem, StreamPart,
-    StreamResponse, ToolChoice, ToolContent, ToolResultPart, Usage,
+    FilePart, FileSource, Finish, FinishReason, HeaderConfig, HistoryTurn, InputPart, JsonSchema,
+    JsonValue, LanguageModel, LanguageModelDescriptor, MediaSourceSupport, ModelCapabilities,
+    ModelConfig, ModelError, ModelErrorKind, ModelId, ModelIdentity, NativeContextScope,
+    NativeReplayArtifact, ProviderConfig, ProviderMetadata, ReplayCapability, ReplayDecision,
+    ReplayDisposition, ReplayOutcome, ReplayPayloadError, ReplayPolicy, Request, RequestMetadata,
+    ResourceId, ResponseFormat, ResponseHead, SanitizedBody, SecretString, SourcePart, StreamItem,
+    StreamPart, StreamResponse, ToolChoice, ToolContent, ToolResultPart, Usage,
 };
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+mod body;
 
 /// Conventional serving-provider identity for Cohere Platform.
 pub const COHERE_PROVIDER_ID: &str = "cohere";
@@ -325,7 +324,7 @@ impl LanguageModel for CohereModel {
                 .client
                 .post(self.config.endpoint.clone())
                 .headers(headers)
-                .json(&encoded.body)
+                .body(encoded.body)
                 .send();
             let response = tokio::select! {
                 value = tokio::time::timeout(self.config.settings.timeouts.headers, send) => value
@@ -417,7 +416,8 @@ impl LanguageModel for CohereModel {
 }
 
 struct Encoded {
-    body: JsonValue,
+    /// Serialized request body, sent verbatim.
+    body: bytes::Bytes,
     replay: ReplayOutcome,
     warnings: Vec<String>,
 }
@@ -569,50 +569,34 @@ fn encode_request(
     binding: &JsonValue,
     _scope: &NativeContextScope,
 ) -> Result<Encoded, ModelError> {
-    let mut messages = Vec::new();
+    let mut messages = Vec::with_capacity(request.history.len());
     let mut replay = ReplayOutcome::default();
     let mut warnings = Vec::new();
     for (history_index, turn) in request.history.iter().enumerate() {
         match turn {
             HistoryTurn::System(message) => {
-                let text = message
-                    .content
-                    .iter()
-                    .filter_map(|part| match part {
-                        oven_sdk::SystemPart::Text(text) => Some(text.text.as_str()),
-                        oven_sdk::SystemPart::Custom(_) => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !text.is_empty() {
-                    messages.push(serde_json::json!({"role":"system","content":text}));
-                }
+                messages.extend(body::Message::system(&message.content));
             }
             HistoryTurn::User(message) => {
                 let mut content = Vec::new();
+                let mut has_file = false;
                 for part in &message.content {
                     match part {
                         InputPart::Text(text) if !text.text.is_empty() => {
-                            content.push(serde_json::json!({"type":"text","text":text.text}))
+                            content.push(body::UserPart::Text { text: &text.text })
                         }
                         InputPart::File(file) => {
+                            has_file = true;
                             content.push(image_content(file, options.image_detail.as_deref())?)
                         }
                         _ => {}
                     }
                 }
                 if !content.is_empty() {
-                    if content
-                        .iter()
-                        .all(|part| part.get("type").and_then(JsonValue::as_str) == Some("text"))
-                    {
-                        let text = content
-                            .iter()
-                            .filter_map(|part| part.get("text").and_then(JsonValue::as_str))
-                            .collect::<String>();
-                        messages.push(serde_json::json!({"role":"user","content":text}));
+                    if has_file {
+                        messages.push(body::Message::user_parts(content));
                     } else {
-                        messages.push(serde_json::json!({"role":"user","content":content}));
+                        messages.push(body::Message::user_text(&message.content));
                     }
                 }
             }
@@ -627,7 +611,7 @@ fn encode_request(
                         history_index,
                         disposition: ReplayDisposition::ReconstructedNormalized,
                     });
-                    messages.extend(normalized_assistant(&turn.message.content, true)?);
+                    normalized_assistant(&turn.message.content, true, &mut messages)?;
                     continue;
                 }
                 let replayed = match &turn.finish.native_replay {
@@ -675,98 +659,76 @@ fn encode_request(
                         "Cohere normalized replay fallback may omit provider-only citation details"
                             .into(),
                     );
-                    messages.extend(normalized_assistant(&turn.message.content, true)?);
+                    normalized_assistant(&turn.message.content, true, &mut messages)?;
                 }
             }
         }
     }
-    let mut body = serde_json::json!({
-        "model":descriptor.identity.model_id.as_str(),
-        "messages":messages,
-        "stream":true
+    let thinking = resolved_thinking(request, settings)?.map(|config| body::Thinking {
+        kind: if config.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        token_budget: config.token_budget,
     });
-    if let Some(maximum) = request.inference.max_output_tokens {
-        body["max_tokens"] = maximum.into();
-    }
-    if let Some(value) = request.inference.temperature {
-        body["temperature"] = value.into();
-    }
-    if let Some(value) = request.inference.top_p {
-        body["p"] = value.into();
-    }
-    if let Some(value) = settings.top_k {
-        body["k"] = value.into();
-    }
-    if let Some(value) = settings.seed {
-        body["seed"] = value.into();
-    }
-    if let Some(value) = settings.frequency_penalty {
-        body["frequency_penalty"] = value.into();
-    }
-    if let Some(value) = settings.presence_penalty {
-        body["presence_penalty"] = value.into();
-    }
-    if !settings.stop_sequences.is_empty() {
-        body["stop_sequences"] =
-            serde_json::to_value(&settings.stop_sequences).expect("strings serialize");
-    }
-    if let Some(value) = settings.priority {
-        body["priority"] = value.into();
-    }
-    if let Some(value) = &settings.safety_mode {
-        body["safety_mode"] = value.clone().into();
-    }
-    if let Some(config) = resolved_thinking(request, settings)? {
-        let mut thinking = serde_json::json!({
-            "type": if config.enabled { "enabled" } else { "disabled" }
-        });
-        if let Some(budget) = config.token_budget {
-            thinking["token_budget"] = budget.into();
-        }
-        body["thinking"] = thinking;
-    }
-    if !options.documents.is_empty() {
-        body["documents"] = serde_json::to_value(&options.documents)
-            .map_err(|_| ModelError::invalid_request("could not encode Cohere documents"))?;
-    }
-    if let Some(mode) = &options.citation_mode {
-        body["citation_options"] = serde_json::json!({"mode":mode});
-    }
-    if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {
-        let selected = match &request.tool_choice {
-            ToolChoice::Tool(name) => request
-                .tools
-                .iter()
-                .filter(|tool| &tool.name == name)
-                .collect::<Vec<_>>(),
-            _ => request.tools.iter().collect(),
+    let (tools, strict_tools, tool_choice) = if !request.tools.is_empty()
+        && !matches!(request.tool_choice, ToolChoice::None)
+    {
+        let tools = request
+            .tools
+            .iter()
+            .filter(|tool| match &request.tool_choice {
+                ToolChoice::Tool(name) => &tool.name == name,
+                _ => true,
+            })
+            .map(|tool| {
+                body::Tool::function(&tool.name, &tool.description, tool.input_schema.as_value())
+            })
+            .collect();
+        let tool_choice = match &request.tool_choice {
+            ToolChoice::Required | ToolChoice::Tool(_) => Some("REQUIRED"),
+            _ => None,
         };
-        body["tools"] = JsonValue::Array(selected.into_iter().map(|tool| serde_json::json!({
-            "type":"function",
-            "function":{"name":tool.name,"description":tool.description,"parameters":tool.input_schema.as_value()}
-        })).collect());
-        if settings.strict_tools {
-            body["strict_tools"] = true.into();
-        }
-        match &request.tool_choice {
-            ToolChoice::Required | ToolChoice::Tool(_) => body["tool_choice"] = "REQUIRED".into(),
-            _ => {}
-        }
+        (Some(tools), settings.strict_tools, tool_choice)
+    } else {
+        (None, false, None)
+    };
+    let response_format = match &request.response_format {
+        ResponseFormat::Text => None,
+        ResponseFormat::Json { schema } => Some(body::ResponseFormat::json_object(
+            schema.as_ref().map(JsonSchema::as_value),
+        )),
+    };
+    let body = body::ChatBody {
+        model: descriptor.identity.model_id.as_str(),
+        messages,
+        stream: true,
+        max_tokens: request.inference.max_output_tokens,
+        temperature: request.inference.temperature,
+        p: request.inference.top_p,
+        k: settings.top_k,
+        seed: settings.seed,
+        frequency_penalty: settings.frequency_penalty,
+        presence_penalty: settings.presence_penalty,
+        stop_sequences: &settings.stop_sequences,
+        priority: settings.priority,
+        safety_mode: settings.safety_mode.as_deref(),
+        thinking,
+        documents: &options.documents,
+        citation_options: options
+            .citation_mode
+            .as_deref()
+            .map(|mode| body::CitationOptions { mode }),
+        tools,
+        strict_tools,
+        tool_choice,
+        response_format,
     }
-    match &request.response_format {
-        ResponseFormat::Text => {}
-        ResponseFormat::Json { schema: None } => {
-            body["response_format"] = serde_json::json!({"type":"json_object"})
-        }
-        ResponseFormat::Json {
-            schema: Some(schema),
-        } => {
-            body["response_format"] =
-                serde_json::json!({"type":"json_object","json_schema":schema.as_value()})
-        }
-    }
+    .to_bytes()
+    .map_err(|_| ModelError::invalid_request("could not encode Cohere request"))?;
     Ok(Encoded {
-        body,
+        body: bytes::Bytes::from(body),
         replay,
         warnings,
     })
@@ -794,12 +756,18 @@ fn resolved_thinking<'a>(
     }
 }
 
-fn image_content(file: &FilePart, default_detail: Option<&str>) -> Result<JsonValue, ModelError> {
+fn image_content<'a>(
+    file: &'a FilePart,
+    default_detail: Option<&'a str>,
+) -> Result<body::UserPart<'a>, ModelError> {
     let url = match &file.source {
-        FileSource::Bytes(bytes) => {
-            format!("data:{};base64,{}", file.media_type, STANDARD.encode(bytes))
+        FileSource::Bytes(bytes) => body::ImageSource::Data {
+            media_type: &file.media_type,
+            bytes,
+        },
+        FileSource::Url(url) if matches!(url.scheme(), "http" | "https") => {
+            body::ImageSource::Url(url.as_str())
         }
-        FileSource::Url(url) if matches!(url.scheme(), "http" | "https") => url.to_string(),
         FileSource::Url(_) => {
             return Err(ModelError::unsupported(
                 "Cohere image URLs must use HTTP(S)",
@@ -822,81 +790,62 @@ fn image_content(file: &FilePart, default_detail: Option<&str>) -> Result<JsonVa
         .and_then(|metadata| metadata.get("cohere.image_detail"))
         .and_then(JsonValue::as_str)
         .or(default_detail);
-    let mut image = serde_json::json!({"url":url});
-    if let Some(detail) = detail {
-        image["detail"] = detail.into();
-    }
-    Ok(serde_json::json!({"type":"image_url","image_url":image}))
+    Ok(body::UserPart::ImageUrl {
+        image_url: body::ImageUrl { url, detail },
+    })
 }
 
-fn tool_result(result: &ToolResultPart) -> Result<JsonValue, ModelError> {
+fn tool_result(result: &ToolResultPart) -> Result<body::Message<'_>, ModelError> {
     let content = match &result.content {
-        ToolContent::Text(value) => JsonValue::String(value.clone()),
-        ToolContent::Json(value) => JsonValue::String(value.to_string()),
-        ToolContent::Mixed(values) => JsonValue::Array(
+        ToolContent::Text(value) => body::ToolResultContent::Text(body::TextValue::Str(value)),
+        ToolContent::Json(value) => body::ToolResultContent::Text(body::TextValue::Json(value)),
+        ToolContent::Mixed(values) => body::ToolResultContent::Parts(
             values
                 .iter()
-                .map(|value| match value {
-                    ContentValue::Text(value) => {
-                        Ok(serde_json::json!({"type":"text","text":value}))
-                    }
-                    ContentValue::Json(value) => {
-                        Ok(serde_json::json!({"type":"text","text":value.to_string()}))
-                    }
-                    ContentValue::File(_) => Err(ModelError::unsupported(
-                        "Cohere does not support files in tool-result history",
-                    )),
+                .map(|value| {
+                    body::ToolResultPart::from_value(value).ok_or_else(|| {
+                        ModelError::unsupported(
+                            "Cohere does not support files in tool-result history",
+                        )
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        ToolContent::Denied { reason } => reason
-            .clone()
-            .unwrap_or_else(|| "Tool call execution denied.".into())
-            .into(),
+        ToolContent::Denied { reason } => body::ToolResultContent::Text(body::TextValue::Str(
+            reason.as_deref().unwrap_or("Tool call execution denied."),
+        )),
     };
-    Ok(serde_json::json!({"role":"tool","tool_call_id":result.tool_call_id,"content":content}))
+    Ok(body::Message::Tool(body::ToolMessage::new(
+        &result.tool_call_id,
+        content,
+    )))
 }
 
-fn normalized_assistant(
-    parts: &[AssistantPart],
+/// Encodes normalized assistant parts: one assistant message (when it has content) followed by
+/// any inline tool results.
+fn normalized_assistant<'a>(
+    parts: &'a [AssistantPart],
     include_thinking: bool,
-) -> Result<Vec<JsonValue>, ModelError> {
-    let mut content = Vec::new();
-    let mut tool_plan = String::new();
-    let mut tool_calls = Vec::new();
-    let mut citations = Vec::new();
+    messages: &mut Vec<body::Message<'a>>,
+) -> Result<(), ModelError> {
+    let mut message = body::AssistantMessage::new();
     let mut inline_results = Vec::new();
     for part in parts {
         match part {
-            AssistantPart::Text(text) => {
-                content.push(serde_json::json!({"type":"text","text":text.text}))
-            }
+            AssistantPart::Text(text) => message
+                .content
+                .push(body::AssistantContent::Text { text: &text.text }),
             AssistantPart::Reasoning(reasoning) => {
-                if reasoning
-                    .metadata
-                    .as_ref()
-                    .and_then(|value| value.get("cohere.kind"))
-                    .and_then(JsonValue::as_str)
-                    == Some("tool_plan")
-                {
-                    tool_plan.push_str(&reasoning.text);
+                if body::is_tool_plan(reasoning) {
+                    message.tool_plan.0.push(&reasoning.text);
                 } else if include_thinking {
-                    content.push(serde_json::json!({"type":"thinking","thinking":reasoning.text}));
+                    message.content.push(body::AssistantContent::Thinking {
+                        thinking: &reasoning.text,
+                    });
                 }
             }
             AssistantPart::ToolCall(call) => {
-                let mut value = serde_json::json!({
-                    "id":call.id,"type":"function","function":{"arguments":call.raw_input.clone().unwrap_or_else(|| call.input.to_string())}
-                });
-                if call
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.get("cohere.name_missing"))
-                    != Some(&JsonValue::Bool(true))
-                {
-                    value["function"]["name"] = call.name.clone().into();
-                }
-                tool_calls.push(value);
+                message.tool_calls.push(body::ToolCall::from_part(call))
             }
             AssistantPart::Source(source) => {
                 let metadata = source.metadata.as_ref().ok_or_else(|| {
@@ -904,7 +853,7 @@ fn normalized_assistant(
                         "Cohere assistant sources require provider citation metadata",
                     )
                 })?;
-                citations.push(JsonValue::Object(metadata.clone().into_iter().collect()));
+                message.citations.push(metadata);
             }
             AssistantPart::ToolResult(result) => inline_results.push(tool_result(result)?),
             AssistantPart::Custom(part) if part.kind == REPLAY_FINGERPRINT_KIND => {}
@@ -925,26 +874,11 @@ fn normalized_assistant(
             }
         }
     }
-    let mut message = serde_json::json!({"role":"assistant"});
-    if !content.is_empty() {
-        message["content"] = JsonValue::Array(content);
-    }
-    if !tool_plan.is_empty() {
-        message["tool_plan"] = tool_plan.into();
-    }
-    if !tool_calls.is_empty() {
-        message["tool_calls"] = JsonValue::Array(tool_calls);
-    }
-    if !citations.is_empty() {
-        message["citations"] = JsonValue::Array(citations);
-    }
-    let has_assistant_content = message.as_object().is_some_and(|object| object.len() > 1);
-    let mut messages = Vec::new();
-    if has_assistant_content {
-        messages.push(message);
+    if message.has_content() {
+        messages.push(body::Message::Assistant(message));
     }
     messages.extend(inline_results);
-    Ok(messages)
+    Ok(())
 }
 
 struct Live {
@@ -1655,18 +1589,19 @@ fn reserve_tool_id(
     unreachable!("unbounded tool ID suffix space")
 }
 
-fn decode_replay(
-    artifact: &NativeReplayArtifact,
-    normalized: &[AssistantPart],
+/// Validates a native replay artifact in place and returns the message to send: the stored
+/// message itself, or its normalized form without thinking when reasoning replay is off.
+fn decode_replay<'a>(
+    artifact: &'a NativeReplayArtifact,
+    normalized: &'a [AssistantPart],
     _binding: &JsonValue,
     replay_reasoning: bool,
-) -> Option<JsonValue> {
+) -> Option<body::Message<'a>> {
     let object = artifact.payload().as_object()?;
-    let keys = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
-    if keys
-        != ["binding", "fingerprint", "format", "message"]
-            .into_iter()
-            .collect()
+    if object.len() != 4
+        || !["binding", "fingerprint", "format", "message"]
+            .iter()
+            .all(|key| object.contains_key(*key))
         || object.get("format")?.as_str()? != REPLAY_FORMAT
     {
         return None;
@@ -1674,33 +1609,56 @@ fn decode_replay(
     let binding = object.get("binding")?;
     binding.get("version")?.as_str()?;
     binding.get("sha256")?.as_str()?;
-    let message = object.get("message")?.clone();
+    let message = object.get("message")?;
     let fingerprint = object.get("fingerprint")?.as_str()?;
-    if replay_fingerprint(&message)?.as_str() != fingerprint {
+    let mut normalized_fingerprints = normalized.iter().filter_map(|part| match part {
+        AssistantPart::Custom(part) if part.kind == REPLAY_FINGERPRINT_KIND => part.data.as_str(),
+        _ => None,
+    });
+    if normalized_fingerprints.next() != Some(fingerprint)
+        || normalized_fingerprints.next().is_some()
+        || !fingerprint_matches(message, fingerprint)
+    {
         return None;
     }
-    let normalized_fingerprint = normalized
-        .iter()
-        .filter_map(|part| match part {
-            AssistantPart::Custom(part) if part.kind == REPLAY_FINGERPRINT_KIND => {
-                part.data.as_str()
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if normalized_fingerprint.as_slice() != [fingerprint] {
+    // Parts normalized reconstruction cannot encode make the artifact unusable.
+    if normalized.iter().any(|part| match part {
+        AssistantPart::Source(source) => source.metadata.is_none(),
+        AssistantPart::File(_) | AssistantPart::ToolApproval(_) => true,
+        AssistantPart::Custom(part) => part.kind != REPLAY_FINGERPRINT_KIND,
+        AssistantPart::ToolResult(result) => matches!(
+            &result.content,
+            ToolContent::Mixed(values)
+                if values.iter().any(|value| matches!(value, ContentValue::File(_)))
+        ),
+        _ => false,
+    }) {
         return None;
     }
-    let full = normalized_assistant(normalized, true).ok()?;
-    let without_reasoning = normalized_assistant(normalized, false).ok()?;
-    if full.as_slice() != [message.clone()] && without_reasoning.as_slice() != [message.clone()] {
+    let full = body::assistant_message_matches(message, normalized, true);
+    if !full && !body::assistant_message_matches(message, normalized, false) {
         return None;
     }
     if replay_reasoning {
-        Some(message)
+        Some(body::Message::Native(message))
     } else {
-        without_reasoning.into_iter().next()
+        let mut messages = Vec::with_capacity(1);
+        normalized_assistant(normalized, false, &mut messages).ok()?;
+        messages.into_iter().next()
     }
+}
+
+/// Whether `fingerprint` is the replay fingerprint of `message`, hashing without buffering.
+fn fingerprint_matches(message: &JsonValue, fingerprint: &str) -> bool {
+    let mut hasher = body::HashWriter(Sha256::new());
+    if serde_json::to_writer(&mut hasher, message).is_err() {
+        return false;
+    }
+    let mut encoded = [0_u8; 43];
+    URL_SAFE_NO_PAD
+        .encode_slice(hasher.0.finalize(), &mut encoded)
+        .is_ok_and(|written| written == encoded.len())
+        && encoded.as_slice() == fingerprint.as_bytes()
 }
 
 fn validate_endpoint(endpoint: &ApiEndpoint) -> Result<(), ModelError> {
@@ -2320,5 +2278,289 @@ mod tests {
         }
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].name, "x");
+    }
+
+    // Pre-refactor `serde_json::Value` encoders, kept as the reference for parity tests.
+    fn reference_tool_result(result: &ToolResultPart) -> Result<JsonValue, ModelError> {
+        let content = match &result.content {
+            ToolContent::Text(value) => JsonValue::String(value.clone()),
+            ToolContent::Json(value) => JsonValue::String(value.to_string()),
+            ToolContent::Mixed(values) => JsonValue::Array(
+                values
+                    .iter()
+                    .map(|value| match value {
+                        ContentValue::Text(value) => {
+                            Ok(serde_json::json!({"type":"text","text":value}))
+                        }
+                        ContentValue::Json(value) => {
+                            Ok(serde_json::json!({"type":"text","text":value.to_string()}))
+                        }
+                        ContentValue::File(_) => Err(ModelError::unsupported(
+                            "Cohere does not support files in tool-result history",
+                        )),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            ToolContent::Denied { reason } => reason
+                .clone()
+                .unwrap_or_else(|| "Tool call execution denied.".into())
+                .into(),
+        };
+        Ok(serde_json::json!({"role":"tool","tool_call_id":result.tool_call_id,"content":content}))
+    }
+
+    fn reference_normalized_assistant(
+        parts: &[AssistantPart],
+        include_thinking: bool,
+    ) -> Result<Vec<JsonValue>, ModelError> {
+        let mut content = Vec::new();
+        let mut tool_plan = String::new();
+        let mut tool_calls = Vec::new();
+        let mut citations = Vec::new();
+        let mut inline_results = Vec::new();
+        for part in parts {
+            match part {
+                AssistantPart::Text(text) => {
+                    content.push(serde_json::json!({"type":"text","text":text.text}))
+                }
+                AssistantPart::Reasoning(reasoning) => {
+                    if reasoning
+                        .metadata
+                        .as_ref()
+                        .and_then(|value| value.get("cohere.kind"))
+                        .and_then(JsonValue::as_str)
+                        == Some("tool_plan")
+                    {
+                        tool_plan.push_str(&reasoning.text);
+                    } else if include_thinking {
+                        content
+                            .push(serde_json::json!({"type":"thinking","thinking":reasoning.text}));
+                    }
+                }
+                AssistantPart::ToolCall(call) => {
+                    let mut value = serde_json::json!({
+                        "id":call.id,"type":"function","function":{"arguments":call.raw_input.clone().unwrap_or_else(|| call.input.to_string())}
+                    });
+                    if call
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("cohere.name_missing"))
+                        != Some(&JsonValue::Bool(true))
+                    {
+                        value["function"]["name"] = call.name.clone().into();
+                    }
+                    tool_calls.push(value);
+                }
+                AssistantPart::Source(source) => {
+                    let metadata = source.metadata.as_ref().ok_or_else(|| {
+                        ModelError::invalid_request(
+                            "Cohere assistant sources require provider citation metadata",
+                        )
+                    })?;
+                    citations.push(JsonValue::Object(metadata.clone().into_iter().collect()));
+                }
+                AssistantPart::ToolResult(result) => {
+                    inline_results.push(reference_tool_result(result)?)
+                }
+                AssistantPart::Custom(part) if part.kind == REPLAY_FINGERPRINT_KIND => {}
+                AssistantPart::File(_) => {
+                    return Err(ModelError::unsupported(
+                        "Cohere cannot encode assistant file parts",
+                    ));
+                }
+                AssistantPart::ToolApproval(_) => {
+                    return Err(ModelError::unsupported(
+                        "Cohere cannot encode tool-approval parts in assistant history",
+                    ));
+                }
+                AssistantPart::Custom(_) => {
+                    return Err(ModelError::unsupported(
+                        "Cohere cannot encode custom assistant parts",
+                    ));
+                }
+            }
+        }
+        let mut message = serde_json::json!({"role":"assistant"});
+        if !content.is_empty() {
+            message["content"] = JsonValue::Array(content);
+        }
+        if !tool_plan.is_empty() {
+            message["tool_plan"] = tool_plan.into();
+        }
+        if !tool_calls.is_empty() {
+            message["tool_calls"] = JsonValue::Array(tool_calls);
+        }
+        if !citations.is_empty() {
+            message["citations"] = JsonValue::Array(citations);
+        }
+        let has_assistant_content = message.as_object().is_some_and(|object| object.len() > 1);
+        let mut messages = Vec::new();
+        if has_assistant_content {
+            messages.push(message);
+        }
+        messages.extend(inline_results);
+        Ok(messages)
+    }
+
+    fn reference_matches(
+        message: &JsonValue,
+        parts: &[AssistantPart],
+        include_thinking: bool,
+    ) -> bool {
+        reference_normalized_assistant(parts, include_thinking)
+            .is_ok_and(|messages| messages.as_slice() == std::slice::from_ref(message))
+    }
+
+    fn reasoning(text: &str, plan: bool) -> AssistantPart {
+        let mut part = oven_sdk::ReasoningPart::new(text);
+        if plan {
+            part.metadata = Some(BTreeMap::from([(
+                "cohere.kind".into(),
+                JsonValue::from("tool_plan"),
+            )]));
+        }
+        AssistantPart::Reasoning(part)
+    }
+
+    fn part_sets() -> Vec<Vec<AssistantPart>> {
+        let mut raw = oven_sdk::ToolCallPart::new("c2", "lookup", serde_json::json!({"a":1}));
+        raw.raw_input = Some("{\"a\": 1}".into());
+        let mut nameless = oven_sdk::ToolCallPart::new("c3", "lookup", serde_json::json!({}));
+        nameless.metadata = Some(BTreeMap::from([(
+            "cohere.name_missing".into(),
+            JsonValue::Bool(true),
+        )]));
+        let mut source = SourcePart::new();
+        source.metadata = Some(BTreeMap::from([
+            ("start".into(), serde_json::json!(0)),
+            ("text".into(), serde_json::json!("ans")),
+        ]));
+        let fingerprint = AssistantPart::Custom(CustomPart::new(
+            REPLAY_FINGERPRINT_KIND,
+            serde_json::json!("fp"),
+        ));
+        let call = |id: &str, input: JsonValue| {
+            AssistantPart::ToolCall(oven_sdk::ToolCallPart::new(id, "lookup", input))
+        };
+        vec![
+            vec![],
+            vec![AssistantPart::Text(oven_sdk::TextPart::new(""))],
+            vec![reasoning("think", false)],
+            vec![
+                reasoning("think", false),
+                AssistantPart::Text(oven_sdk::TextPart::new("answer")),
+                AssistantPart::Source(source),
+                fingerprint.clone(),
+            ],
+            vec![
+                reasoning("plan ", true),
+                reasoning("", true),
+                reasoning("more", true),
+                call("c1", serde_json::json!({"q":[1,2.5,null]})),
+                AssistantPart::ToolCall(raw),
+                AssistantPart::ToolCall(nameless),
+                call("c4", serde_json::json!("not an object")),
+            ],
+            vec![reasoning("", true), call("c1", serde_json::json!({}))],
+            vec![
+                call("c1", serde_json::json!({})),
+                AssistantPart::ToolResult(ToolResultPart::new(
+                    "c1",
+                    ToolContent::Mixed(vec![
+                        ContentValue::Text("t".into()),
+                        ContentValue::Json(serde_json::json!({"k":"v"})),
+                    ]),
+                )),
+                AssistantPart::ToolResult(ToolResultPart::new(
+                    "c1",
+                    ToolContent::Denied { reason: None },
+                )),
+            ],
+            vec![fingerprint],
+        ]
+    }
+
+    #[test]
+    fn normalized_assistant_matches_reference_encoding() {
+        for parts in part_sets() {
+            for include_thinking in [true, false] {
+                let mut messages = Vec::new();
+                normalized_assistant(&parts, include_thinking, &mut messages).unwrap();
+                let encoded = messages
+                    .iter()
+                    .map(|message| serde_json::to_value(message).unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    encoded,
+                    reference_normalized_assistant(&parts, include_thinking).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn in_place_comparison_matches_reference_equality() {
+        let sets = part_sets();
+        let mut candidates = Vec::new();
+        for parts in &sets {
+            for include_thinking in [true, false] {
+                candidates.extend(reference_normalized_assistant(parts, include_thinking).unwrap());
+            }
+        }
+        let mutations: [fn(&mut JsonValue); 9] = [
+            |message| message["role"] = "user".into(),
+            |message| message["extra"] = true.into(),
+            |message| message["content"] = serde_json::json!([]),
+            |message| message["tool_plan"] = "".into(),
+            |message| message["tool_calls"] = serde_json::json!([]),
+            |message| message["citations"] = serde_json::json!([{"start":0}]),
+            |message| {
+                if let Some(text) = message.pointer_mut("/content/0/text") {
+                    *text = "changed".into();
+                }
+            },
+            |message| {
+                if let Some(arguments) = message.pointer_mut("/tool_calls/0/function/arguments") {
+                    *arguments = "{\"q\":[1,2.5,null] }".into();
+                }
+            },
+            |message| {
+                if let Some(function) = message.pointer_mut("/tool_calls/0/function") {
+                    function["name"] = "other".into();
+                }
+            },
+        ];
+        for candidate in candidates.clone() {
+            for mutate in mutations {
+                let mut changed = candidate.clone();
+                mutate(&mut changed);
+                candidates.push(changed);
+            }
+        }
+        candidates.push(serde_json::json!("not an object"));
+        for parts in &sets {
+            for include_thinking in [true, false] {
+                for message in &candidates {
+                    assert_eq!(
+                        body::assistant_message_matches(message, parts, include_thinking),
+                        reference_matches(message, parts, include_thinking),
+                        "parts={parts:?} include_thinking={include_thinking} message={message}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn json_text_and_fingerprint_comparisons_are_exact() {
+        let value = serde_json::json!({"b":[1,2.5,null,"x\n"],"a":{"c":true}});
+        assert!(body::json_text_equals(&value, &value.to_string()));
+        assert!(!body::json_text_equals(&value, &format!("{value} ")));
+        assert!(!body::json_text_equals(&value, &value.to_string()[1..]));
+        assert!(!body::json_text_equals(&value, "{}"));
+        let fingerprint = replay_fingerprint(&value).unwrap();
+        assert!(fingerprint_matches(&value, &fingerprint));
+        assert!(!fingerprint_matches(&value, &fingerprint[1..]));
+        assert!(!fingerprint_matches(&serde_json::json!({}), &fingerprint));
     }
 }
