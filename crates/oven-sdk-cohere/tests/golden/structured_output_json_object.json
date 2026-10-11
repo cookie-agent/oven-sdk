@@ -1,0 +1,13 @@
+{
+  "messages": [
+    {
+      "content": "Give JSON",
+      "role": "user"
+    }
+  ],
+  "model": "command-a-reasoning-08-2025",
+  "response_format": {
+    "type": "json_object"
+  },
+  "stream": true
+}

@@ -1,0 +1,10 @@
+{
+  "messages": [
+    {
+      "content": "Hello there",
+      "role": "user"
+    }
+  ],
+  "model": "command-a-reasoning-08-2025",
+  "stream": true
+}

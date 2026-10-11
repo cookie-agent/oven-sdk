@@ -1,0 +1,71 @@
+{
+  "citation_options": {
+    "mode": "ACCURATE"
+  },
+  "documents": [
+    {
+      "data": {
+        "meta": {
+          "page": 3
+        },
+        "text": "source",
+        "title": "Doc"
+      },
+      "id": "doc_1"
+    },
+    {
+      "data": {
+        "text": "anonymous"
+      },
+      "id": null
+    }
+  ],
+  "messages": [
+    {
+      "content": "Summarize the documents",
+      "role": "user"
+    }
+  ],
+  "model": "command-a-reasoning-08-2025",
+  "stream": true,
+  "tools": [
+    {
+      "function": {
+        "description": "Find a record",
+        "name": "lookup",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "description": "Record id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Write a file",
+        "name": "write_file",
+        "parameters": {
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

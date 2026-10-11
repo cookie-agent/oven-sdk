@@ -1,0 +1,33 @@
+{
+  "messages": [
+    {
+      "content": "Give JSON",
+      "role": "user"
+    }
+  ],
+  "model": "command-a-reasoning-08-2025",
+  "response_format": {
+    "json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "answer": {
+          "description": "The answer",
+          "type": "string"
+        },
+        "score": {
+          "type": "number"
+        },
+        "when": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "answer"
+      ],
+      "type": "object"
+    },
+    "type": "json_object"
+  },
+  "stream": true
+}

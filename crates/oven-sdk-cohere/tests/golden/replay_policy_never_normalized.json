@@ -1,0 +1,27 @@
+{
+  "messages": [
+    {
+      "content": "Question",
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "thinking": "think",
+          "type": "thinking"
+        },
+        {
+          "text": "Answer",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": "Again",
+      "role": "user"
+    }
+  ],
+  "model": "command-a-reasoning-08-2025",
+  "stream": true
+}

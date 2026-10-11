@@ -1,0 +1,14 @@
+{
+  "messages": [
+    {
+      "content": "Effort",
+      "role": "user"
+    }
+  ],
+  "model": "command-a-reasoning-08-2025",
+  "stream": true,
+  "thinking": {
+    "token_budget": 8192,
+    "type": "enabled"
+  }
+}

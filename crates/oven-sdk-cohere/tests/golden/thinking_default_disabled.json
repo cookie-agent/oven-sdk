@@ -1,0 +1,13 @@
+{
+  "messages": [
+    {
+      "content": "Default",
+      "role": "user"
+    }
+  ],
+  "model": "command-a-reasoning-08-2025",
+  "stream": true,
+  "thinking": {
+    "type": "disabled"
+  }
+}

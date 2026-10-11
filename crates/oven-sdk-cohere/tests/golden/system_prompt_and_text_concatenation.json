@@ -1,0 +1,21 @@
+{
+  "max_tokens": 1000,
+  "messages": [
+    {
+      "content": "You are terse.\n\nLine two",
+      "role": "system"
+    },
+    {
+      "content": "Answer in \"quotes\" 😀\n",
+      "role": "system"
+    },
+    {
+      "content": "firstsecond\twith\u0001control",
+      "role": "user"
+    }
+  ],
+  "model": "command-a-reasoning-08-2025",
+  "p": 0.9,
+  "stream": true,
+  "temperature": 0.7
+}

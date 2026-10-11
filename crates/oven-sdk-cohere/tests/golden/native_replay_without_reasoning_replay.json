@@ -1,0 +1,40 @@
+{
+  "messages": [
+    {
+      "content": "Question",
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "answer",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": "Again",
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "thinking": "private thought",
+          "type": "thinking"
+        },
+        {
+          "text": "answer",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": "Once more",
+      "role": "user"
+    }
+  ],
+  "model": "command-a-reasoning-08-2025",
+  "stream": true
+}

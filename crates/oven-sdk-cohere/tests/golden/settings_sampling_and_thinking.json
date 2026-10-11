@@ -1,0 +1,27 @@
+{
+  "frequency_penalty": 0.25,
+  "k": 40,
+  "max_tokens": 512,
+  "messages": [
+    {
+      "content": "Sample",
+      "role": "user"
+    }
+  ],
+  "model": "command-a-reasoning-08-2025",
+  "p": 0.75,
+  "presence_penalty": 0.5,
+  "priority": 1,
+  "safety_mode": "CONTEXTUAL",
+  "seed": 7,
+  "stop_sequences": [
+    "END",
+    "\n\nUser:"
+  ],
+  "stream": true,
+  "temperature": 0.3,
+  "thinking": {
+    "token_budget": 2048,
+    "type": "enabled"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Describe these",
+          "type": "text"
+        },
+        {
+          "image_url": {
+            "detail": "low",
+            "url": "data:image/png;base64,iVBORw0K"
+          },
+          "type": "image_url"
+        },
+        {
+          "image_url": {
+            "detail": "high",
+            "url": "https://example.test/image.jpg?size=large"
+          },
+          "type": "image_url"
+        },
+        {
+          "image_url": {
+            "detail": "low",
+            "url": "data:image/gif;base64,R0lGODlh"
+          },
+          "type": "image_url"
+        },
+        {
+          "text": "trailing text",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "image_url": {
+            "detail": "low",
+            "url": "http://example.test/only.webp"
+          },
+          "type": "image_url"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "command-a-reasoning-08-2025",
+  "stream": true
+}
