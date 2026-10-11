@@ -79,7 +79,7 @@ impl State {
 
     pub(crate) fn apply(
         &mut self,
-        value: JsonValue,
+        mut value: JsonValue,
         parts: &mut Vec<StreamPart>,
         bytes: u64,
     ) -> Result<(), ModelError> {
@@ -104,11 +104,11 @@ impl State {
         if let Some(usage) = value.get("usage").filter(|usage| !usage.is_null()) {
             self.usage = usage_from(usage);
         }
-        let choices = value
-            .get("choices")
-            .and_then(JsonValue::as_array)
-            .cloned()
-            .unwrap_or_default();
+        // The chunk is owned; move its choices out instead of deep-cloning them.
+        let choices = match value.get_mut("choices") {
+            Some(JsonValue::Array(choices)) => std::mem::take(choices),
+            _ => Vec::new(),
+        };
         if choices.len() > 1 {
             return Err(invalid_event(
                 "multiple Chat choices are unsupported",
@@ -331,13 +331,19 @@ impl State {
                 id: id.clone(),
                 metadata: None,
             });
-            let mut call = ToolCallPart::new(id.clone(), name.clone(), parsed);
+            let mut call = ToolCallPart::new(id.clone(), name, parsed);
             call.raw_input = Some(tool.arguments.clone());
             parts.push(StreamPart::ToolCall { tool_call: call });
-            let mut native = serde_json::json!({"id":id,"type":"function","function":{"arguments":tool.arguments}});
+            let mut function = serde_json::Map::new();
+            function.insert("arguments".into(), tool.arguments.into());
             if let Some(provider_name) = provider_name {
-                native["function"]["name"] = provider_name.into();
+                function.insert("name".into(), provider_name.into());
             }
+            let mut native = serde_json::Map::new();
+            native.insert("id".into(), id.into());
+            native.insert("type".into(), "function".into());
+            native.insert("function".into(), function.into());
+            let native = JsonValue::Object(native);
             native_calls.push((tool.order.unwrap_or(u64::MAX), native));
         }
         native_calls.sort_by_key(|(order, _)| *order);
@@ -345,44 +351,51 @@ impl State {
             .into_iter()
             .map(|(_, call)| call)
             .collect::<Vec<_>>();
-        if !self.refusal.is_empty() {
+        // The turn is over: accumulated text moves into the replay payload.
+        let refusal = std::mem::take(&mut self.refusal);
+        if !refusal.is_empty() {
             parts.push(StreamPart::Custom {
-                part: CustomPart::new(
-                    "azure.openai.refusal",
-                    JsonValue::String(self.refusal.clone()),
-                ),
+                part: CustomPart::new("azure.openai.refusal", JsonValue::String(refusal.clone())),
             });
         }
         let reason = map_finish(self.finish_reason.as_deref());
-        let mut finish = Finish::new(self.usage.clone(), reason);
+        let mut finish = Finish::new(std::mem::take(&mut self.usage), reason);
         finish.response_metadata = self.response_metadata.clone();
         if self.policy != ReplayPolicy::Never {
-            let mut message = serde_json::json!({
-                "role":"assistant",
-                "content":if self.text.is_empty(){JsonValue::Null}else{JsonValue::String(self.text.clone())}
-            });
+            let text = std::mem::take(&mut self.text);
+            let reasoning = std::mem::take(&mut self.reasoning);
+            let mut message = serde_json::Map::new();
+            message.insert("role".into(), "assistant".into());
+            message.insert(
+                "content".into(),
+                if text.is_empty() {
+                    JsonValue::Null
+                } else {
+                    JsonValue::String(text)
+                },
+            );
             if !native_calls.is_empty() {
-                message["tool_calls"] = JsonValue::Array(native_calls);
+                message.insert("tool_calls".into(), JsonValue::Array(native_calls));
             }
-            if !self.reasoning.is_empty() {
+            if !reasoning.is_empty() {
                 match self.reasoning_field {
                     AzureReasoningField::ReasoningContent => {
-                        message["reasoning_content"] = self.reasoning.clone().into();
+                        message.insert("reasoning_content".into(), reasoning.into());
                     }
                     AzureReasoningField::Reasoning => {
-                        message["reasoning"] = self.reasoning.clone().into();
+                        message.insert("reasoning".into(), reasoning.into());
                     }
                     AzureReasoningField::None => {}
                 }
             }
-            if !self.refusal.is_empty() {
-                message["refusal"] = self.refusal.clone().into();
+            if !refusal.is_empty() {
+                message.insert("refusal".into(), refusal.into());
             }
-            let payload = serde_json::json!({
-                "format":REPLAY_FORMAT,
-                "binding":self.replay_binding,
-                "message":message
-            });
+            let mut payload = serde_json::Map::new();
+            payload.insert("format".into(), REPLAY_FORMAT.into());
+            payload.insert("binding".into(), self.replay_binding.clone());
+            payload.insert("message".into(), JsonValue::Object(message));
+            let payload = JsonValue::Object(payload);
             finish.native_replay = Some(
                 NativeReplayArtifact::capture(
                     self.adapter_id.clone(),
@@ -445,8 +458,14 @@ impl State {
             ("created", "azure.created"),
             ("system_fingerprint", "azure.system_fingerprint"),
         ] {
-            if let Some(value) = value.get(source).cloned().filter(|value| !value.is_null()) {
-                self.response_metadata.insert(key.into(), value);
+            if let Some(value) = value.get(source).filter(|value| !value.is_null()) {
+                // Update in place so repeated chunk metadata does not reallocate keys.
+                match self.response_metadata.get_mut(key) {
+                    Some(slot) => slot.clone_from(value),
+                    None => {
+                        self.response_metadata.insert(key.into(), value.clone());
+                    }
+                }
             }
         }
     }

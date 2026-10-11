@@ -100,7 +100,7 @@ impl State {
 
     pub(crate) fn apply(
         &mut self,
-        value: JsonValue,
+        mut value: JsonValue,
         parts: &mut Vec<StreamPart>,
         bytes: u64,
     ) -> Result<(), ModelError> {
@@ -128,7 +128,7 @@ impl State {
             "response.output_item.added" => {
                 let output_index = self.output_index(&value, bytes)?;
                 self.ensure_unfinalized(output_index, bytes)?;
-                let item = value.get("item").cloned().ok_or_else(|| {
+                let item = value.get_mut("item").map(JsonValue::take).ok_or_else(|| {
                     invalid_event("Responses item-added event is missing item", bytes)
                 })?;
                 self.add_item(output_index, item, parts, bytes)
@@ -240,7 +240,7 @@ impl State {
             "response.output_item.done" => {
                 let output_index = self.output_index(&value, bytes)?;
                 self.ensure_unfinalized(output_index, bytes)?;
-                let item = value.get("item").cloned().ok_or_else(|| {
+                let item = value.get_mut("item").map(JsonValue::take).ok_or_else(|| {
                     invalid_event("Responses item-done event is missing item", bytes)
                 })?;
                 self.finish_item(output_index, item, parts, bytes)
@@ -395,14 +395,17 @@ impl State {
 
     fn finish_response(
         &mut self,
-        value: JsonValue,
+        mut value: JsonValue,
         terminal_kind: TerminalKind,
         parts: &mut Vec<StreamPart>,
         bytes: u64,
     ) -> Result<(), ModelError> {
-        let response = value
-            .get("response")
-            .and_then(JsonValue::as_object)
+        // The terminal event is owned: move its response and output items out
+        // instead of deep-cloning them.
+        let mut response = value
+            .get_mut("response")
+            .filter(|response| response.is_object())
+            .map(JsonValue::take)
             .ok_or_else(|| {
                 invalid_finalize(
                     "Responses terminal event is missing a response object",
@@ -410,9 +413,9 @@ impl State {
                 )
             })?;
         let output = response
-            .get("output")
-            .and_then(JsonValue::as_array)
-            .cloned()
+            .get_mut("output")
+            .and_then(JsonValue::as_array_mut)
+            .map(std::mem::take)
             .unwrap_or_default();
         if output.len() > MAX_OUTPUT_ITEMS {
             return Err(invalid_finalize(
@@ -429,11 +432,9 @@ impl State {
                 .and_then(JsonValue::as_str)
                 .filter(|reason| !reason.is_empty()),
         };
-        let response = JsonValue::Object(response.clone());
-        let response = &response;
-        self.capture_response(response);
+        self.capture_response(&response);
         let mut consumed = BTreeSet::new();
-        for (index, item) in output.iter().cloned().enumerate() {
+        for (index, item) in output.into_iter().enumerate() {
             let output_index = self
                 .matching_item_index(&item, &consumed)
                 .or_else(|| self.available_item_index(index))
@@ -811,13 +812,19 @@ impl State {
         let part = content[content_index].as_object_mut().ok_or_else(|| {
             invalid_event("Responses message content part is not an object", bytes)
         })?;
-        let current = match part.get("text") {
-            Some(value) => value
-                .as_str()
-                .ok_or_else(|| invalid_event("Responses message text is not a string", bytes))?,
-            None => "",
-        };
-        part.insert("text".into(), format!("{current}{delta}").into());
+        // Append in place: rebuilding the accumulated text per delta is quadratic.
+        match part.get_mut("text") {
+            Some(JsonValue::String(current)) => current.push_str(delta),
+            Some(_) => {
+                return Err(invalid_event(
+                    "Responses message text is not a string",
+                    bytes,
+                ));
+            }
+            None => {
+                part.insert("text".into(), delta.into());
+            }
+        }
         Ok(())
     }
 
@@ -858,11 +865,11 @@ impl State {
                 bytes,
             ));
         }
-        let current = part
-            .get("refusal")
-            .and_then(JsonValue::as_str)
-            .ok_or_else(|| invalid_event("Responses refusal is not a string", bytes))?;
-        part.insert("refusal".into(), format!("{current}{delta}").into());
+        // Append in place: rebuilding the accumulated text per delta is quadratic.
+        match part.get_mut("refusal") {
+            Some(JsonValue::String(current)) => current.push_str(delta),
+            _ => return Err(invalid_event("Responses refusal is not a string", bytes)),
+        }
         Ok(())
     }
 
@@ -944,13 +951,19 @@ impl State {
         let part = summary[summary_index].as_object_mut().ok_or_else(|| {
             invalid_event("Responses reasoning summary part is not an object", bytes)
         })?;
-        let current = match part.get("text") {
-            Some(value) => value.as_str().ok_or_else(|| {
-                invalid_event("Responses reasoning summary text is not a string", bytes)
-            })?,
-            None => "",
-        };
-        part.insert("text".into(), format!("{current}{delta}").into());
+        // Append in place: rebuilding the accumulated text per delta is quadratic.
+        match part.get_mut("text") {
+            Some(JsonValue::String(current)) => current.push_str(delta),
+            Some(_) => {
+                return Err(invalid_event(
+                    "Responses reasoning summary text is not a string",
+                    bytes,
+                ));
+            }
+            None => {
+                part.insert("text".into(), delta.into());
+            }
+        }
         Ok(())
     }
 
@@ -985,13 +998,19 @@ impl State {
         let part = content[content_index].as_object_mut().ok_or_else(|| {
             invalid_event("Responses reasoning content part is not an object", bytes)
         })?;
-        let current = match part.get("text") {
-            Some(value) => value.as_str().ok_or_else(|| {
-                invalid_event("Responses reasoning content text is not a string", bytes)
-            })?,
-            None => "",
-        };
-        part.insert("text".into(), format!("{current}{delta}").into());
+        // Append in place: rebuilding the accumulated text per delta is quadratic.
+        match part.get_mut("text") {
+            Some(JsonValue::String(current)) => current.push_str(delta),
+            Some(_) => {
+                return Err(invalid_event(
+                    "Responses reasoning content text is not a string",
+                    bytes,
+                ));
+            }
+            None => {
+                part.insert("text".into(), delta.into());
+            }
+        }
         Ok(())
     }
 
@@ -1273,6 +1292,64 @@ fn usage_from(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_state() -> State {
+        State::new(
+            AdapterId::new("azure-responses"),
+            ReplayPolicy::Never,
+            ReplayCapability::Optional,
+            JsonValue::Null,
+            NativeContextScope::new(
+                oven_sdk::ProviderId::new("azure"),
+                oven_sdk::ModelId::new("gpt-5"),
+                oven_sdk::ResourceId::new("test-resource").expect("valid resource"),
+            )
+            .expect("valid scope"),
+        )
+    }
+
+    #[test]
+    fn streamed_deltas_accumulate_into_item_slots() {
+        let mut state = test_state();
+        let mut parts = Vec::new();
+        for event in [
+            serde_json::json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hé"}),
+            serde_json::json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"llo"}),
+            serde_json::json!({"type":"response.refusal.delta","output_index":0,"content_index":1,"delta":"no"}),
+            serde_json::json!({"type":"response.refusal.delta","output_index":0,"content_index":1,"delta":"pe"}),
+            serde_json::json!({"type":"response.reasoning_summary_text.delta","output_index":1,"summary_index":0,"delta":"a"}),
+            serde_json::json!({"type":"response.reasoning_summary_text.delta","output_index":1,"summary_index":0,"delta":"b"}),
+            serde_json::json!({"type":"response.reasoning_text.delta","output_index":1,"content_index":0,"delta":"c"}),
+            serde_json::json!({"type":"response.reasoning_text.delta","output_index":1,"content_index":0,"delta":"d"}),
+        ] {
+            state.apply(event, &mut parts, 0).unwrap();
+        }
+        assert_eq!(
+            state.items.get(&0).unwrap()["content"],
+            serde_json::json!([
+                {"type":"output_text","text":"héllo"},
+                {"type":"refusal","refusal":"nope"},
+            ])
+        );
+        let reasoning = state.items.get(&1).unwrap();
+        assert_eq!(
+            reasoning["summary"],
+            serde_json::json!([{"type":"summary_text","text":"ab"}])
+        );
+        assert_eq!(
+            reasoning["content"],
+            serde_json::json!([{"type":"reasoning_text","text":"cd"}])
+        );
+        state.items.get_mut(&0).unwrap()["content"][0]["text"] = serde_json::json!(5);
+        let error = state
+            .apply(
+                serde_json::json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"x"}),
+                &mut parts,
+                0,
+            )
+            .unwrap_err();
+        assert_eq!(error.message, "Responses message text is not a string");
+    }
 
     #[test]
     fn cache_write_usage_is_optional_and_validated() {
