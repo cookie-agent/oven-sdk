@@ -4,6 +4,7 @@
 #![allow(clippy::result_large_err)]
 //! Anthropic Messages API adapter for [`oven_sdk`].
 
+mod body;
 /// Explicit registry-free model configuration.
 pub mod config;
 /// Error-envelope classification.

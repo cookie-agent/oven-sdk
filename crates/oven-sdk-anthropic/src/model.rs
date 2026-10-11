@@ -112,10 +112,7 @@ impl InnerModel {
                 self.config.protocol,
                 self.config.compatible,
             )?;
-            let body = serde_json::to_vec(&encoded.body).map_err(|_| {
-                ModelError::invalid_request("could not serialize Messages request")
-                    .with_stage(ErrorStage::RequestEncoding)
-            })?;
+            let body = encoded.body;
             crate::request::validate_serialized_request_size(body.len(), self.config.protocol)?;
             let mut headers = self.config.base_headers.clone();
             if let Some(provider) = &self.config.headers.dynamic_headers {

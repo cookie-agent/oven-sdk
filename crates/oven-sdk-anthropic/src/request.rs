@@ -1,8 +1,8 @@
 //! Request validation and Anthropic Messages encoding.
 
-use std::collections::BTreeSet;
+use std::{borrow::Cow, collections::BTreeSet};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use bytes::Bytes;
 use oven_sdk::{
     AssistantPart, Capability, ContentValue, ErrorStage, FileSource, HistoryTurn, InputPart,
     JsonValue, LanguageModelDescriptor, ModelCapabilities, ModelError, NativeContextScope,
@@ -11,6 +11,11 @@ use oven_sdk::{
 };
 
 use crate::{
+    body::{
+        Block, CacheControl, Message, MessagesBody, Metadata, NativeBlock, OutputConfig,
+        OutputFormat, Source, TextValue, Thinking, Tool, ToolChoice as WireToolChoice, ToolInput,
+        ToolResultContent, TypedBlock,
+    },
     config::{AnthropicProtocolSettings, AnthropicThinkingSupport, MiniMaxProtocolSettings},
     model::ProtocolSettings,
     options::{
@@ -770,18 +775,13 @@ fn cache_control_from_options(
 fn cache_control_from_metadata(metadata: &oven_sdk::PartMetadata) -> Option<AnthropicCacheControl> {
     cache_control_from_options(metadata.as_ref()?)
 }
-fn cache_control_value(control: AnthropicCacheControl) -> JsonValue {
-    serde_json::json!({"type":"ephemeral","ttl":match control.ttl { AnthropicCacheTtl::FiveMinutes => "5m", AnthropicCacheTtl::OneHour => "1h" }})
-}
-fn attach_cache(mut block: JsonValue, cache: Option<AnthropicCacheControl>) -> JsonValue {
-    if let Some(cache) = cache {
-        block["cache_control"] = cache_control_value(cache);
-    }
-    block
+fn wire_cache(marker: Option<AnthropicCacheControl>) -> Option<CacheControl> {
+    marker.as_ref().map(CacheControl::from)
 }
 
 pub(crate) struct Encoded {
-    pub(crate) body: JsonValue,
+    /// Serialized request body; reused verbatim for signing and sending.
+    pub(crate) body: Bytes,
     pub(crate) replay: ReplayOutcome,
     pub(crate) warnings: Vec<String>,
     pub(crate) betas: Vec<String>,
@@ -911,7 +911,7 @@ pub(crate) fn encode_request(
     let cache_plan = &parsed.cache_plan;
     validate_cache_plan(cache_plan)?;
     let mut replay = ReplayOutcome::default();
-    let mut messages = Vec::new();
+    let mut messages: Vec<Message<'_>> = Vec::with_capacity(request.history.len());
     let mut warnings = cache_plan.warnings.clone();
     let mut system = Vec::new();
     let mut previous_was_tool = false;
@@ -923,32 +923,34 @@ pub(crate) fn encode_request(
                     if let oven_sdk::SystemPart::Text(text) = part
                         && !text.text.is_empty()
                     {
-                        system.push(attach_cache(
-                            serde_json::json!({"type":"text","text":text.text}),
-                            cache_plan.history[index].marker_for(part_index),
-                        ));
+                        system.push(Block::Typed(TypedBlock::Text {
+                            text: TextValue::Str(&text.text),
+                            cache_control: wire_cache(
+                                cache_plan.history[index].marker_for(part_index),
+                            ),
+                        }));
                     }
                 }
             }
             HistoryTurn::User(message) => {
                 previous_was_tool = false;
-                let content = message
-                    .content
-                    .iter()
-                    .enumerate()
-                    .map(|(part_index, part)| {
-                        input_block(
-                            part,
-                            cache_plan.history[index].marker_for(part_index),
-                            protocol,
-                            parsed.minimax_media[index][part_index].as_ref(),
-                            compatible,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let content = content.into_iter().flatten().collect::<Vec<_>>();
+                let mut content = Vec::with_capacity(message.content.len());
+                for (part_index, part) in message.content.iter().enumerate() {
+                    if let Some(block) = input_block(
+                        part,
+                        wire_cache(cache_plan.history[index].marker_for(part_index)),
+                        protocol,
+                        parsed.minimax_media[index][part_index].as_ref(),
+                        compatible,
+                    )? {
+                        content.push(block);
+                    }
+                }
                 if !content.is_empty() {
-                    messages.push(serde_json::json!({"role":"user","content":content}));
+                    messages.push(Message {
+                        role: "user",
+                        content,
+                    });
                 }
             }
             HistoryTurn::Tool(message) => {
@@ -959,7 +961,7 @@ pub(crate) fn encode_request(
                     .map(|(part_index, result)| {
                         tool_result_block(
                             result,
-                            cache_plan.history[index].marker_for(part_index),
+                            wire_cache(cache_plan.history[index].marker_for(part_index)),
                             protocol,
                         )
                     })
@@ -968,12 +970,14 @@ pub(crate) fn encode_request(
                     if previous_was_tool {
                         messages
                             .last_mut()
-                            .and_then(|message| message.get_mut("content"))
-                            .and_then(JsonValue::as_array_mut)
                             .expect("previous tool message has content")
+                            .content
                             .extend(content);
                     } else {
-                        messages.push(serde_json::json!({"role":"user","content":content}));
+                        messages.push(Message {
+                            role: "user",
+                            content,
+                        });
                     }
                 }
                 previous_was_tool = true;
@@ -987,29 +991,37 @@ pub(crate) fn encode_request(
                         disposition: ReplayDisposition::ReconstructedNormalized,
                     });
                 } else if let Some(artifact) = &turn.finish.native_replay {
-                    {
-                        match replay::decode(artifact, &turn.message.content, protocol) {
-                            Ok(decoded) => {
-                                replay.decisions.push(ReplayDecision {
-                                    history_index: index,
-                                    disposition: ReplayDisposition::Replayed,
-                                });
-                                content = Some(oven_sdk::replay::eligible_blocks(
+                    match replay::decode(artifact, &turn.message.content, protocol) {
+                        Ok(decoded) => {
+                            replay.decisions.push(ReplayDecision {
+                                history_index: index,
+                                disposition: ReplayDisposition::Replayed,
+                            });
+                            content = Some(
+                                replay::eligible_blocks(
                                     artifact,
                                     &descriptor.identity.model_id,
-                                    oven_sdk::replay::BlockFormat::Messages,
                                     descriptor.capabilities.replay.reasoning,
                                     decoded,
                                     &mut warnings,
-                                )?);
-                            }
-                            Err(reason) => replay.decisions.push(ReplayDecision {
-                                history_index: index,
-                                disposition: ReplayDisposition::DiscardedInvalidPayload {
-                                    reason: reason.into(),
-                                },
-                            }),
+                                )?
+                                .into_iter()
+                                .map(|value| {
+                                    Block::Native(NativeBlock {
+                                        value,
+                                        cache: None,
+                                        text: None,
+                                    })
+                                })
+                                .collect::<Vec<_>>(),
+                            );
                         }
+                        Err(reason) => replay.decisions.push(ReplayDecision {
+                            history_index: index,
+                            disposition: ReplayDisposition::DiscardedInvalidPayload {
+                                reason: reason.into(),
+                            },
+                        }),
                     }
                 } else {
                     replay.decisions.push(ReplayDecision {
@@ -1074,7 +1086,10 @@ pub(crate) fn encode_request(
                     trim_final_assistant_prefill(&mut content);
                 }
                 if !content.is_empty() {
-                    messages.push(serde_json::json!({"role":"assistant","content":content}));
+                    messages.push(Message {
+                        role: "assistant",
+                        content,
+                    });
                 }
             }
         }
@@ -1094,108 +1109,125 @@ pub(crate) fn encode_request(
         }
         _ => requested_max,
     };
-    let mut root = serde_json::json!({"model": descriptor.identity.model_id.as_str(), "messages": messages, "stream": true, "max_tokens": wire_max});
-    if !system.is_empty() {
-        root["system"] = JsonValue::Array(system);
-    }
-    if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {
-        root["tools"] = JsonValue::Array(request.tools.iter().enumerate().map(|(index, tool)| {
-            let strict = parsed.strict_tools[index];
-            let mut value = serde_json::json!({"name":tool.name,"description":tool.description,"input_schema":tool.input_schema.as_value()});
-            if strict { value["strict"] = JsonValue::Bool(true); }
-            attach_cache(value, cache_plan.tools[index].clone())
-        }).collect());
-    }
-    match &request.tool_choice {
-        ToolChoice::Auto if !request.tools.is_empty() => {
-            root["tool_choice"] = serde_json::json!({"type":"auto"})
+    let tools = if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {
+        request
+            .tools
+            .iter()
+            .enumerate()
+            .map(|(index, tool)| Tool {
+                name: &tool.name,
+                description: &tool.description,
+                input_schema: tool.input_schema.as_value(),
+                strict: parsed.strict_tools[index],
+                cache_control: wire_cache(cache_plan.tools[index].clone()),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let tool_choice = match &request.tool_choice {
+        ToolChoice::Auto if !request.tools.is_empty() => Some(WireToolChoice::Auto),
+        ToolChoice::Required if protocol.is_first_party() => Some(WireToolChoice::Any),
+        ToolChoice::Tool(name) if protocol.is_first_party() => Some(WireToolChoice::Tool { name }),
+        ToolChoice::None if !request.tools.is_empty() => {
+            warnings.push(format!(
+                "{} tool_choice none omitted declared tools",
+                protocol.display_name()
+            ));
+            None
         }
-        ToolChoice::Required if protocol.is_first_party() => {
-            root["tool_choice"] = serde_json::json!({"type":"any"})
-        }
-        ToolChoice::Tool(name) if protocol.is_first_party() => {
-            root["tool_choice"] = serde_json::json!({"type":"tool","name":name})
-        }
-        ToolChoice::None if !request.tools.is_empty() => warnings.push(format!(
-            "{} tool_choice none omitted declared tools",
-            protocol.display_name()
-        )),
-        _ => {}
-    }
+        _ => None,
+    };
+    let mut thinking = None;
     if protocol.is_first_party()
-        && let Some(thinking) = &opts.thinking
+        && let Some(value) = &opts.thinking
     {
-        let (mode, budget, display) = match thinking {
-            AnthropicThinking::Disabled => ("disabled", None, None),
+        thinking = Some(match value {
+            AnthropicThinking::Disabled => Thinking {
+                mode: "disabled",
+                budget_tokens: None,
+                display: None,
+            },
             AnthropicThinking::Enabled {
                 budget_tokens,
                 display,
-            } => ("enabled", Some(*budget_tokens), display.as_ref()),
-            AnthropicThinking::Adaptive { display } => ("adaptive", None, display.as_ref()),
-        };
-        root["thinking"] = serde_json::json!({"type":mode});
-        if let Some(budget) = budget {
-            root["thinking"]["budget_tokens"] = JsonValue::from(budget);
-        }
-        if let Some(display) = display {
-            root["thinking"]["display"] = JsonValue::String(display.clone());
-        }
+            } => Thinking {
+                mode: "enabled",
+                budget_tokens: Some(*budget_tokens),
+                display: display.as_deref(),
+            },
+            AnthropicThinking::Adaptive { display } => Thinking {
+                mode: "adaptive",
+                budget_tokens: None,
+                display: display.as_deref(),
+            },
+        });
     }
-    if let Some(temperature) = request.inference.temperature {
-        root["temperature"] = JsonValue::from(temperature);
-    }
-    if let Some(top_p) = request.inference.top_p {
-        root["top_p"] = JsonValue::from(top_p);
-    }
+    let mut service_tier = None;
+    let mut metadata = None;
     if protocol == Protocol::MiniMax {
-        if let Some(thinking) = &minimax_opts.thinking {
-            root["thinking"] = serde_json::json!({"type":match thinking {
-                MiniMaxThinking::Adaptive => "adaptive",
-                MiniMaxThinking::Disabled => "disabled",
-            }});
+        if let Some(value) = &minimax_opts.thinking {
+            thinking = Some(Thinking {
+                mode: match value {
+                    MiniMaxThinking::Adaptive => "adaptive",
+                    MiniMaxThinking::Disabled => "disabled",
+                },
+                budget_tokens: None,
+                display: None,
+            });
         }
-        if let Some(service_tier) = &minimax_opts.service_tier {
-            root["service_tier"] = JsonValue::String(service_tier.clone());
-        }
-        if let Some(user_id) = &minimax_opts.user_id {
-            root["metadata"] = serde_json::json!({"user_id":user_id});
-        }
+        service_tier = minimax_opts.service_tier.as_deref();
+        metadata = minimax_opts
+            .user_id
+            .as_deref()
+            .map(|user_id| Metadata { user_id });
     }
-    let mut output_config = serde_json::json!({});
-    if protocol.is_first_party()
-        && let Some(effort) = &opts.effort
-    {
-        output_config["effort"] = JsonValue::String(effort.clone());
-    }
-    if protocol.is_first_party()
-        && let ResponseFormat::Json {
+    let effort = opts.effort.as_deref().filter(|_| protocol.is_first_party());
+    let format = match &request.response_format {
+        ResponseFormat::Json {
             schema: Some(schema),
-        } = &request.response_format
-    {
-        output_config["format"] =
-            serde_json::json!({"type":"json_schema","schema":schema.as_value()});
-    }
-    if output_config
-        .as_object()
-        .is_some_and(|output_config| !output_config.is_empty())
-    {
-        root["output_config"] = output_config;
-    }
+        } if protocol.is_first_party() => Some(OutputFormat {
+            kind: "json_schema",
+            schema: schema.as_value(),
+        }),
+        _ => None,
+    };
+    let output_config =
+        (effort.is_some() || format.is_some()).then_some(OutputConfig { effort, format });
     if protocol.is_first_party()
         && let Some(user_id) = &opts.user_id
     {
-        root["metadata"] = serde_json::json!({"user_id":user_id});
+        metadata = Some(Metadata { user_id });
     }
-    if protocol.is_first_party()
-        && let Some(cache) = &cache_plan.request
-    {
-        root["cache_control"] = cache_control_value(cache.clone());
+    let body = MessagesBody {
+        model: descriptor.identity.model_id.as_str(),
+        messages,
+        stream: true,
+        max_tokens: wire_max,
+        system,
+        tools,
+        tool_choice,
+        thinking,
+        temperature: request.inference.temperature,
+        top_p: request.inference.top_p,
+        service_tier,
+        metadata,
+        output_config,
+        cache_control: if protocol.is_first_party() {
+            cache_plan.request.as_ref().map(CacheControl::from)
+        } else {
+            None
+        },
+        inference_geo: aws_opts
+            .inference_geo
+            .as_deref()
+            .filter(|_| protocol == Protocol::AnthropicAws),
     }
-    if protocol == Protocol::AnthropicAws
-        && let Some(inference_geo) = &aws_opts.inference_geo
-    {
-        root["inference_geo"] = JsonValue::String(inference_geo.clone());
-    }
+    .to_bytes()
+    .map_err(|_| {
+        ModelError::invalid_request("could not serialize Messages request")
+            .with_stage(ErrorStage::RequestEncoding)
+    })?;
     let betas = if protocol.is_first_party() {
         opts.betas
             .iter()
@@ -1211,79 +1243,82 @@ pub(crate) fn encode_request(
         Vec::new()
     };
     Ok(Encoded {
-        body: root,
+        body: Bytes::from(body),
         replay,
         warnings,
         betas,
     })
 }
-fn input_block(
-    part: &InputPart,
-    cache: Option<AnthropicCacheControl>,
+fn input_block<'a>(
+    part: &'a InputPart,
+    cache: Option<CacheControl>,
     protocol: Protocol,
-    minimax_options: Option<&MiniMaxMediaOptions>,
+    minimax_options: Option<&'a MiniMaxMediaOptions>,
     compatible: bool,
-) -> Result<Option<JsonValue>, ModelError> {
+) -> Result<Option<Block<'a>>, ModelError> {
     Ok(match part {
-        InputPart::Text(t) => (!t.text.is_empty())
-            .then(|| attach_cache(serde_json::json!({"type":"text","text":t.text}), cache)),
-        InputPart::File(f) => Some(attach_cache(
-            file_block(f, protocol, minimax_options, compatible)?,
-            cache,
-        )),
+        InputPart::Text(t) => (!t.text.is_empty()).then(|| {
+            Block::Typed(TypedBlock::Text {
+                text: TextValue::Str(&t.text),
+                cache_control: cache,
+            })
+        }),
+        InputPart::File(f) => {
+            let mut block = file_block(f, protocol, minimax_options, compatible)?;
+            if let Some(cache) = cache {
+                block.set_cache(cache);
+            }
+            Some(block)
+        }
         InputPart::Custom(_) => None,
     })
 }
-fn file_block(
-    file: &oven_sdk::FilePart,
+fn file_block<'a>(
+    file: &'a oven_sdk::FilePart,
     protocol: Protocol,
-    minimax_options: Option<&MiniMaxMediaOptions>,
+    minimax_options: Option<&'a MiniMaxMediaOptions>,
     compatible: bool,
-) -> Result<JsonValue, ModelError> {
+) -> Result<Block<'a>, ModelError> {
     if protocol == Protocol::MiniMax || (compatible && file.media_type.starts_with("video/")) {
         return minimax_file_block(file, minimax_options);
     }
-    if file.media_type == "text/plain"
-        && let FileSource::Text(text) = &file.source
-    {
-        return Ok(
-            serde_json::json!({"type":"document","source":{"type":"text","media_type":"text/plain","data":text}}),
-        );
-    }
+    let image = file.media_type.starts_with("image/");
     let source = match &file.source {
-        FileSource::Bytes(bytes) => STANDARD.encode(bytes),
-        FileSource::Url(url) => {
-            return Ok(
-                serde_json::json!({"type":if file.media_type.starts_with("image/") {"image"} else {"document"},"source":{"type":"url","url":url}}),
-            );
+        FileSource::Text(text) if file.media_type == "text/plain" => {
+            return Ok(Block::Typed(TypedBlock::Document {
+                source: Source::text("text/plain", text),
+                cache_control: None,
+            }));
         }
+        FileSource::Bytes(bytes) => Source::base64(&file.media_type, bytes),
+        FileSource::Url(url) => Source::url(Cow::Borrowed(url.as_str())),
         _ => {
             return Err(ModelError::unsupported("unsupported Anthropic file source")
                 .with_stage(ErrorStage::RequestEncoding));
         }
     };
-    if file.media_type.starts_with("image/") {
-        Ok(
-            serde_json::json!({"type":"image","source":{"type":"base64","media_type":file.media_type,"data":source}}),
-        )
+    Ok(Block::Typed(if image {
+        TypedBlock::Image {
+            source,
+            cache_control: None,
+        }
     } else {
-        Ok(
-            serde_json::json!({"type":"document","source":{"type":"base64","media_type":file.media_type,"data":source}}),
-        )
-    }
+        TypedBlock::Document {
+            source,
+            cache_control: None,
+        }
+    }))
 }
 
-fn minimax_file_block(
-    file: &oven_sdk::FilePart,
-    options: Option<&MiniMaxMediaOptions>,
-) -> Result<JsonValue, ModelError> {
+fn minimax_file_block<'a>(
+    file: &'a oven_sdk::FilePart,
+    options: Option<&'a MiniMaxMediaOptions>,
+) -> Result<Block<'a>, ModelError> {
     let mut source = match &file.source {
-        FileSource::Bytes(bytes) => {
-            serde_json::json!({"type":"base64","media_type":file.media_type,"data":STANDARD.encode(bytes)})
-        }
-        FileSource::Url(url) => serde_json::json!({"type":"url","url":url}),
+        FileSource::Bytes(bytes) => Source::base64(&file.media_type, bytes),
+        FileSource::Url(url) => Source::url(Cow::Borrowed(url.as_str())),
         FileSource::ProviderReference { provider, id } if provider.as_str() == "minimax" => {
-            serde_json::json!({"type":"url","url":format!("mm_file://{id}")})
+            Source::url(Cow::Owned(format!("mm_file://{id}")))
         }
         _ => {
             return Err(ModelError::unsupported("unsupported MiniMax file source")
@@ -1291,19 +1326,20 @@ fn minimax_file_block(
         }
     };
     if let Some(options) = options {
-        if let Some(detail) = &options.detail {
-            source["detail"] = JsonValue::String(detail.clone());
-        }
-        if let Some(fps) = options.fps {
-            source["fps"] = JsonValue::from(fps);
-        }
-        if let Some(max_long_side_pixel) = options.max_long_side_pixel {
-            source["max_long_side_pixel"] = JsonValue::from(max_long_side_pixel);
-        }
+        source.detail = options.detail.as_deref();
+        source.fps = options.fps;
+        source.max_long_side_pixel = options.max_long_side_pixel;
     }
-    Ok(serde_json::json!({
-        "type":if file.media_type.starts_with("image/") {"image"} else {"video"},
-        "source":source,
+    Ok(Block::Typed(if file.media_type.starts_with("image/") {
+        TypedBlock::Image {
+            source,
+            cache_control: None,
+        }
+    } else {
+        TypedBlock::Video {
+            source,
+            cache_control: None,
+        }
     }))
 }
 
@@ -1321,77 +1357,85 @@ fn minimax_media_options(
 }
 fn tool_result_block(
     result: &ToolResultPart,
-    cache: Option<AnthropicCacheControl>,
+    cache: Option<CacheControl>,
     protocol: Protocol,
-) -> Result<JsonValue, ModelError> {
+) -> Result<Block<'_>, ModelError> {
     let content = match &result.content {
-        ToolContent::Text(v) => JsonValue::String(v.clone()),
-        ToolContent::Json(v) => JsonValue::String(v.to_string()),
+        ToolContent::Text(v) => ToolResultContent::Text(TextValue::Str(v)),
+        ToolContent::Json(v) => ToolResultContent::Text(TextValue::Json(v)),
         ToolContent::Mixed(v)
             if protocol.is_first_party()
                 && v.iter().any(|value| matches!(value, ContentValue::File(_))) =>
         {
-            JsonValue::Array(
+            ToolResultContent::Blocks(
                 v.iter()
                     .map(|value| match value {
-                        ContentValue::Text(value) => {
-                            Ok(serde_json::json!({"type":"text","text":value}))
-                        }
-                        ContentValue::Json(value) => {
-                            Ok(serde_json::json!({"type":"text","text":value.to_string()}))
-                        }
+                        ContentValue::Text(value) => Ok(Block::Typed(TypedBlock::Text {
+                            text: TextValue::Str(value),
+                            cache_control: None,
+                        })),
+                        ContentValue::Json(value) => Ok(Block::Typed(TypedBlock::Text {
+                            text: TextValue::Json(value),
+                            cache_control: None,
+                        })),
                         ContentValue::File(file) => file_block(file, protocol, None, false),
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             )
         }
-        ToolContent::Mixed(v) => JsonValue::String(serde_json::to_string(v).unwrap_or_default()),
-        ToolContent::Denied { reason } => JsonValue::String(reason.clone().unwrap_or_default()),
-    };
-    Ok(attach_cache(
-        serde_json::json!({"type":"tool_result","tool_use_id":result.tool_call_id,"content":content,"is_error":result.is_error}),
-        cache,
-    ))
-}
-pub(crate) fn assistant_block(part: &AssistantPart) -> Option<JsonValue> {
-    match part {
-        AssistantPart::Text(t) => {
-            (!t.text.is_empty()).then(|| serde_json::json!({"type":"text","text":t.text}))
+        ToolContent::Mixed(v) => ToolResultContent::Text(TextValue::Owned(
+            serde_json::to_string(v).unwrap_or_default(),
+        )),
+        ToolContent::Denied { reason } => {
+            ToolResultContent::Text(TextValue::Str(reason.as_deref().unwrap_or_default()))
         }
+    };
+    Ok(Block::Typed(TypedBlock::ToolResult {
+        tool_use_id: &result.tool_call_id,
+        content,
+        is_error: result.is_error,
+        cache_control: cache,
+    }))
+}
+pub(crate) fn assistant_block(part: &AssistantPart) -> Option<Block<'_>> {
+    match part {
+        AssistantPart::Text(t) => (!t.text.is_empty()).then(|| {
+            Block::Typed(TypedBlock::Text {
+                text: TextValue::Str(&t.text),
+                cache_control: None,
+            })
+        }),
         AssistantPart::Reasoning(_) => None,
-        AssistantPart::ToolCall(t) => Some(
-            serde_json::json!({"type":"tool_use","id":t.id,"name":t.name,"input": if t.input.is_object() { t.input.clone() } else { serde_json::json!({"rawInvalidInput":t.input}) }}),
-        ),
+        AssistantPart::ToolCall(t) => Some(Block::Typed(TypedBlock::ToolUse {
+            id: &t.id,
+            name: &t.name,
+            input: if t.input.is_object() {
+                ToolInput::Object(&t.input)
+            } else {
+                ToolInput::Raw { raw: &t.input }
+            },
+            cache_control: None,
+        })),
         _ => None,
     }
 }
 
-pub(crate) fn assistant_semantic_block(part: &AssistantPart) -> Option<JsonValue> {
+/// Wire block type `assistant_block` produces for a part, without building the block.
+fn assistant_block_type(part: &AssistantPart) -> Option<&'static str> {
     match part {
-        AssistantPart::Reasoning(reasoning) => reasoning
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("anthropic.redacted"))
-            .map_or_else(
-                || Some(serde_json::json!({"type":"thinking","thinking":reasoning.text})),
-                |data| Some(serde_json::json!({"type":"redacted_thinking","data":data})),
-            ),
-        _ => assistant_block(part),
+        AssistantPart::Text(t) if !t.text.is_empty() => Some("text"),
+        AssistantPart::ToolCall(_) => Some("tool_use"),
+        _ => None,
     }
 }
 
-fn trim_final_assistant_prefill(content: &mut [JsonValue]) {
-    let Some(text) = content
+fn trim_final_assistant_prefill(content: &mut [Block<'_>]) {
+    if let Some(text) = content
         .iter_mut()
         .rev()
-        .find(|block| block.get("type").and_then(JsonValue::as_str) == Some("text"))
-    else {
-        return;
-    };
-    if let Some(value) = text.get_mut("text")
-        && let Some(text) = value.as_str()
+        .find(|block| block.block_type() == Some("text"))
     {
-        *value = JsonValue::String(text.trim_end().to_owned());
+        text.trim_text_end();
     }
 }
 
@@ -1416,31 +1460,23 @@ pub(crate) fn validate_serialized_request_size(
 }
 
 fn attach_assistant_cache_markers(
-    content: &mut [JsonValue],
+    content: &mut [Block<'_>],
     normalized: &[AssistantPart],
     plan: &TurnCachePlan,
 ) {
     let mut wire_index = 0;
     for (part_index, part) in normalized.iter().enumerate() {
-        let Some(normalized_block) = assistant_block(part) else {
+        let Some(normalized_type) = assistant_block_type(part) else {
             continue;
         };
-        let normalized_type = normalized_block.get("type").and_then(JsonValue::as_str);
-        while content
-            .get(wire_index)
-            .and_then(|block| block.get("type"))
-            .and_then(JsonValue::as_str)
-            != normalized_type
-        {
+        while content.get(wire_index).and_then(Block::block_type) != Some(normalized_type) {
             wire_index += 1;
-            if wire_index == content.len() {
+            if wire_index >= content.len() {
                 return;
             }
         }
-        if let Some(marker) = plan.marker_for(part_index)
-            && let Some(block) = content.get_mut(wire_index)
-        {
-            *block = attach_cache(block.take(), Some(marker));
+        if let Some(marker) = plan.marker_for(part_index) {
+            content[wire_index].set_cache(CacheControl::from(&marker));
         }
         wire_index += 1;
     }
@@ -1460,7 +1496,7 @@ mod tests {
                 serde_json::json!("opaque"),
             )])),
         });
-        assert_eq!(assistant_block(&part), None);
+        assert!(assistant_block(&part).is_none());
     }
 
     #[test]
