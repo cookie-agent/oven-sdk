@@ -123,7 +123,8 @@ impl LanguageModel for AzureOpenAiResponsesModel {
                 .client
                 .post(url)
                 .headers(headers)
-                .json(&encoded.body)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(encoded.body)
                 .send();
             let response = tokio::select! {
                 value = tokio::time::timeout(self.config.timeouts.headers, send) => value
@@ -275,7 +276,8 @@ impl LanguageModel for AzureOpenAiResponsesModel {
                 .client
                 .post(url)
                 .headers(headers)
-                .json(&encoded.body)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(encoded.body)
                 .send();
             let response = tokio::select! {
                 value = tokio::time::timeout(self.config.timeouts.headers, send) => value

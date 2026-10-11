@@ -220,7 +220,8 @@ async fn start_stream(
         .client
         .post(url)
         .headers(settings.headers)
-        .json(&encoded.body)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(encoded.body)
         .send();
     let response = tokio::select! {
         value = tokio::time::timeout(settings.timeouts.headers, send) => value

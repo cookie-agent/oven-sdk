@@ -5,6 +5,7 @@
 
 mod chat;
 mod configuration;
+mod encode;
 mod error;
 mod media;
 mod options;

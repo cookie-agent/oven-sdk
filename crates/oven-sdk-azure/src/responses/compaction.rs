@@ -23,7 +23,8 @@ pub(crate) const MAX_COMPACTION_RESPONSE_BYTES: usize =
     NativeContextWindow::MAX_PAYLOAD_BYTES + 64 * 1024;
 
 pub(crate) struct EncodedCompaction {
-    pub(crate) body: JsonValue,
+    /// Serialized JSON request body.
+    pub(crate) body: Vec<u8>,
     pub(crate) request: oven_sdk::RequestMetadata,
 }
 
@@ -74,29 +75,23 @@ pub(crate) fn encode(
         native_scope,
     )?;
     validate_nonempty_input(&input)?;
-    let mut body = serde_json::json!({
-        "model": descriptor.identity.model_id.as_str(),
-        "input": input,
-    });
-    insert_option(&mut body, "instructions", options.instructions.clone());
-    insert_option(
-        &mut body,
-        "prompt_cache_key",
-        options.prompt_cache_key.clone(),
-    );
-    insert_option(
-        &mut body,
-        "prompt_cache_retention",
-        options.prompt_cache_retention.clone(),
-    );
-    insert_option(&mut body, "service_tier", options.service_tier.clone());
-    let size = serde_json::to_vec(&body)
-        .map_err(|_| {
-            ModelError::invalid_request("could not encode Azure compaction request")
-                .with_stage(ErrorStage::NativeContextEncode)
-        })?
-        .len();
-    if size > MAX_COMPACTION_REQUEST_BYTES {
+    let size_hint = input
+        .iter()
+        .map(super::body::Item::size_hint)
+        .sum::<usize>();
+    let body = super::body::CompactionBody {
+        model: descriptor.identity.model_id.as_str(),
+        input,
+        instructions: options.instructions.as_deref(),
+        prompt_cache_key: options.prompt_cache_key.as_deref(),
+        prompt_cache_retention: options.prompt_cache_retention.as_deref(),
+        service_tier: options.service_tier.as_deref(),
+    };
+    let body = crate::encode::to_body(&body, size_hint, || {
+        ModelError::invalid_request("could not encode Azure compaction request")
+            .with_stage(ErrorStage::NativeContextEncode)
+    })?;
+    if body.len() > MAX_COMPACTION_REQUEST_BYTES {
         return Err(ModelError::invalid_request(
             "Azure compaction request exceeds the 32 MiB encoded limit",
         )
@@ -167,7 +162,7 @@ pub(crate) fn parse_response(
     Ok((window, usage))
 }
 
-pub(crate) fn decode_window(window: &NativeContextWindow) -> Result<Vec<JsonValue>, ModelError> {
+pub(crate) fn decode_window(window: &NativeContextWindow) -> Result<&[JsonValue], ModelError> {
     let root = window.payload().as_object().ok_or_else(|| {
         ModelError::native_context("Azure native context payload must be an object")
     })?;
@@ -182,12 +177,11 @@ pub(crate) fn decode_window(window: &NativeContextWindow) -> Result<Vec<JsonValu
     let output = root
         .get("output")
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| ModelError::native_context("Azure native context output is invalid"))?
-        .clone();
-    validate_output(&output).ok_or_else(|| {
+        .ok_or_else(|| ModelError::native_context("Azure native context output is invalid"))?;
+    validate_output(output).ok_or_else(|| {
         ModelError::native_context("Azure native context output is not canonical")
     })?;
-    let expected = output_fingerprint(&output)
+    let expected = output_fingerprint(output)
         .ok_or_else(|| ModelError::native_context("could not verify Azure native context"))?;
     if root.get("fingerprint").and_then(JsonValue::as_str) != Some(expected.as_str()) {
         return Err(ModelError::native_context(
@@ -247,7 +241,7 @@ fn validate_options(options: &AzureOpenAiCompactionOptions) -> Result<(), ModelE
     Ok(())
 }
 
-fn validate_nonempty_input(input: &[JsonValue]) -> Result<(), ModelError> {
+fn validate_nonempty_input<T>(input: &[T]) -> Result<(), ModelError> {
     if input.is_empty() {
         return Err(ModelError::invalid_request(
             "Azure standalone compaction requires at least one encoded local input item",
@@ -270,12 +264,6 @@ fn validate_optional_text(
         )));
     }
     Ok(())
-}
-
-fn insert_option(body: &mut JsonValue, name: &str, value: Option<String>) {
-    if let Some(value) = value {
-        body[name] = value.into();
-    }
 }
 
 fn validate_output(output: &[JsonValue]) -> Option<()> {
@@ -492,8 +480,9 @@ fn parse_usage(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
 }
 
 fn output_fingerprint(output: &[JsonValue]) -> Option<String> {
-    let encoded = serde_json::to_vec(output).ok()?;
-    Some(URL_SAFE_NO_PAD.encode(Sha256::digest(encoded)))
+    let mut hasher = Sha256::new();
+    serde_json::to_writer(&mut hasher, output).ok()?;
+    Some(URL_SAFE_NO_PAD.encode(hasher.finalize()))
 }
 
 fn exact_keys(object: &serde_json::Map<String, JsonValue>, expected: &[&str]) -> Option<()> {
