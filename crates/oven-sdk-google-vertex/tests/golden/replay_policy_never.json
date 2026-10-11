@@ -1,0 +1,96 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Never replay"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Calling."
+        },
+        {
+          "functionCall": {
+            "args": {
+              "id": "n"
+            },
+            "id": "provider-1",
+            "name": "lookup"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "provider-1",
+            "name": "lookup",
+            "response": {
+              "output": "n"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "AUTO"
+    }
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "Find a record",
+          "name": "lookup",
+          "parametersJsonSchema": {
+            "$defs": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "properties": {
+              "filters": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "id": {
+                "description": "Record id",
+                "type": "string"
+              },
+              "query": {
+                "$ref": "#/$defs/query"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Write a file",
+          "name": "write_file",
+          "parametersJsonSchema": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Do not think"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "temperature": 0.0,
+    "thinkingConfig": {
+      "includeThoughts": false,
+      "thinkingBudget": 0,
+      "thinkingLevel": null
+    }
+  }
+}

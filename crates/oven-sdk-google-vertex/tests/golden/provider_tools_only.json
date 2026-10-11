@@ -1,0 +1,45 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Search the web"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "tools": [
+    {
+      "googleSearch": {}
+    },
+    {
+      "urlContext": {}
+    },
+    {
+      "codeExecution": {}
+    },
+    {
+      "retrieval": {
+        "vertexRagStore": {
+          "ragResources": {
+            "ragCorpus": "projects/project/locations/global/ragCorpora/corpus-a"
+          },
+          "similarityTopK": 5
+        }
+      }
+    },
+    {
+      "retrieval": {
+        "vertexRagStore": {
+          "ragResources": {
+            "ragCorpus": "projects/project/locations/global/ragCorpora/corpus-b"
+          }
+        }
+      }
+    },
+    {
+      "googleMaps": {}
+    }
+  ]
+}

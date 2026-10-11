@@ -1,0 +1,189 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Step one"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Looking up."
+        },
+        {
+          "functionCall": {
+            "args": {
+              "id": "1"
+            },
+            "id": "provider-1",
+            "name": "lookup"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "provider-1",
+            "name": "lookup",
+            "response": {
+              "output": "one"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "functionCall": {
+            "args": {
+              "path": "one.txt"
+            },
+            "name": "write_file"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "name": "write_file",
+            "response": {
+              "output": {
+                "ok": true
+              }
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Step one finished."
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "text": "Step two"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "functionCall": {
+            "args": {
+              "id": "2"
+            },
+            "name": "lookup"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {
+              "id": "3"
+            },
+            "name": "lookup"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "name": "lookup",
+            "response": {
+              "output": "two"
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "name": "lookup",
+            "response": {
+              "output": "three"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "Use tools when needed."
+      }
+    ]
+  },
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "AUTO"
+    }
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "Find a record",
+          "name": "lookup",
+          "parametersJsonSchema": {
+            "$defs": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "properties": {
+              "filters": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "id": {
+                "description": "Record id",
+                "type": "string"
+              },
+              "query": {
+                "$ref": "#/$defs/query"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Write a file",
+          "name": "write_file",
+          "parametersJsonSchema": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

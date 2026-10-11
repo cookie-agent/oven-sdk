@@ -1,0 +1,56 @@
+{
+  "cachedContent": "projects/project/locations/global/cachedContents/cache-1",
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "first"
+        },
+        {
+          "text": "second\twith\u0001control"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "frequencyPenalty": -0.25,
+    "maxOutputTokens": 1000,
+    "presencePenalty": 0.5,
+    "seed": 7,
+    "stopSequences": [
+      "END",
+      "STOP"
+    ],
+    "temperature": 0.7,
+    "thinkingConfig": {
+      "includeThoughts": true,
+      "thinkingBudget": null,
+      "thinkingLevel": "HIGH"
+    },
+    "topK": 40.0,
+    "topP": 0.9
+  },
+  "safetySettings": [
+    {
+      "category": "HARM_CATEGORY_HARASSMENT",
+      "method": "PROBABILITY",
+      "threshold": "BLOCK_ONLY_HIGH"
+    },
+    {
+      "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+      "method": null,
+      "threshold": "BLOCK_NONE"
+    }
+  ],
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "You are terse."
+      },
+      {
+        "text": "Answer in \"quotes\" 😀\n"
+      }
+    ]
+  }
+}

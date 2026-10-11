@@ -1,0 +1,99 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Search and look up"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "allowedFunctionNames": [
+        "lookup"
+      ],
+      "mode": "ANY"
+    }
+  },
+  "tools": [
+    {
+      "googleSearch": {}
+    },
+    {
+      "urlContext": {}
+    },
+    {
+      "codeExecution": {}
+    },
+    {
+      "retrieval": {
+        "vertexRagStore": {
+          "ragResources": {
+            "ragCorpus": "projects/project/locations/global/ragCorpora/corpus-a"
+          },
+          "similarityTopK": 5
+        }
+      }
+    },
+    {
+      "retrieval": {
+        "vertexRagStore": {
+          "ragResources": {
+            "ragCorpus": "projects/project/locations/global/ragCorpora/corpus-b"
+          }
+        }
+      }
+    },
+    {
+      "googleMaps": {}
+    },
+    {
+      "functionDeclarations": [
+        {
+          "description": "Find a record",
+          "name": "lookup",
+          "parametersJsonSchema": {
+            "$defs": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "properties": {
+              "filters": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "id": {
+                "description": "Record id",
+                "type": "string"
+              },
+              "query": {
+                "$ref": "#/$defs/query"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Write a file",
+          "name": "write_file",
+          "parametersJsonSchema": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

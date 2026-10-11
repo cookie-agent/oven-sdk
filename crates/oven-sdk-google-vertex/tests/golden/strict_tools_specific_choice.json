@@ -1,0 +1,68 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Use a strict tool"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "allowedFunctionNames": [
+        "write_file"
+      ],
+      "mode": "VALIDATED"
+    }
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "Find a record",
+          "name": "lookup",
+          "parametersJsonSchema": {
+            "$defs": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "properties": {
+              "filters": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "id": {
+                "description": "Record id",
+                "type": "string"
+              },
+              "query": {
+                "$ref": "#/$defs/query"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Write a file",
+          "name": "write_file",
+          "parametersJsonSchema": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

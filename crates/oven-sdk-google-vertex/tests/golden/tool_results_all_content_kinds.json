@@ -1,0 +1,231 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Run the tools"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Calling tools."
+        },
+        {
+          "functionCall": {
+            "args": {
+              "id": "a"
+            },
+            "id": "provider-1",
+            "name": "lookup"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {
+              "id": "b",
+              "nested": {
+                "list": [
+                  1,
+                  2.5,
+                  null,
+                  true
+                ]
+              }
+            },
+            "name": "lookup"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {},
+            "name": "lookup"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {},
+            "id": "provider-4",
+            "name": "lookup"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {
+              "path": "a.txt"
+            },
+            "name": "write_file"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {
+              "path": "b.txt"
+            },
+            "name": "write_file"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {},
+            "name": "lookup"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {},
+            "name": "lookup"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "provider-1",
+            "name": "lookup",
+            "response": {
+              "output": "plain result"
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "name": "lookup",
+            "response": {
+              "output": {
+                "answer": 42,
+                "items": [
+                  "x",
+                  "y"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "name": "lookup",
+            "response": {
+              "error": "boom"
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "id": "provider-4",
+            "name": "lookup",
+            "response": {
+              "error": {
+                "code": 500
+              }
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "name": "write_file",
+            "response": {
+              "output": "user said no"
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "name": "write_file",
+            "response": {
+              "output": "Tool call execution denied."
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "name": "lookup",
+            "response": {
+              "output": [
+                "caption",
+                {
+                  "k": "v"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "name": "lookup",
+            "response": {
+              "output": "bare string json"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Thanks"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "AUTO"
+    }
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "Find a record",
+          "name": "lookup",
+          "parametersJsonSchema": {
+            "$defs": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "properties": {
+              "filters": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "id": {
+                "description": "Record id",
+                "type": "string"
+              },
+              "query": {
+                "$ref": "#/$defs/query"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Write a file",
+          "name": "write_file",
+          "parametersJsonSchema": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,112 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Do it"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Working."
+        },
+        {
+          "functionCall": {
+            "args": {
+              "id": "a"
+            },
+            "id": "provider-1",
+            "name": "lookup"
+          }
+        },
+        {
+          "functionCall": {
+            "args": {
+              "path": "out.txt"
+            },
+            "name": "write_file"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "provider-1",
+            "name": "lookup",
+            "response": {
+              "output": "a"
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "name": "write_file",
+            "response": {
+              "output": "written"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "AUTO"
+    }
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "Find a record",
+          "name": "lookup",
+          "parametersJsonSchema": {
+            "$defs": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "properties": {
+              "filters": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "id": {
+                "description": "Record id",
+                "type": "string"
+              },
+              "query": {
+                "$ref": "#/$defs/query"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Write a file",
+          "name": "write_file",
+          "parametersJsonSchema": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}
