@@ -10,7 +10,9 @@ use http::HeaderMap;
 use crate::{AbortSignal, AbortWait, ErrorStage, ModelError};
 
 mod diagnostic_body;
+mod json_event;
 pub use diagnostic_body::{sanitize_error_body, sanitize_error_body_with_secrets};
+pub use json_event::{JsonObject, KeyPresent, json_type_tag, parse_json_object};
 
 /// Result of waiting for the next streaming transport item.
 pub enum StreamRead<T> {
