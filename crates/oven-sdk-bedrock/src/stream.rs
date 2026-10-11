@@ -408,7 +408,8 @@ impl State {
         match block {
             Block::Text { id, text } => {
                 parts.push(StreamPart::TextEnd { id, metadata: None });
-                self.native.insert(order, serde_json::json!({"text":text}));
+                self.native
+                    .insert(order, json_object([("text", JsonValue::String(text))]));
             }
             Block::Reasoning {
                 id,
@@ -441,15 +442,21 @@ impl State {
                     ));
                 }
                 let native = if let Some(data) = redacted {
-                    serde_json::json!({"reasoningContent":{"redactedContent":data}})
+                    json_object([(
+                        "reasoningContent",
+                        json_object([("redactedContent", JsonValue::String(data))]),
+                    )])
                 } else {
-                    let mut reasoning_text = serde_json::json!({"text":text});
+                    let mut reasoning_text = json_object([("text", JsonValue::String(text))]);
                     if self.signed_reasoning
                         && let Some(signature) = signature
                     {
                         reasoning_text["signature"] = JsonValue::String(signature);
                     }
-                    serde_json::json!({"reasoningContent":{"reasoningText":reasoning_text}})
+                    json_object([(
+                        "reasoningContent",
+                        json_object([("reasoningText", reasoning_text)]),
+                    )])
                 };
                 self.native.insert(order, native);
             }
@@ -482,13 +489,22 @@ impl State {
                 if !self.call_ids.insert(id.clone()) {
                     return Err(invalid_final("duplicate Bedrock tool-use ID", bytes));
                 }
+                // The part and the replay payload each own the parsed input;
+                // the block's ID, name, and parsed input move into the payload.
                 let mut call = ToolCallPart::new(id.clone(), name.clone(), parsed.clone());
                 call.provider_item_id = Some(id.clone());
                 call.raw_input = Some(raw);
                 parts.push(StreamPart::ToolCall { tool_call: call });
                 self.native.insert(
                     order,
-                    serde_json::json!({"toolUse":{"toolUseId":id,"name":name,"input":parsed}}),
+                    json_object([(
+                        "toolUse",
+                        json_object([
+                            ("toolUseId", JsonValue::String(id)),
+                            ("name", JsonValue::String(name)),
+                            ("input", parsed),
+                        ]),
+                    )]),
                 );
             }
         }
@@ -636,10 +652,10 @@ impl State {
         finish.provider_metadata = self.provider_metadata.clone();
         if capture_replay && self.policy != ReplayPolicy::Never {
             let content = self.native.values().cloned().collect::<Vec<_>>();
-            let payload = serde_json::json!({
-                "format":REPLAY_FORMAT,
-                "assistant_content":content,
-            });
+            let payload = json_object([
+                ("format", REPLAY_FORMAT.into()),
+                ("assistant_content", JsonValue::Array(content)),
+            ]);
             finish.native_replay = Some(
                 NativeReplayArtifact::capture(
                     AdapterId::new(BEDROCK_CONVERSE_ADAPTER_ID),
@@ -821,10 +837,15 @@ pub(crate) async fn read_live(
                 .with_bytes_received(live.count)
         })?;
         semantic = true;
-        let event_payload = payload
-            .get(event_type)
-            .cloned()
-            .unwrap_or_else(|| payload.clone());
+        // Only clone the payload when the caller asked for raw events; the
+        // state machine takes the event member (or the whole payload) by value.
+        let raw = live.include_raw.then(|| payload.clone());
+        let event_payload = match payload {
+            JsonValue::Object(mut members) if members.contains_key(event_type) => members
+                .remove(event_type)
+                .expect("checked event member exists"),
+            payload => payload,
+        };
         let mut parts = Vec::new();
         if message_type == "exception" {
             live.state
@@ -834,14 +855,13 @@ pub(crate) async fn read_live(
                 .apply(event_type, event_payload, &mut parts, live.count)?;
         }
         if live.state.done {
-            if live.include_raw {
-                live.terminal_queue
-                    .push_back(Ok(StreamPart::Raw { value: payload }));
+            if let Some(value) = raw {
+                live.terminal_queue.push_back(Ok(StreamPart::Raw { value }));
             }
             live.terminal_queue.extend(parts.into_iter().map(Ok));
         } else {
-            if live.include_raw {
-                live.queue.push_back(Ok(StreamPart::Raw { value: payload }));
+            if let Some(value) = raw {
+                live.queue.push_back(Ok(StreamPart::Raw { value }));
             }
             live.queue.extend(parts.into_iter().map(Ok));
         }
@@ -986,6 +1006,15 @@ pub(crate) fn normalize_single(
     Ok((parts, state.response_metadata))
 }
 
+/// Builds a JSON object from owned values without `json!`'s serialize-copy.
+fn json_object<const N: usize>(entries: [(&str, JsonValue); N]) -> JsonValue {
+    JsonValue::Object(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+}
 fn parse_usage(value: Option<&JsonValue>, bytes: u64) -> Result<Usage, ModelError> {
     let Some(value) = value else {
         return Ok(Usage::default());
