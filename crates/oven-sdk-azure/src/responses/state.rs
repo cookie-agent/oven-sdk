@@ -1282,6 +1282,7 @@ fn usage_from(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
             .pointer("/input_tokens_details/cached_tokens")
             .and_then(JsonValue::as_u64),
         input_tokens_cache_write: cache_write,
+        input_tokens_cache_write_by_ttl: Default::default(),
         output_tokens: output,
         output_tokens_text: output.map(|total| total.saturating_sub(reasoning.unwrap_or(0))),
         output_tokens_reasoning: reasoning,

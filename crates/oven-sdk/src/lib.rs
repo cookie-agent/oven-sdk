@@ -549,6 +549,11 @@ pub struct Usage {
     pub input_tokens_cache_read: Option<u64>,
     /// Input tokens written to a cache.
     pub input_tokens_cache_write: Option<u64>,
+    /// Cache-write tokens keyed by the provider's cache-lifetime label (for
+    /// example `30m` or `12h`), when the provider reports that breakdown.
+    /// Entries are components of `input_tokens_cache_write`, not additions to it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub input_tokens_cache_write_by_ttl: BTreeMap<String, u64>,
     /// Total output tokens.
     pub output_tokens: Option<u64>,
     /// Text output tokens.
@@ -586,6 +591,14 @@ impl UsageTotals {
             &mut self.usage.input_tokens_cache_write,
             usage.input_tokens_cache_write,
         );
+        for (ttl, tokens) in &usage.input_tokens_cache_write_by_ttl {
+            let total = self
+                .usage
+                .input_tokens_cache_write_by_ttl
+                .entry(ttl.clone())
+                .or_default();
+            *total = total.saturating_add(*tokens);
+        }
         add_usage_total(&mut self.usage.output_tokens, usage.output_tokens);
         add_usage_total(&mut self.usage.output_tokens_text, usage.output_tokens_text);
         add_usage_total(

@@ -727,6 +727,7 @@ fn usage(v: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
         input_tokens_no_cache: input,
         input_tokens_cache_read: read,
         input_tokens_cache_write: write,
+        input_tokens_cache_write_by_ttl: Default::default(),
         output_tokens,
         output_tokens_text,
         output_tokens_reasoning,

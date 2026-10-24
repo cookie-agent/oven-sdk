@@ -1152,6 +1152,10 @@ pub(crate) fn usage_from(value: &JsonValue, bytes: u64) -> Result<Usage, ModelEr
                 })
         })
         .transpose()?;
+    let cache_write_by_ttl =
+        crate::wire::responses::cache_write_by_ttl(value).ok_or_else(|| {
+            invalid_finalize("Responses cache-write TTL token usage is invalid", bytes)
+        })?;
     Ok(Usage {
         input_tokens: value.get("input_tokens").and_then(JsonValue::as_u64),
         input_tokens_no_cache: None,
@@ -1159,6 +1163,7 @@ pub(crate) fn usage_from(value: &JsonValue, bytes: u64) -> Result<Usage, ModelEr
             .pointer("/input_tokens_details/cached_tokens")
             .and_then(JsonValue::as_u64),
         input_tokens_cache_write: cache_write,
+        input_tokens_cache_write_by_ttl: cache_write_by_ttl,
         output_tokens: output,
         output_tokens_text: output.map(|total| total.saturating_sub(reasoning.unwrap_or(0))),
         output_tokens_reasoning: reasoning,
@@ -1274,6 +1279,42 @@ mod tests {
             usage_from(
                 &serde_json::json!({
                     "input_tokens_details": {"cache_write_tokens": "invalid"}
+                }),
+                0
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cache_write_ttl_details_are_keyed_by_lifetime() {
+        let usage = usage_from(
+            &serde_json::json!({
+                "input_tokens_details": {
+                    "cache_write_tokens": 30,
+                    "cache_write_tokens_details": {"ttl_30m_tokens": 0, "ttl_12h_tokens": 30}
+                }
+            }),
+            0,
+        )
+        .unwrap();
+        assert_eq!(usage.input_tokens_cache_write, Some(30));
+        assert_eq!(
+            usage.input_tokens_cache_write_by_ttl,
+            std::collections::BTreeMap::from([("12h".to_owned(), 30), ("30m".to_owned(), 0)])
+        );
+        assert!(
+            usage_from(&serde_json::json!({"input_tokens_details": {}}), 0)
+                .unwrap()
+                .input_tokens_cache_write_by_ttl
+                .is_empty()
+        );
+        assert!(
+            usage_from(
+                &serde_json::json!({
+                    "input_tokens_details": {
+                        "cache_write_tokens_details": {"ttl_12h_tokens": -1}
+                    }
                 }),
                 0
             )

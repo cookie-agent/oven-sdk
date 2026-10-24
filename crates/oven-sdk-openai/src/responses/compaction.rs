@@ -369,6 +369,13 @@ fn parse_usage(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
                 bytes,
             )
         })?;
+    let cache_write_by_ttl =
+        crate::wire::responses::cache_write_by_ttl(value).ok_or_else(|| {
+            invalid(
+                "OpenAI compaction cache-write TTL token usage is invalid",
+                bytes,
+            )
+        })?;
     if cached_total > input || reasoning > output {
         return Err(invalid(
             "OpenAI compaction token details are inconsistent",
@@ -380,6 +387,7 @@ fn parse_usage(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
         input_tokens_no_cache: None,
         input_tokens_cache_read: Some(cached),
         input_tokens_cache_write: cache_write,
+        input_tokens_cache_write_by_ttl: cache_write_by_ttl,
         output_tokens: Some(output),
         output_tokens_text: Some(output - reasoning),
         output_tokens_reasoning: Some(reasoning),
@@ -518,5 +526,15 @@ mod tests {
         let mut malformed = base;
         malformed["input_tokens_details"] = serde_json::json!({"cache_write_tokens": -1});
         assert!(parse_usage(&malformed, 0).is_err());
+
+        let mut by_ttl = present.clone();
+        by_ttl["input_tokens_details"]["cache_write_tokens_details"] =
+            serde_json::json!({"ttl_30m_tokens": 3, "ttl_12h_tokens": 4});
+        assert_eq!(
+            parse_usage(&by_ttl, 0)
+                .unwrap()
+                .input_tokens_cache_write_by_ttl,
+            BTreeMap::from([("12h".to_owned(), 4), ("30m".to_owned(), 3)])
+        );
     }
 }

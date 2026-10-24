@@ -2988,6 +2988,7 @@ fn usage_from(value: &JsonValue) -> Usage {
             .map(|(input, cached)| input.saturating_sub(cached)),
         input_tokens_cache_read: cached,
         input_tokens_cache_write: None,
+        input_tokens_cache_write_by_ttl: Default::default(),
         output_tokens: output,
         output_tokens_text: output
             .zip(reasoning)

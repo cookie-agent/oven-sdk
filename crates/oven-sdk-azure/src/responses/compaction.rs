@@ -472,6 +472,7 @@ fn parse_usage(value: &JsonValue, bytes: u64) -> Result<Usage, ModelError> {
         input_tokens_no_cache: Some(input_without_cache),
         input_tokens_cache_read: Some(cached),
         input_tokens_cache_write: cache_write,
+        input_tokens_cache_write_by_ttl: Default::default(),
         output_tokens: Some(output),
         output_tokens_text: Some(output - reasoning),
         output_tokens_reasoning: Some(reasoning),

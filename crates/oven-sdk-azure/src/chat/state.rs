@@ -527,6 +527,7 @@ fn usage_from(value: &JsonValue) -> Usage {
             .pointer("/prompt_tokens_details/cached_tokens")
             .and_then(JsonValue::as_u64),
         input_tokens_cache_write: None,
+        input_tokens_cache_write_by_ttl: Default::default(),
         output_tokens: output,
         output_tokens_text: output.map(|total| total.saturating_sub(reasoning.unwrap_or(0))),
         output_tokens_reasoning: reasoning,

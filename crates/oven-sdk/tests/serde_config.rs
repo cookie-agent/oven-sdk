@@ -329,6 +329,7 @@ fn usage_totals_aggregate_like_fields_and_omit_raw_usage() {
         input_tokens: Some(10),
         input_tokens_no_cache: Some(8),
         input_tokens_cache_write: Some(2),
+        input_tokens_cache_write_by_ttl: BTreeMap::from([("30m".into(), 2)]),
         output_tokens: Some(4),
         output_tokens_text: Some(3),
         raw: Some(json!({"provider": "first"})),
@@ -338,6 +339,7 @@ fn usage_totals_aggregate_like_fields_and_omit_raw_usage() {
         input_tokens: Some(5),
         input_tokens_cache_read: Some(1),
         input_tokens_cache_write: Some(3),
+        input_tokens_cache_write_by_ttl: BTreeMap::from([("30m".into(), 1), ("12h".into(), 2)]),
         output_tokens_text: Some(2),
         output_tokens_reasoning: Some(1),
         raw: Some(json!({"provider": "second"})),
@@ -349,6 +351,10 @@ fn usage_totals_aggregate_like_fields_and_omit_raw_usage() {
     assert_eq!(totals.calls(), 2);
     assert_eq!(totals.usage().input_tokens, Some(15));
     assert_eq!(totals.usage().output_tokens_text, Some(5));
+    assert_eq!(
+        totals.usage().input_tokens_cache_write_by_ttl,
+        BTreeMap::from([("12h".into(), 2), ("30m".into(), 3)])
+    );
     assert_eq!(totals.usage().raw, None);
 }
 

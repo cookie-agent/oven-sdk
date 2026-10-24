@@ -1036,6 +1036,7 @@ fn parse_usage(value: Option<&JsonValue>, bytes: u64) -> Result<Usage, ModelErro
         input_tokens_no_cache: base,
         input_tokens_cache_read: read,
         input_tokens_cache_write: write,
+        input_tokens_cache_write_by_ttl: Default::default(),
         output_tokens: value.get("outputTokens").and_then(JsonValue::as_u64),
         output_tokens_text: None,
         output_tokens_reasoning: None,
