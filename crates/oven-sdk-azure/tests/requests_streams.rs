@@ -414,10 +414,9 @@ async fn chat_encodes_tools_structured_output_media_usage_and_open_labels() {
         verbosity: Some("future-verbosity".into()),
         parallel_tool_calls: Some(false),
         prompt_cache_key: Some("shared-chat-prefix".into()),
-        prompt_cache_retention: Some(AzureOpenAiPromptCacheRetention::TwentyFourHours),
         prompt_cache_options: Some(AzureOpenAiPromptCacheOptions {
-            mode: AzureOpenAiPromptCacheMode::Explicit,
-            ttl: AzureOpenAiPromptCacheTtl::ThirtyMinutes,
+            mode: Some(AzureOpenAiPromptCacheMode::Explicit),
+            ttl: Some(AzureOpenAiPromptCacheTtl::ThirtyMinutes),
         }),
         ..Default::default()
     });
@@ -435,7 +434,7 @@ async fn chat_encodes_tools_structured_output_media_usage_and_open_labels() {
     assert_eq!(body["service_tier"], "future-tier");
     assert_eq!(body["verbosity"], "future-verbosity");
     assert_eq!(body["prompt_cache_key"], "shared-chat-prefix");
-    assert_eq!(body["prompt_cache_retention"], "24h");
+    assert!(body.get("prompt_cache_retention").is_none());
     assert_eq!(body["prompt_cache_options"]["mode"], "explicit");
     assert_eq!(body["prompt_cache_options"]["ttl"], "30m");
     assert_eq!(
@@ -447,6 +446,41 @@ async fn chat_encodes_tools_structured_output_media_usage_and_open_labels() {
         "explicit"
     );
     assert_eq!(body["messages"][0]["content"][1]["type"], "image_url");
+}
+
+#[tokio::test]
+async fn prompt_cache_options_reject_retention_and_undocumented_fields() {
+    let server = MockServer::start().await;
+    let provider = common::provider(&server, AzureApiRoute::V1);
+    let chat = provider.chat("deployment", common::gpt4o()).unwrap();
+    let combined =
+        Request::new(Vec::new()).with_azure_openai_chat_options(AzureOpenAiChatOptions {
+            prompt_cache_retention: Some(AzureOpenAiPromptCacheRetention::TwentyFourHours),
+            prompt_cache_options: Some(AzureOpenAiPromptCacheOptions::default()),
+            ..Default::default()
+        });
+    assert!(chat.validate_request(&combined).is_err());
+    let retention_only =
+        Request::new(Vec::new()).with_azure_openai_chat_options(AzureOpenAiChatOptions {
+            prompt_cache_retention: Some(AzureOpenAiPromptCacheRetention::TwentyFourHours),
+            ..Default::default()
+        });
+    assert!(chat.validate_request(&retention_only).is_ok());
+    for options in [
+        serde_json::json!({"ttl":"12h"}),
+        serde_json::json!({"prewarm":true}),
+    ] {
+        let mut request = Request::new(Vec::new());
+        request.provider_options.insert(
+            "azure_openai".into(),
+            serde_json::json!({"chat":{"prompt_cache_options":options}}),
+        );
+        assert!(chat.validate_request(&request).is_err(), "{options}");
+    }
+    assert_eq!(
+        serde_json::to_value(AzureOpenAiPromptCacheOptions::default()).unwrap(),
+        serde_json::json!({})
+    );
 }
 
 #[tokio::test]
@@ -530,10 +564,9 @@ async fn responses_encodes_reasoning_structured_output_and_emits_filter_events()
         reasoning_summary: Some("future-summary".into()),
         service_tier: Some("future-tier".into()),
         prompt_cache_key: Some("shared-responses-prefix".into()),
-        prompt_cache_retention: Some(AzureOpenAiPromptCacheRetention::InMemory),
         prompt_cache_options: Some(AzureOpenAiPromptCacheOptions {
-            mode: AzureOpenAiPromptCacheMode::Implicit,
-            ttl: AzureOpenAiPromptCacheTtl::ThirtyMinutes,
+            mode: Some(AzureOpenAiPromptCacheMode::Implicit),
+            ttl: Some(AzureOpenAiPromptCacheTtl::ThirtyMinutes),
         }),
         ..Default::default()
     });
@@ -559,7 +592,7 @@ async fn responses_encodes_reasoning_structured_output_and_emits_filter_events()
     assert_eq!(body["text"]["format"]["type"], "json_schema");
     assert_eq!(body["store"], false);
     assert_eq!(body["prompt_cache_key"], "shared-responses-prefix");
-    assert_eq!(body["prompt_cache_retention"], "in_memory");
+    assert!(body.get("prompt_cache_retention").is_none());
     assert_eq!(body["prompt_cache_options"]["mode"], "implicit");
     assert_eq!(body["prompt_cache_options"]["ttl"], "30m");
     assert_eq!(

@@ -66,13 +66,20 @@ pub enum AzureOpenAiPromptCacheRetention {
 }
 
 /// GPT-5.6+ Azure OpenAI prompt-cache controls.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+///
+/// Both fields are optional; Azure defaults `mode` to `implicit` and `ttl` to
+/// `30m`, its only documented lifetime. Azure documents neither OpenAI's `12h`
+/// lifetime nor `prewarm`, so neither is offered. Never combine these options
+/// with the pre-5.6 `prompt_cache_retention`: such requests fail validation.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AzureOpenAiPromptCacheOptions {
     /// Cache breakpoint mode.
-    pub mode: AzureOpenAiPromptCacheMode,
-    /// Cache TTL. The API currently accepts only 30 minutes.
-    pub ttl: AzureOpenAiPromptCacheTtl,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<AzureOpenAiPromptCacheMode>,
+    /// Cache TTL. Azure currently accepts only 30 minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<AzureOpenAiPromptCacheTtl>,
 }
 
 /// GPT-5.6+ Azure OpenAI prompt-cache breakpoint mode.
@@ -139,6 +146,19 @@ pub(crate) fn prompt_cache_breakpoint(
             "invalid Azure OpenAI prompt-cache breakpoint metadata",
         )),
     }
+}
+
+/// Rejects `prompt_cache_retention` combined with `prompt_cache_options`.
+pub(crate) fn validate_prompt_cache_controls(
+    has_retention: bool,
+    options: Option<&AzureOpenAiPromptCacheOptions>,
+) -> Result<(), oven_sdk::ModelError> {
+    if has_retention && options.is_some() {
+        return Err(oven_sdk::ModelError::invalid_request(
+            "Azure OpenAI prompt_cache_retention is for models before GPT-5.6 and cannot be combined with prompt_cache_options",
+        ));
+    }
+    Ok(())
 }
 
 /// Azure Responses V1 standalone compaction options.

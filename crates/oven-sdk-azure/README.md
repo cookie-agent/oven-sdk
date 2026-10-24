@@ -139,6 +139,13 @@ closed. Native context uses the core 32 MiB bound. Usage normalization checks
 input/output totals and separately preserves cache-read and cache-write token
 counts while deriving uncached input tokens with checked arithmetic.
 
+Chat and Responses accept GPT-5.6+ `AzureOpenAiPromptCacheOptions`, whose
+`mode` and `ttl` are optional. `ttl` offers only `30m`, the one lifetime Azure
+documents. OpenAI's `12h` lifetime, `prewarm`, and per-breakpoint `ttl` are not
+offered because Azure documents none of them. A request that sets both
+`prompt_cache_retention` (for models before GPT-5.6) and `prompt_cache_options`
+fails validation.
+
 Compaction performs one provider call without hidden retry or local fallback.
 Cancellation covers pre-dispatch, Entra resolution, response headers, and
 bounded body reads. HTTP errors use the same structured Azure classification;
@@ -220,7 +227,7 @@ lifecycle sources.
 
 **Coverage gaps.** This crate excludes completions, embeddings, images, speech,
 transcription, hosted Azure tools, stored/background Responses,
-`previous_response_id` compaction, Azure `prompt_cache_options`, automatic
+`previous_response_id` compaction, `prompt_cache_options` on compaction, automatic
 server-side `context_management` compaction, realtime, automatic environment
 credentials, and model catalogs. Standalone compaction accepts only explicit
 caller-held local context.

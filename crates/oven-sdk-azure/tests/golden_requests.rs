@@ -18,9 +18,8 @@ use oven_sdk::{
 use oven_sdk_azure::{
     AzureApiRoute, AzureOpenAiChatOptions, AzureOpenAiChatRequestExt, AzureOpenAiCompactionOptions,
     AzureOpenAiCompactionRequestExt, AzureOpenAiPromptCacheBreakpointExt,
-    AzureOpenAiPromptCacheMode, AzureOpenAiPromptCacheOptions, AzureOpenAiPromptCacheRetention,
-    AzureOpenAiPromptCacheTtl, AzureOpenAiResponsesOptions, AzureOpenAiResponsesRequestExt,
-    AzureReasoningField,
+    AzureOpenAiPromptCacheMode, AzureOpenAiPromptCacheOptions, AzureOpenAiPromptCacheTtl,
+    AzureOpenAiResponsesOptions, AzureOpenAiResponsesRequestExt, AzureReasoningField,
 };
 use serde_json::{Value, json};
 use wiremock::{
@@ -253,10 +252,10 @@ fn responses_options() -> AzureOpenAiResponsesOptions {
         truncation: Some("auto".into()),
         parallel_tool_calls: Some(false),
         prompt_cache_key: Some("cache-key".into()),
-        prompt_cache_retention: Some(AzureOpenAiPromptCacheRetention::TwentyFourHours),
+        prompt_cache_retention: None,
         prompt_cache_options: Some(AzureOpenAiPromptCacheOptions {
-            mode: AzureOpenAiPromptCacheMode::Explicit,
-            ttl: AzureOpenAiPromptCacheTtl::ThirtyMinutes,
+            mode: Some(AzureOpenAiPromptCacheMode::Explicit),
+            ttl: Some(AzureOpenAiPromptCacheTtl::ThirtyMinutes),
         }),
     }
 }
@@ -530,10 +529,10 @@ fn chat_options() -> AzureOpenAiChatOptions {
         verbosity: Some("medium".into()),
         parallel_tool_calls: Some(false),
         prompt_cache_key: Some("chat-key".into()),
-        prompt_cache_retention: Some(AzureOpenAiPromptCacheRetention::InMemory),
+        prompt_cache_retention: None,
         prompt_cache_options: Some(AzureOpenAiPromptCacheOptions {
-            mode: AzureOpenAiPromptCacheMode::Implicit,
-            ttl: AzureOpenAiPromptCacheTtl::ThirtyMinutes,
+            mode: Some(AzureOpenAiPromptCacheMode::Implicit),
+            ttl: None,
         }),
     }
 }

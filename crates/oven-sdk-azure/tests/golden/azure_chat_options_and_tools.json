@@ -14,10 +14,8 @@
   "parallel_tool_calls": false,
   "prompt_cache_key": "chat-key",
   "prompt_cache_options": {
-    "mode": "implicit",
-    "ttl": "30m"
+    "mode": "implicit"
   },
-  "prompt_cache_retention": "in_memory",
   "reasoning_effort": "low",
   "service_tier": "priority",
   "stream": true,

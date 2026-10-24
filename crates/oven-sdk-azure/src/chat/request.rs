@@ -47,6 +47,10 @@ pub(crate) fn validate_request(
     profile: &ChatWireProfile,
 ) -> Result<(), ModelError> {
     validate_prompt_cache_key(options.prompt_cache_key.as_deref())?;
+    crate::options::validate_prompt_cache_controls(
+        options.prompt_cache_retention.is_some(),
+        options.prompt_cache_options.as_ref(),
+    )?;
     validate_prompt_cache_breakpoints(request, profile)?;
     request.validate_for(capabilities)?;
     if !request.tools.is_empty() && !capabilities.features.contains(Capability::TOOL_CALLING) {
