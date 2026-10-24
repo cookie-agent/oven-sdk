@@ -16,8 +16,9 @@ use crate::{
     },
     configuration::{MaxTokensField, ReasoningField, StructuredOutputSupport, SystemMessageRole},
     options::{
-        CompatibleChatOptions, OpenAiChatOptions, chat_options, compatible_options,
-        prompt_cache_breakpoint, validate_prompt_cache_key,
+        CompatibleChatOptions, OpenAiChatOptions, OpenAiPromptCacheTtl, PromptCacheSurface,
+        chat_options, compatible_options, prompt_cache_breakpoint, prompt_cache_breakpoint_ttl,
+        validate_prompt_cache_controls, validate_prompt_cache_key,
     },
     wire::encode::{
         FileRef, Text, arguments, breakpoint, encoding_error, join, json_size_hint, push_text,
@@ -60,6 +61,11 @@ pub(crate) fn validate_request(
     profile: &ChatWireProfile,
 ) -> Result<(), ModelError> {
     validate_prompt_cache_key(options.official.prompt_cache_key.as_deref())?;
+    validate_prompt_cache_controls(
+        PromptCacheSurface::Chat,
+        options.official.prompt_cache_retention.is_some(),
+        options.official.prompt_cache_options.as_ref(),
+    )?;
     validate_prompt_cache_breakpoints(request, profile)?;
     request.validate_for(capabilities)?;
     validate_media(request, profile)?;
@@ -480,7 +486,7 @@ fn validate_prompt_cache_breakpoints(
             HistoryTurn::System(message) => {
                 for part in &message.content {
                     if let oven_sdk::SystemPart::Text(text) = part
-                        && prompt_cache_breakpoint(&text.metadata)?
+                        && chat_breakpoint(&text.metadata)?
                     {
                         if text.text.is_empty() || profile.system_role == SystemMessageRole::Omit {
                             return Err(ModelError::invalid_request(
@@ -494,7 +500,7 @@ fn validate_prompt_cache_breakpoints(
             HistoryTurn::User(message) => {
                 for part in &message.content {
                     match part {
-                        InputPart::Text(text) if prompt_cache_breakpoint(&text.metadata)? => {
+                        InputPart::Text(text) if chat_breakpoint(&text.metadata)? => {
                             if text.text.is_empty() {
                                 return Err(ModelError::invalid_request(
                                     "OpenAI prompt-cache breakpoint has no encodable Chat text block",
@@ -502,9 +508,7 @@ fn validate_prompt_cache_breakpoints(
                             }
                             count += 1;
                         }
-                        InputPart::File(file) if prompt_cache_breakpoint(&file.metadata)? => {
-                            count += 1
-                        }
+                        InputPart::File(file) if chat_breakpoint(&file.metadata)? => count += 1,
                         _ => {}
                     }
                 }
@@ -543,6 +547,17 @@ fn validate_prompt_cache_breakpoints(
         ));
     }
     Ok(())
+}
+
+/// A Chat content part's breakpoint flag; Chat accepts only the `30m` lifetime.
+fn chat_breakpoint(metadata: &oven_sdk::PartMetadata) -> Result<bool, ModelError> {
+    match prompt_cache_breakpoint_ttl(metadata)? {
+        None => Ok(false),
+        Some(Some(OpenAiPromptCacheTtl::TwelveHours)) => Err(ModelError::unsupported(
+            "OpenAI Chat Completions prompt-cache breakpoints support only the 30m ttl; 12h requires Responses",
+        )),
+        Some(_) => Ok(true),
+    }
 }
 
 fn tool_content_has_prompt_cache_breakpoint(content: &ToolContent) -> Result<bool, ModelError> {

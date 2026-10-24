@@ -133,6 +133,23 @@ inline PDF input. Responses supports declared image and PDF inline/URL input.
 Unsupported MIME/source forms fail before dispatch. Assistant-history media is
 rejected at request encoding rather than silently omitted.
 
+### Prompt caching
+
+`prompt_cache_retention` (`in_memory` or `24h`) is for models before GPT-5.6.
+GPT-5.6 and later use `OpenAiPromptCacheOptions` (`prompt_cache_options`),
+whose `mode`, `ttl`, and `prewarm` fields are all optional. A request that sets
+both `prompt_cache_retention` and `prompt_cache_options` fails validation.
+Responses accepts `ttl` `30m` or `12h` and `prewarm`; Chat Completions accepts
+only `30m` and rejects `prewarm`.
+
+`OpenAiPromptCacheBreakpointExt` marks a text or file part as an explicit
+breakpoint, sent as `prompt_cache_breakpoint: {"mode":"explicit"}`.
+`with_openai_prompt_cache_breakpoint_ttl` adds a per-breakpoint `ttl`
+override (`12h` on Responses only). A request may carry at most four
+breakpoints. Responses usage reports
+`input_tokens_details.cache_write_tokens_details` per lifetime in
+`Usage::input_tokens_cache_write_by_ttl` (`ttl_12h_tokens` becomes `12h`).
+
 ## Streaming and replay
 
 Both adapters preserve strict lifecycle behavior: one `StreamStart`, ID-scoped
@@ -182,8 +199,8 @@ reordering, or reinterpretation in the current private
 `oven.openai.responses.compaction.v1` native-context payload. A continuation
 prepends that exact array to newly encoded input. Canonical retained text,
 image, and file content preserves provider-returned
-`prompt_cache_breakpoint: {"mode":"explicit"}` exactly after strict shape and
-type validation.
+`prompt_cache_breakpoint: {"mode":"explicit"}`, with an optional `ttl` of
+`30m` or `12h`, exactly after strict shape and type validation.
 
 Native windows require the exact official Responses adapter and
 `NativeContextScope`. Foreign scopes/adapters and malformed, scope-less, or

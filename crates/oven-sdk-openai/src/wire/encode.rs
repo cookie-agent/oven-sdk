@@ -9,17 +9,25 @@ use base64::{display::Base64Display, engine::general_purpose::STANDARD};
 use oven_sdk::{ErrorStage, FilePart, FileSource, JsonValue, ModelError, PartMetadata};
 use serde::{Serialize, Serializer};
 
-use crate::options::prompt_cache_breakpoint;
+use crate::options::{OpenAiPromptCacheTtl, prompt_cache_breakpoint_ttl};
 
-/// The `{"mode":"explicit"}` prompt-cache breakpoint marker.
+/// The `{"mode":"explicit"}` prompt-cache breakpoint marker, with an optional
+/// per-breakpoint `ttl` override.
 #[derive(Clone, Copy, Serialize)]
 pub(crate) struct Breakpoint {
     mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<OpenAiPromptCacheTtl>,
 }
 
 /// Returns the wire marker for a part flagged as an explicit cache breakpoint.
 pub(crate) fn breakpoint(metadata: &PartMetadata) -> Result<Option<Breakpoint>, ModelError> {
-    Ok(prompt_cache_breakpoint(metadata)?.then_some(Breakpoint { mode: "explicit" }))
+    Ok(
+        prompt_cache_breakpoint_ttl(metadata)?.map(|ttl| Breakpoint {
+            mode: "explicit",
+            ttl,
+        }),
+    )
 }
 
 /// A JSON string whose contents are borrowed, owned, or rendered from a JSON

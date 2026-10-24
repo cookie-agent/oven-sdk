@@ -18,9 +18,9 @@ use oven_sdk::{
 use oven_sdk_openai::{
     CompatibleChatOptions, MaxTokensField, OpenAiChatOptions, OpenAiChatRequestExt,
     OpenAiCompatibleChatModel, OpenAiPromptCacheBreakpointExt, OpenAiPromptCacheMode,
-    OpenAiPromptCacheOptions, OpenAiPromptCacheRetention, OpenAiPromptCacheTtl,
-    OpenAiResponsesCompactionOptions, OpenAiResponsesCompactionRequestExt, OpenAiResponsesOptions,
-    OpenAiResponsesRequestExt, ReasoningField, StructuredOutputSupport, SystemMessageRole,
+    OpenAiPromptCacheOptions, OpenAiPromptCacheTtl, OpenAiResponsesCompactionOptions,
+    OpenAiResponsesCompactionRequestExt, OpenAiResponsesOptions, OpenAiResponsesRequestExt,
+    ReasoningField, StructuredOutputSupport, SystemMessageRole,
 };
 use serde_json::{Value, json};
 use wiremock::{
@@ -248,10 +248,11 @@ fn responses_options() -> OpenAiResponsesOptions {
         truncation: Some("auto".into()),
         parallel_tool_calls: Some(false),
         prompt_cache_key: Some("cache-key".into()),
-        prompt_cache_retention: Some(OpenAiPromptCacheRetention::TwentyFourHours),
+        prompt_cache_retention: None,
         prompt_cache_options: Some(OpenAiPromptCacheOptions {
-            mode: OpenAiPromptCacheMode::Explicit,
-            ttl: OpenAiPromptCacheTtl::ThirtyMinutes,
+            mode: Some(OpenAiPromptCacheMode::Explicit),
+            ttl: Some(OpenAiPromptCacheTtl::TwelveHours),
+            prewarm: None,
         }),
     }
 }
@@ -316,7 +317,10 @@ async fn golden_responses_history_media_and_tool_results() {
         system_with_breakpoint(),
         HistoryTurn::user(UserMessage::new(vec![
             InputPart::Text(TextPart::new("Describe these.").with_openai_prompt_cache_breakpoint()),
-            InputPart::File(png(b"png-bytes").with_openai_prompt_cache_breakpoint()),
+            InputPart::File(
+                png(b"png-bytes")
+                    .with_openai_prompt_cache_breakpoint_ttl(OpenAiPromptCacheTtl::TwelveHours),
+            ),
             InputPart::File(FilePart::image(
                 "image/jpeg",
                 url("https://example.test/a.jpg"),
@@ -470,10 +474,11 @@ async fn golden_responses_compaction_and_native_context() {
             instructions: Some("Keep decisions.".into()),
             prompt_cache_key: Some("compact-key".into()),
             prompt_cache_options: Some(OpenAiPromptCacheOptions {
-                mode: OpenAiPromptCacheMode::Implicit,
-                ttl: OpenAiPromptCacheTtl::ThirtyMinutes,
+                mode: Some(OpenAiPromptCacheMode::Implicit),
+                ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+                prewarm: None,
             }),
-            prompt_cache_retention: Some("in_memory".into()),
+            prompt_cache_retention: None,
             service_tier: Some("default".into()),
         },
     );
@@ -504,10 +509,11 @@ fn chat_options() -> OpenAiChatOptions {
         verbosity: Some("medium".into()),
         parallel_tool_calls: Some(true),
         prompt_cache_key: Some("chat-key".into()),
-        prompt_cache_retention: Some(OpenAiPromptCacheRetention::InMemory),
+        prompt_cache_retention: None,
         prompt_cache_options: Some(OpenAiPromptCacheOptions {
-            mode: OpenAiPromptCacheMode::Implicit,
-            ttl: OpenAiPromptCacheTtl::ThirtyMinutes,
+            mode: Some(OpenAiPromptCacheMode::Implicit),
+            ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            prewarm: None,
         }),
     }
 }

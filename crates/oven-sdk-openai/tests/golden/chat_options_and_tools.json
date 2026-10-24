@@ -17,7 +17,6 @@
     "mode": "implicit",
     "ttl": "30m"
   },
-  "prompt_cache_retention": "in_memory",
   "reasoning_effort": "low",
   "service_tier": "priority",
   "stream": true,

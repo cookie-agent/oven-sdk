@@ -119,10 +119,11 @@ async fn native_compaction_preserves_canonical_output_options_usage_and_metadata
             instructions: Some("preserve the working context\nnext\tcolumn\rline".into()),
             prompt_cache_key: Some("cache-route".into()),
             prompt_cache_options: Some(OpenAiPromptCacheOptions {
-                mode: OpenAiPromptCacheMode::Explicit,
-                ttl: OpenAiPromptCacheTtl::ThirtyMinutes,
+                mode: Some(OpenAiPromptCacheMode::Explicit),
+                ttl: Some(OpenAiPromptCacheTtl::TwelveHours),
+                prewarm: None,
             }),
-            prompt_cache_retention: Some("future-retention".into()),
+            prompt_cache_retention: None,
             service_tier: Some("future-burst".into()),
         });
     let result = model
@@ -157,8 +158,8 @@ async fn native_compaction_preserves_canonical_output_options_usage_and_metadata
     );
     assert_eq!(body["prompt_cache_key"], "cache-route");
     assert_eq!(body["prompt_cache_options"]["mode"], "explicit");
-    assert_eq!(body["prompt_cache_options"]["ttl"], "30m");
-    assert_eq!(body["prompt_cache_retention"], "future-retention");
+    assert_eq!(body["prompt_cache_options"]["ttl"], "12h");
+    assert!(body.get("prompt_cache_retention").is_none());
     assert_eq!(body["service_tier"], "future-burst");
 }
 

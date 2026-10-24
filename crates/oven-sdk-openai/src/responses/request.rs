@@ -11,8 +11,8 @@ use oven_sdk::{
 
 use crate::{
     options::{
-        OpenAiResponsesCompactionOptions, OpenAiResponsesOptions, prompt_cache_breakpoint,
-        validate_prompt_cache_key,
+        OpenAiResponsesCompactionOptions, OpenAiResponsesOptions, PromptCacheSurface,
+        prompt_cache_breakpoint, validate_prompt_cache_controls, validate_prompt_cache_key,
     },
     responses::{
         body::{self, Content, Item, Output, TypedItem},
@@ -39,6 +39,11 @@ pub(crate) fn validate_request(
     scope: &NativeContextScope,
 ) -> Result<(), ModelError> {
     validate_prompt_cache_key(options.prompt_cache_key.as_deref())?;
+    validate_prompt_cache_controls(
+        PromptCacheSurface::Responses,
+        options.prompt_cache_retention.is_some(),
+        options.prompt_cache_options.as_ref(),
+    )?;
     let new_breakpoints = validate_prompt_cache_breakpoints(request)?;
     request.validate_for(capabilities)?;
     let retained_breakpoints = validate_native_context(request, descriptor, scope)?;

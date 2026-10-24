@@ -38,6 +38,5 @@
     "mode": "implicit",
     "ttl": "30m"
   },
-  "prompt_cache_retention": "in_memory",
   "service_tier": "default"
 }

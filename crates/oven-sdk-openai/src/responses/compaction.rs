@@ -56,7 +56,11 @@ pub(crate) fn validate_options(
         64,
     )?;
     validate_optional_text("service_tier", options.service_tier.as_deref(), 64)?;
-    Ok(())
+    crate::options::validate_prompt_cache_controls(
+        crate::options::PromptCacheSurface::Compaction,
+        options.prompt_cache_retention.is_some(),
+        options.prompt_cache_options.as_ref(),
+    )
 }
 
 pub(crate) fn native_input(window: &NativeContextWindow) -> Result<&[JsonValue], ModelError> {
@@ -437,7 +441,13 @@ fn validate_prompt_cache_breakpoint(value: Option<&JsonValue>) -> Option<()> {
         return Some(());
     };
     let object = value.as_object()?;
-    exact_keys(object, &["mode"])?;
+    exact_subset(object, &["mode", "ttl"])?;
+    if object
+        .get("ttl")
+        .is_some_and(|ttl| !matches!(ttl.as_str(), Some("30m" | "12h")))
+    {
+        return None;
+    }
     (object.get("mode")?.as_str()? == "explicit").then_some(())
 }
 
@@ -474,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_cache_breakpoint_requires_the_exact_explicit_shape() {
+    fn prompt_cache_breakpoint_requires_the_explicit_shape_with_an_optional_ttl() {
         for invalid in [
             serde_json::json!({
                 "type":"input_text",
@@ -491,17 +501,33 @@ mod tests {
                 "text":"x",
                 "prompt_cache_breakpoint":{"mode":"explicit","extra":true}
             }),
+            serde_json::json!({
+                "type":"input_text",
+                "text":"x",
+                "prompt_cache_breakpoint":{"mode":"explicit","ttl":"24h"}
+            }),
+            serde_json::json!({
+                "type":"input_text",
+                "text":"x",
+                "prompt_cache_breakpoint":{"ttl":"12h"}
+            }),
         ] {
             assert!(validate_user_content(&invalid).is_none());
         }
-        assert!(
-            validate_user_content(&serde_json::json!({
-                "type":"input_text",
-                "text":"x",
-                "prompt_cache_breakpoint":{"mode":"explicit"}
-            }))
-            .is_some()
-        );
+        for valid in [
+            serde_json::json!({"mode":"explicit"}),
+            serde_json::json!({"mode":"explicit","ttl":"30m"}),
+            serde_json::json!({"mode":"explicit","ttl":"12h"}),
+        ] {
+            assert!(
+                validate_user_content(&serde_json::json!({
+                    "type":"input_text",
+                    "text":"x",
+                    "prompt_cache_breakpoint":valid
+                }))
+                .is_some()
+            );
+        }
     }
 
     #[test]

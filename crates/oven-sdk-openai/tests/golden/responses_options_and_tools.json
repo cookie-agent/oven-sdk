@@ -31,9 +31,8 @@
   "prompt_cache_key": "cache-key",
   "prompt_cache_options": {
     "mode": "explicit",
-    "ttl": "30m"
+    "ttl": "12h"
   },
-  "prompt_cache_retention": "24h",
   "reasoning": {
     "effort": "high",
     "summary": "auto"

@@ -191,6 +191,100 @@ async fn responses_rejects_oversized_prompt_cache_keys() {
 }
 
 #[tokio::test]
+async fn responses_sends_twelve_hour_cache_controls_and_prewarm() {
+    let server = MockServer::start().await;
+    common::mount(&server, "/responses", common::responses_document("ok")).await;
+    let model = common::official_responses(&server, "gpt-5.6");
+    let request = Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
+        InputPart::Text(
+            TextPart::new("stable prefix")
+                .with_openai_prompt_cache_breakpoint_ttl(OpenAiPromptCacheTtl::TwelveHours),
+        ),
+        InputPart::Text(TextPart::new("latest").with_openai_prompt_cache_breakpoint()),
+    ]))])
+    .with_openai_responses_options(OpenAiResponsesOptions {
+        prompt_cache_options: Some(OpenAiPromptCacheOptions {
+            mode: Some(OpenAiPromptCacheMode::Explicit),
+            ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            prewarm: Some(true),
+        }),
+        ..Default::default()
+    });
+    model
+        .complete(request, AbortSignal::default())
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+    assert_eq!(
+        body["prompt_cache_options"],
+        serde_json::json!({"mode":"explicit","ttl":"30m","prewarm":true})
+    );
+    assert!(body.get("prompt_cache_retention").is_none());
+    assert_eq!(
+        body["input"][0]["content"][0]["prompt_cache_breakpoint"],
+        serde_json::json!({"mode":"explicit","ttl":"12h"})
+    );
+    assert_eq!(
+        body["input"][0]["content"][1]["prompt_cache_breakpoint"],
+        serde_json::json!({"mode":"explicit"})
+    );
+
+    let ttl_only = Request::new(Vec::new()).with_openai_responses_options(OpenAiResponsesOptions {
+        prompt_cache_options: Some(OpenAiPromptCacheOptions {
+            ttl: Some(OpenAiPromptCacheTtl::TwelveHours),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    model
+        .complete(ttl_only, AbortSignal::default())
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(
+        body["prompt_cache_options"],
+        serde_json::json!({"ttl":"12h"})
+    );
+}
+
+#[tokio::test]
+async fn responses_rejects_retention_combined_with_cache_options() {
+    let server = MockServer::start().await;
+    let model = common::official_responses(&server, "gpt-5.6");
+    let request = Request::new(Vec::new()).with_openai_responses_options(OpenAiResponsesOptions {
+        prompt_cache_retention: Some(OpenAiPromptCacheRetention::TwentyFourHours),
+        prompt_cache_options: Some(OpenAiPromptCacheOptions {
+            ttl: Some(OpenAiPromptCacheTtl::TwelveHours),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let error = model.validate_request(&request).unwrap_err();
+    assert!(error.message.contains("prompt_cache_retention"), "{error}");
+
+    let mut malformed = Request::new(Vec::new());
+    malformed.provider_options.insert(
+        "openai".into(),
+        serde_json::json!({"responses":{"prompt_cache_options":{"ttl":"24h"}}}),
+    );
+    assert!(model.validate_request(&malformed).is_err());
+
+    let bad_marker = Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
+        InputPart::Text({
+            let mut text = TextPart::new("prefix");
+            text.metadata = Some(std::collections::BTreeMap::from([(
+                "openai.prompt_cache_breakpoint".into(),
+                serde_json::json!({"ttl":"24h"}),
+            )]));
+            text
+        }),
+    ]))]);
+    assert!(model.validate_request(&bad_marker).is_err());
+}
+
+#[tokio::test]
 async fn responses_tool_choice_requires_advertised_tools() {
     for (has_tools, choice, expected_choice) in [
         (false, ToolChoice::Auto, None),
@@ -263,8 +357,9 @@ async fn responses_maps_system_media_tools_and_structured_output() {
     .with_response_format(ResponseFormat::structured(schema))
     .with_openai_responses_options(OpenAiResponsesOptions {
         prompt_cache_options: Some(OpenAiPromptCacheOptions {
-            mode: OpenAiPromptCacheMode::Implicit,
-            ttl: OpenAiPromptCacheTtl::ThirtyMinutes,
+            mode: Some(OpenAiPromptCacheMode::Implicit),
+            ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            prewarm: None,
         }),
         ..Default::default()
     });

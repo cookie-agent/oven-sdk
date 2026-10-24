@@ -32,7 +32,8 @@
         {
           "image_url": "data:image/png;base64,cG5nLWJ5dGVz",
           "prompt_cache_breakpoint": {
-            "mode": "explicit"
+            "mode": "explicit",
+            "ttl": "12h"
           },
           "type": "input_image"
         },

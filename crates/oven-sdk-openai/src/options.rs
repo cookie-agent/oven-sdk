@@ -85,14 +85,28 @@ pub struct OpenAiResponsesCompactionOptions {
     pub service_tier: Option<String>,
 }
 
-/// Prompt-cache controls accepted by standalone Responses compaction.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// GPT-5.6+ `prompt_cache_options`, shared by Responses, Chat Completions,
+/// and standalone Responses compaction.
+///
+/// Every field is optional; OpenAI defaults `mode` to `implicit`, `ttl` to
+/// `30m`, and `prewarm` to `false`. Unknown fields are rejected. Never combine
+/// these options with the pre-5.6 `prompt_cache_retention`: requests that set
+/// both are rejected before any provider I/O.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenAiPromptCacheOptions {
     /// Cache breakpoint mode.
-    pub mode: OpenAiPromptCacheMode,
-    /// Cache TTL. The API currently accepts only 30 minutes.
-    pub ttl: OpenAiPromptCacheTtl,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<OpenAiPromptCacheMode>,
+    /// Minimum lifetime of every cache write in the request. `12h` is
+    /// accepted only by Responses; Chat Completions accepts only `30m`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<OpenAiPromptCacheTtl>,
+    /// Prepares the prompt cache without generating output (Responses only).
+    /// OpenAI then treats the request as `generate: false`, so the response
+    /// carries usage but no generated content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prewarm: Option<bool>,
 }
 
 /// GPT-5.6+ prompt-cache breakpoint mode.
@@ -105,12 +119,15 @@ pub enum OpenAiPromptCacheMode {
     Explicit,
 }
 
-/// GPT-5.6+ prompt-cache TTL.
+/// GPT-5.6+ prompt-cache lifetime.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum OpenAiPromptCacheTtl {
     /// Retain written cache entries for at least 30 minutes.
     #[serde(rename = "30m")]
     ThirtyMinutes,
+    /// Retain written cache entries for at least 12 hours (Responses only).
+    #[serde(rename = "12h")]
+    TwelveHours,
 }
 
 const PROMPT_CACHE_BREAKPOINT_METADATA: &str = "openai.prompt_cache_breakpoint";
@@ -122,43 +139,111 @@ const PROMPT_CACHE_BREAKPOINT_METADATA: &str = "openai.prompt_cache_breakpoint";
 /// but does not estimate tokens. Cache reads may consider the latest 50
 /// breakpoints; that provider-side read window is not a request validation limit.
 pub trait OpenAiPromptCacheBreakpointExt {
-    /// Adds an explicit prompt-cache breakpoint to this content part.
+    /// Adds an explicit prompt-cache breakpoint that uses the request TTL.
     fn with_openai_prompt_cache_breakpoint(self) -> Self;
+    /// Adds an explicit prompt-cache breakpoint with its own minimum lifetime,
+    /// sent as `prompt_cache_breakpoint.ttl`. `12h` is accepted only by Responses.
+    fn with_openai_prompt_cache_breakpoint_ttl(self, ttl: OpenAiPromptCacheTtl) -> Self;
 }
 
 impl OpenAiPromptCacheBreakpointExt for TextPart {
     fn with_openai_prompt_cache_breakpoint(mut self) -> Self {
-        set_prompt_cache_breakpoint(&mut self.metadata);
+        set_prompt_cache_breakpoint(&mut self.metadata, None);
+        self
+    }
+
+    fn with_openai_prompt_cache_breakpoint_ttl(mut self, ttl: OpenAiPromptCacheTtl) -> Self {
+        set_prompt_cache_breakpoint(&mut self.metadata, Some(ttl));
         self
     }
 }
 
 impl OpenAiPromptCacheBreakpointExt for FilePart {
     fn with_openai_prompt_cache_breakpoint(mut self) -> Self {
-        set_prompt_cache_breakpoint(&mut self.metadata);
+        set_prompt_cache_breakpoint(&mut self.metadata, None);
+        self
+    }
+
+    fn with_openai_prompt_cache_breakpoint_ttl(mut self, ttl: OpenAiPromptCacheTtl) -> Self {
+        set_prompt_cache_breakpoint(&mut self.metadata, Some(ttl));
         self
     }
 }
 
-fn set_prompt_cache_breakpoint(metadata: &mut PartMetadata) {
+/// Stores `true` for a breakpoint that uses the request TTL, or `{"ttl": ...}`
+/// for one with its own lifetime.
+fn set_prompt_cache_breakpoint(metadata: &mut PartMetadata, ttl: Option<OpenAiPromptCacheTtl>) {
+    let value = match ttl {
+        None => serde_json::Value::Bool(true),
+        Some(ttl) => serde_json::json!({ "ttl": ttl }),
+    };
     metadata
         .get_or_insert_default()
-        .insert(PROMPT_CACHE_BREAKPOINT_METADATA.into(), true.into());
+        .insert(PROMPT_CACHE_BREAKPOINT_METADATA.into(), value);
+}
+
+/// Reads a part's breakpoint flag: `None` when unmarked, `Some(None)` when it
+/// uses the request TTL, and `Some(Some(ttl))` when it carries its own.
+pub(crate) fn prompt_cache_breakpoint_ttl(
+    metadata: &PartMetadata,
+) -> Result<Option<Option<OpenAiPromptCacheTtl>>, oven_sdk::ModelError> {
+    let invalid =
+        || oven_sdk::ModelError::invalid_request("invalid OpenAI prompt-cache breakpoint metadata");
+    match metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(PROMPT_CACHE_BREAKPOINT_METADATA))
+    {
+        None => Ok(None),
+        Some(serde_json::Value::Bool(true)) => Ok(Some(None)),
+        Some(serde_json::Value::Object(object)) if object.len() == 1 => object
+            .get("ttl")
+            .and_then(|ttl| serde_json::from_value(ttl.clone()).ok())
+            .map(|ttl| Some(Some(ttl)))
+            .ok_or_else(invalid),
+        Some(_) => Err(invalid()),
+    }
 }
 
 pub(crate) fn prompt_cache_breakpoint(
     metadata: &PartMetadata,
 ) -> Result<bool, oven_sdk::ModelError> {
-    match metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get(PROMPT_CACHE_BREAKPOINT_METADATA))
-    {
-        None => Ok(false),
-        Some(serde_json::Value::Bool(true)) => Ok(true),
-        Some(_) => Err(oven_sdk::ModelError::invalid_request(
-            "invalid OpenAI prompt-cache breakpoint metadata",
-        )),
+    Ok(prompt_cache_breakpoint_ttl(metadata)?.is_some())
+}
+
+/// The endpoint a set of prompt-cache controls is sent to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromptCacheSurface {
+    Responses,
+    Chat,
+    Compaction,
+}
+
+/// Rejects prompt-cache control combinations the endpoint does not accept.
+pub(crate) fn validate_prompt_cache_controls(
+    surface: PromptCacheSurface,
+    has_retention: bool,
+    options: Option<&OpenAiPromptCacheOptions>,
+) -> Result<(), oven_sdk::ModelError> {
+    let Some(options) = options else {
+        return Ok(());
+    };
+    if has_retention {
+        return Err(oven_sdk::ModelError::invalid_request(
+            "OpenAI prompt_cache_retention is for models before GPT-5.6 and cannot be combined with prompt_cache_options",
+        ));
     }
+    if surface == PromptCacheSurface::Chat && options.ttl == Some(OpenAiPromptCacheTtl::TwelveHours)
+    {
+        return Err(oven_sdk::ModelError::unsupported(
+            "OpenAI Chat Completions prompt_cache_options.ttl supports only 30m; 12h requires Responses",
+        ));
+    }
+    if surface != PromptCacheSurface::Responses && options.prewarm.is_some() {
+        return Err(oven_sdk::ModelError::unsupported(
+            "OpenAI prompt_cache_options.prewarm is supported only by Responses",
+        ));
+    }
+    Ok(())
 }
 
 /// Current request-level official OpenAI provider-options envelope.

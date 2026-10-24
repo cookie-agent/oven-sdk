@@ -444,8 +444,9 @@ async fn chat_encodes_image_and_pdf_inputs() {
     ]))])
     .with_openai_chat_options(OpenAiChatOptions {
         prompt_cache_options: Some(OpenAiPromptCacheOptions {
-            mode: OpenAiPromptCacheMode::Explicit,
-            ttl: OpenAiPromptCacheTtl::ThirtyMinutes,
+            mode: Some(OpenAiPromptCacheMode::Explicit),
+            ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            prewarm: None,
         }),
         ..Default::default()
     });
@@ -500,6 +501,42 @@ async fn chat_rejects_too_many_or_malformed_cache_controls() {
         serde_json::json!({"chat":{"prompt_cache_options":{"mode":"future","ttl":"forever"}}}),
     );
     assert!(model.validate_request(&malformed).is_err());
+
+    for options in [
+        serde_json::json!({"prompt_cache_options":{"ttl":"12h"}}),
+        serde_json::json!({"prompt_cache_options":{"prewarm":true}}),
+        serde_json::json!({"prompt_cache_options":{"mode":"explicit","unknown":1}}),
+        serde_json::json!({
+            "prompt_cache_retention":"24h",
+            "prompt_cache_options":{"mode":"explicit"}
+        }),
+    ] {
+        let mut request = Request::new(Vec::new());
+        request
+            .provider_options
+            .insert("openai".into(), serde_json::json!({ "chat": options }));
+        assert!(model.validate_request(&request).is_err(), "{options}");
+    }
+
+    let twelve_hour_marker = Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
+        InputPart::Text(
+            TextPart::new("prefix")
+                .with_openai_prompt_cache_breakpoint_ttl(OpenAiPromptCacheTtl::TwelveHours),
+        ),
+    ]))]);
+    assert!(model.validate_request(&twelve_hour_marker).is_err());
+
+    let thirty_minute_marker = Request::new(vec![HistoryTurn::user(UserMessage::new(vec![
+        InputPart::Text(
+            TextPart::new("prefix")
+                .with_openai_prompt_cache_breakpoint_ttl(OpenAiPromptCacheTtl::ThirtyMinutes),
+        ),
+    ]))])
+    .with_openai_chat_options(OpenAiChatOptions {
+        prompt_cache_options: Some(OpenAiPromptCacheOptions::default()),
+        ..Default::default()
+    });
+    assert!(model.validate_request(&thirty_minute_marker).is_ok());
 }
 
 #[tokio::test]
