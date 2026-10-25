@@ -15,8 +15,6 @@ pub const MINIMAX_MESSAGES_ADAPTER_ID: &str = "oven.minimax.messages";
 /// Stable adapter identity for Claude Platform on AWS Messages.
 pub const ANTHROPIC_AWS_MESSAGES_ADAPTER_ID: &str = "oven.anthropic.aws.messages";
 
-pub(crate) const VERSION: &str = "2023-06-01";
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Protocol {
     Anthropic,

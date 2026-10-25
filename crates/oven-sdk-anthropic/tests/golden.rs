@@ -146,6 +146,16 @@ fn anthropic(server: &MockServer) -> oven_sdk_anthropic::AnthropicModel {
         .model(MODEL)
 }
 
+/// A model pinned to API version 2023-06-01, the only one that accepts sampling.
+fn anthropic_legacy_sampling(server: &MockServer) -> oven_sdk_anthropic::AnthropicModel {
+    Anthropic::builder()
+        .base_url(server.uri())
+        .legacy_sampling()
+        .build()
+        .unwrap()
+        .model(MODEL)
+}
+
 fn replay_artifact(
     server: &MockServer,
     content: Value,
@@ -214,7 +224,7 @@ async fn golden_system_prompt_sampling_and_metadata() {
         user_id: Some("user-123".into()),
         ..Default::default()
     });
-    let body = capture(&server, &anthropic(&server), request).await;
+    let body = capture(&server, &anthropic_legacy_sampling(&server), request).await;
     assert_golden("system_prompt_sampling_and_metadata", &body);
 }
 
@@ -225,7 +235,7 @@ async fn golden_tools_with_required_choice() {
         .with_tools(tools())
         .with_tool_choice(ToolChoice::Required)
         .with_inference(inference(None, None, Some(0.9)));
-    let body = capture(&server, &anthropic(&server), request).await;
+    let body = capture(&server, &anthropic_legacy_sampling(&server), request).await;
     assert_golden("tools_with_required_choice", &body);
 }
 
@@ -528,7 +538,7 @@ async fn golden_structured_output_thinking_and_cache_markers() {
         user_id: Some("user-9".into()),
         betas: vec!["some-beta".into()],
     });
-    let body = capture(&server, &anthropic(&server), request).await;
+    let body = capture(&server, &anthropic_legacy_sampling(&server), request).await;
     assert_golden("structured_output_thinking_cache_markers", &body);
 }
 

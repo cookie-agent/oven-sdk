@@ -54,8 +54,6 @@ let capabilities = ModelCapabilities {
         | Capability::PARALLEL_TOOLS
         | Capability::TOOL_INPUT_DELTAS
         | Capability::REASONING
-        | Capability::TEMPERATURE
-        | Capability::TOP_P
         | Capability::MAX_OUTPUT_TOKENS
         | Capability::USAGE,
     limits: ModelLimits::new(Some(200_000), None, Some(64_000)),
@@ -89,6 +87,8 @@ let model = AnthropicModel::new(ModelConfig::new(
             effort: true,
             assistant_prefill: true,
             reject_non_default_sampling: false,
+            // `None` sends `anthropic-version: 2026-10-21` for direct Anthropic.
+            api_version: None,
         },
         native_context_discriminator: Some(ResourceId::new("production-tenant")?),
     },
@@ -129,6 +129,24 @@ support, default-active thinking, disabled-mode support, open effort labels
 forbidden while disabled, general effort support, assistant prefill, and the
 sampling rule. Request `thinking.display` and `effort` remain open strings and
 are forwarded unchanged after structural validation.
+
+`AnthropicProtocolSettings::api_version` selects the `anthropic-version` header.
+`None` sends `2026-10-21` for direct Anthropic and Claude Platform on AWS, and
+`2023-06-01` for compatible endpoints; MiniMax sends no version header. Under
+`2026-10-21`:
+
+- `temperature` and `top_p` are never sent. A declaration that claims
+  `Capability::TEMPERATURE` or `Capability::TOP_P` fails construction, and a
+  request that sets either fails validation with an `Unsupported` error that
+  names the version. Pin `AnthropicApiVersion::V2023_06_01` to send them. The
+  adapter never sends `top_k`.
+- Encoding rejects a `document` block directly in an `assistant` message and a
+  `text` block with non-empty `citations` in a `user` message (directly or in a
+  `search_result`). Normalized requests cannot produce either today; the check
+  guards native blocks.
+
+The one-hour cache TTL (`AnthropicCacheTtl::OneHour`) needs no beta header, and
+the adapter adds none.
 
 ## Generic Anthropic Messages compatibility
 

@@ -169,7 +169,7 @@ async fn dynamic_headers_cannot_override_transport_constants() {
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests[0].headers[CONTENT_TYPE], "application/json");
-    assert_eq!(requests[0].headers["anthropic-version"], "2023-06-01");
+    assert_eq!(requests[0].headers["anthropic-version"], "2026-10-21");
 }
 
 #[tokio::test]
@@ -267,7 +267,7 @@ async fn request_encodes_headers_tools_cache_thinking_and_structured_output() {
     let request = &requests[0];
     assert_eq!(
         request.headers.get("anthropic-version").unwrap(),
-        "2023-06-01"
+        "2026-10-21"
     );
     assert_eq!(request.headers.get("x-api-key").unwrap(), "secret");
     assert_eq!(request.headers.get("anthropic-beta").unwrap(), "test-beta");
@@ -514,9 +514,10 @@ async fn tool_choice_specific_and_none_have_the_documented_wire_behavior() {
 
 #[test]
 fn sampling_behavior_is_selected_only_by_explicit_protocol_settings() {
-    let mut strict = common::anthropic_protocol();
+    let mut strict = common::legacy_sampling_protocol();
     strict.reject_non_default_sampling = true;
     let strict = Anthropic::builder()
+        .legacy_sampling()
         .protocol(strict)
         .build()
         .unwrap()
@@ -530,6 +531,7 @@ fn sampling_behavior_is_selected_only_by_explicit_protocol_settings() {
     assert!(strict.validate_request(&defaults).is_ok());
 
     let flexible = Anthropic::builder()
+        .legacy_sampling()
         .build()
         .unwrap()
         .model("same-behavior-with-any-id");
@@ -684,6 +686,7 @@ fn explicit_thinking_settings_and_budget_rules_are_validated_locally() {
 #[test]
 fn first_party_sampling_rules_apply_to_direct_and_aws_but_not_minimax() {
     let direct = Anthropic::builder()
+        .legacy_sampling()
         .build()
         .unwrap()
         .model("claude-opus-4-8");
@@ -693,6 +696,7 @@ fn first_party_sampling_rules_apply_to_direct_and_aws_but_not_minimax() {
             secret_access_key: oven_sdk::SecretString::new("secret"),
             session_token: None,
         })
+        .legacy_sampling()
         .build()
         .unwrap()
         .model("claude-opus-4-8");
@@ -789,6 +793,7 @@ async fn older_model_sampling_and_open_thinking_display_have_expected_wire_encod
         .await;
     let model = Anthropic::builder()
         .base_url(server.uri())
+        .legacy_sampling()
         .build()
         .unwrap()
         .model("claude-sonnet-4-6");

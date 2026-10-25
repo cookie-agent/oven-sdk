@@ -99,6 +99,36 @@ pub enum AnthropicThinkingSupport {
     Both,
 }
 
+/// Anthropic Messages API version, sent as the `anthropic-version` header.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AnthropicApiVersion {
+    /// `2023-06-01`, the original Messages API version. It has no sunset date
+    /// and is the only version that accepts `temperature` and `top_p`.
+    V2023_06_01,
+    /// `2026-10-21`. It rejects `temperature`, `top_p`, and `top_k` on every
+    /// model, a `document` block directly in an `assistant` message, and a
+    /// `text` block with non-empty `citations` in a `user` message (directly or
+    /// inside a `search_result` block).
+    V2026_10_21,
+}
+
+impl AnthropicApiVersion {
+    /// The exact `anthropic-version` header value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V2023_06_01 => "2023-06-01",
+            Self::V2026_10_21 => "2026-10-21",
+        }
+    }
+}
+
+impl fmt::Display for AnthropicApiVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Explicit direct-Anthropic and Anthropic-AWS protocol behavior.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnthropicProtocolSettings {
@@ -116,6 +146,11 @@ pub struct AnthropicProtocolSettings {
     pub assistant_prefill: bool,
     /// Whether non-default temperature or top-p values are rejected for every request.
     pub reject_non_default_sampling: bool,
+    /// Messages API version. `None` selects the adapter default:
+    /// [`AnthropicApiVersion::V2026_10_21`] for direct Anthropic and Claude
+    /// Platform on AWS, and [`AnthropicApiVersion::V2023_06_01`] for
+    /// caller-selected compatible endpoints.
+    pub api_version: Option<AnthropicApiVersion>,
 }
 
 /// Explicit MiniMax Messages protocol behavior.

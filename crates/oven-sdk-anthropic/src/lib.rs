@@ -28,10 +28,10 @@ pub mod transport;
 pub mod wire;
 
 pub use config::{
-    AnthropicAuth, AnthropicAwsAuth, AnthropicAwsCredentialProvider, AnthropicAwsCredentials,
-    AnthropicAwsSettings, AnthropicCompatibleAuth, AnthropicCompatibleSettings,
-    AnthropicProtocolSettings, AnthropicSettings, AnthropicThinkingSupport, MiniMaxAuth,
-    MiniMaxProtocolSettings, MiniMaxSettings,
+    AnthropicApiVersion, AnthropicAuth, AnthropicAwsAuth, AnthropicAwsCredentialProvider,
+    AnthropicAwsCredentials, AnthropicAwsSettings, AnthropicCompatibleAuth,
+    AnthropicCompatibleSettings, AnthropicProtocolSettings, AnthropicSettings,
+    AnthropicThinkingSupport, MiniMaxAuth, MiniMaxProtocolSettings, MiniMaxSettings,
 };
 pub use error::classify_error;
 pub use model::{AnthropicAwsModel, AnthropicCompatibleModel, AnthropicModel, MiniMaxModel};

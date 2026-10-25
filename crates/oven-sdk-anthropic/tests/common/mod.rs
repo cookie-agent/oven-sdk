@@ -12,11 +12,11 @@ use oven_sdk::{
     ResourceId, SecretString,
 };
 use oven_sdk_anthropic::{
-    AnthropicAuth, AnthropicAwsAuth, AnthropicAwsCredentialProvider, AnthropicAwsCredentials,
-    AnthropicAwsModel, AnthropicAwsSettings, AnthropicCompatibleAuth, AnthropicCompatibleModel,
-    AnthropicCompatibleSettings, AnthropicModel, AnthropicProtocolSettings, AnthropicSettings,
-    AnthropicThinkingSupport, AnthropicTimeouts, MiniMaxAuth, MiniMaxModel,
-    MiniMaxProtocolSettings, MiniMaxSettings,
+    AnthropicApiVersion, AnthropicAuth, AnthropicAwsAuth, AnthropicAwsCredentialProvider,
+    AnthropicAwsCredentials, AnthropicAwsModel, AnthropicAwsSettings, AnthropicCompatibleAuth,
+    AnthropicCompatibleModel, AnthropicCompatibleSettings, AnthropicModel,
+    AnthropicProtocolSettings, AnthropicSettings, AnthropicThinkingSupport, AnthropicTimeouts,
+    MiniMaxAuth, MiniMaxModel, MiniMaxProtocolSettings, MiniMaxSettings,
 };
 use reqwest::{Client, header::HeaderMap};
 use sha2::{Digest, Sha256};
@@ -30,7 +30,23 @@ pub fn anthropic_protocol() -> AnthropicProtocolSettings {
         effort: true,
         assistant_prefill: true,
         reject_non_default_sampling: false,
+        api_version: None,
     }
+}
+
+/// Protocol settings pinned to API version 2023-06-01, which accepts sampling.
+pub fn legacy_sampling_protocol() -> AnthropicProtocolSettings {
+    AnthropicProtocolSettings {
+        api_version: Some(AnthropicApiVersion::V2023_06_01),
+        ..anthropic_protocol()
+    }
+}
+
+/// [`anthropic_capabilities`] plus temperature and top-p, valid only with 2023-06-01.
+pub fn legacy_sampling_capabilities(policy: ReplayPolicy) -> ModelCapabilities {
+    let mut capabilities = anthropic_capabilities(policy);
+    capabilities.features |= Capability::TEMPERATURE | Capability::TOP_P;
+    capabilities
 }
 
 pub fn anthropic_capabilities(policy: ReplayPolicy) -> ModelCapabilities {
@@ -66,8 +82,6 @@ pub fn anthropic_capabilities(policy: ReplayPolicy) -> ModelCapabilities {
             | Capability::TOOL_INPUT_DELTAS
             | Capability::REASONING
             | Capability::STRUCTURED_OUTPUT
-            | Capability::TEMPERATURE
-            | Capability::TOP_P
             | Capability::MAX_OUTPUT_TOKENS
             | Capability::PROMPT_CACHING
             | Capability::USAGE,
@@ -455,6 +469,12 @@ impl AnthropicBuilder {
         self.protocol = value;
         self
     }
+    /// Pins API version 2023-06-01 and declares temperature and top-p.
+    pub fn legacy_sampling(mut self) -> Self {
+        self.protocol.api_version = Some(AnthropicApiVersion::V2023_06_01);
+        self.capabilities = Some(legacy_sampling_capabilities(self.replay_policy));
+        self
+    }
     pub fn build(self) -> Result<Anthropic, ModelError> {
         Ok(Anthropic { builder: self })
     }
@@ -693,6 +713,12 @@ impl AnthropicAwsBuilder {
     }
     pub fn protocol(mut self, value: AnthropicProtocolSettings) -> Self {
         self.protocol = value;
+        self
+    }
+    /// Pins API version 2023-06-01 and declares temperature and top-p.
+    pub fn legacy_sampling(mut self) -> Self {
+        self.protocol.api_version = Some(AnthropicApiVersion::V2023_06_01);
+        self.capabilities = Some(legacy_sampling_capabilities(self.replay_policy));
         self
     }
     pub fn build(self) -> Result<AnthropicAws, ModelError> {

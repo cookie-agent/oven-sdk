@@ -5,9 +5,9 @@ use std::{borrow::Cow, collections::BTreeSet};
 use bytes::Bytes;
 use oven_sdk::{
     AssistantPart, Capability, ContentValue, ErrorStage, FileSource, HistoryTurn, InputPart,
-    JsonValue, LanguageModelDescriptor, ModelCapabilities, ModelError, NativeContextScope,
-    ReplayDecision, ReplayDisposition, ReplayOutcome, ReplayPolicy, Request, ResponseFormat,
-    ToolChoice, ToolContent, ToolResultPart,
+    JsonValue, LanguageModelDescriptor, ModelCapabilities, ModelError, ReplayDecision,
+    ReplayDisposition, ReplayOutcome, ReplayPolicy, Request, ResponseFormat, ToolChoice,
+    ToolContent, ToolResultPart,
 };
 
 use crate::{
@@ -16,7 +16,10 @@ use crate::{
         OutputFormat, Source, TextValue, Thinking, Tool, ToolChoice as WireToolChoice, ToolInput,
         ToolResultContent, TypedBlock,
     },
-    config::{AnthropicProtocolSettings, AnthropicThinkingSupport, MiniMaxProtocolSettings},
+    config::{
+        AnthropicApiVersion, AnthropicProtocolSettings, AnthropicThinkingSupport,
+        MiniMaxProtocolSettings,
+    },
     model::ProtocolSettings,
     options::{
         AnthropicAwsRequestOptions, AnthropicCacheControl, AnthropicCacheTtl,
@@ -60,8 +63,17 @@ pub(crate) fn validate_request(
     capabilities: &ModelCapabilities,
     protocol: Protocol,
     protocol_settings: &ProtocolSettings,
+    api_version: Option<AnthropicApiVersion>,
     compatible: bool,
 ) -> Result<(), ModelError> {
+    // Checked before the capability ceiling so the error names the version.
+    if api_version == Some(AnthropicApiVersion::V2026_10_21)
+        && (request.inference.temperature.is_some() || request.inference.top_p.is_some())
+    {
+        return Err(ModelError::unsupported(
+            "Anthropic API version 2026-10-21 rejects temperature and top_p; pin API version 2023-06-01 to send them",
+        ));
+    }
     request.validate_for(capabilities)?;
     if protocol.is_first_party()
         && matches!(
@@ -900,9 +912,9 @@ pub(crate) fn encode_request(
     request: &Request,
     parsed: &ParsedOptions,
     descriptor: &LanguageModelDescriptor,
-    _native_context_scope: &NativeContextScope,
     policy: ReplayPolicy,
     protocol: Protocol,
+    api_version: Option<AnthropicApiVersion>,
     compatible: bool,
 ) -> Result<Encoded, ModelError> {
     let opts = &parsed.anthropic;
@@ -1094,6 +1106,9 @@ pub(crate) fn encode_request(
             }
         }
     }
+    if api_version == Some(AnthropicApiVersion::V2026_10_21) {
+        validate_version_content(&messages)?;
+    }
     let requested_max = request
         .inference
         .max_output_tokens
@@ -1249,6 +1264,58 @@ pub(crate) fn encode_request(
         betas,
     })
 }
+/// Rejects the message content API version 2026-10-21 refuses with a 400: a
+/// `document` block directly in an `assistant` message, and a `text` block with
+/// non-empty `citations` in a `user` message, directly or inside a
+/// `search_result` block. A document nested inside another block is accepted.
+fn validate_version_content(messages: &[Message<'_>]) -> Result<(), ModelError> {
+    for message in messages {
+        for block in &message.content {
+            if message.role == "assistant" && block.block_type() == Some("document") {
+                return Err(ModelError::invalid_request(
+                    "Anthropic API version 2026-10-21 rejects a document block directly in an assistant message",
+                )
+                .with_stage(ErrorStage::RequestEncoding));
+            }
+            if message.role == "user" && block_has_user_citations(block) {
+                return Err(ModelError::invalid_request(
+                    "Anthropic API version 2026-10-21 rejects text with citations in a user message",
+                )
+                .with_stage(ErrorStage::RequestEncoding));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn block_has_user_citations(block: &Block<'_>) -> bool {
+    // Normalized user text never carries citations; only native blocks can.
+    let Block::Native(native) = block else {
+        return false;
+    };
+    fn cited_text(block: &serde_json::Map<String, JsonValue>) -> bool {
+        block.get("type").and_then(JsonValue::as_str) == Some("text")
+            && block
+                .get("citations")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|citations| !citations.is_empty())
+    }
+    match native.value.get("type").and_then(JsonValue::as_str) {
+        Some("text") => cited_text(native.value),
+        Some("search_result") => native
+            .value
+            .get("content")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|content| {
+                content
+                    .iter()
+                    .filter_map(JsonValue::as_object)
+                    .any(cited_text)
+            }),
+        _ => false,
+    }
+}
+
 fn input_block<'a>(
     part: &'a InputPart,
     cache: Option<CacheControl>,
@@ -1515,6 +1582,87 @@ mod tests {
         assert!(
             validate_serialized_request_size(MINIMAX_REQUEST_MAX_BYTES + 1, Protocol::MiniMax)
                 .is_err()
+        );
+    }
+
+    fn native(value: &JsonValue) -> Block<'_> {
+        Block::Native(NativeBlock {
+            value: value.as_object().unwrap(),
+            cache: None,
+            text: None,
+        })
+    }
+
+    fn check(role: &'static str, blocks: Vec<Block<'_>>) -> Result<(), ModelError> {
+        validate_version_content(&[Message {
+            role,
+            content: blocks,
+        }])
+    }
+
+    #[test]
+    fn version_2026_10_21_rejects_top_level_documents_in_assistant_messages() {
+        let pdf = Source::text("text/plain", "doc");
+        let document = || {
+            Block::Typed(TypedBlock::Document {
+                source: Source::text("text/plain", "doc"),
+                cache_control: None,
+            })
+        };
+        assert!(check("assistant", vec![document()]).is_err());
+        let native_document = serde_json::json!({"type":"document","source":{"type":"text"}});
+        assert!(check("assistant", vec![native(&native_document)]).is_err());
+        // The same document is fine in a user message or nested inside another block.
+        assert!(
+            check(
+                "user",
+                vec![Block::Typed(TypedBlock::Document {
+                    source: pdf,
+                    cache_control: None,
+                })]
+            )
+            .is_ok()
+        );
+        let nested = serde_json::json!({
+            "type":"web_fetch_tool_result",
+            "content":{"type":"web_fetch_result","content":{"type":"document"}}
+        });
+        assert!(check("assistant", vec![native(&nested)]).is_ok());
+    }
+
+    #[test]
+    fn version_2026_10_21_rejects_cited_text_in_user_messages() {
+        let cited =
+            serde_json::json!({"type":"text","text":"x","citations":[{"type":"char_location"}]});
+        let uncited = serde_json::json!({"type":"text","text":"x","citations":[]});
+        let search_result = serde_json::json!({
+            "type":"search_result",
+            "source":"s",
+            "title":"t",
+            "content":[{"type":"text","text":"x","citations":[{"type":"search_result_location"}]}]
+        });
+        let enabled_search_result = serde_json::json!({
+            "type":"search_result",
+            "source":"s",
+            "title":"t",
+            "content":[{"type":"text","text":"x"}],
+            "citations":{"enabled":true}
+        });
+        assert!(check("user", vec![native(&cited)]).is_err());
+        assert!(check("user", vec![native(&search_result)]).is_err());
+        assert!(check("user", vec![native(&uncited)]).is_ok());
+        assert!(check("user", vec![native(&enabled_search_result)]).is_ok());
+        // Claude's own cited replies may be sent back unchanged.
+        assert!(check("assistant", vec![native(&cited)]).is_ok());
+        assert!(
+            check(
+                "user",
+                vec![Block::Typed(TypedBlock::Text {
+                    text: TextValue::Str("plain"),
+                    cache_control: None,
+                })]
+            )
+            .is_ok()
         );
     }
 }

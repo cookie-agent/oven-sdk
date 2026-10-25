@@ -14,13 +14,13 @@ use url::Url;
 
 use crate::{
     config::{
-        AnthropicAuth, AnthropicAwsAuth, AnthropicAwsCredentials, AnthropicAwsSettings,
-        AnthropicCompatibleAuth, AnthropicCompatibleSettings, AnthropicProtocolSettings,
-        AnthropicSettings, AnthropicThinkingSupport, MiniMaxAuth, MiniMaxProtocolSettings,
-        MiniMaxSettings,
+        AnthropicApiVersion, AnthropicAuth, AnthropicAwsAuth, AnthropicAwsCredentials,
+        AnthropicAwsSettings, AnthropicCompatibleAuth, AnthropicCompatibleSettings,
+        AnthropicProtocolSettings, AnthropicSettings, AnthropicThinkingSupport, MiniMaxAuth,
+        MiniMaxProtocolSettings, MiniMaxSettings,
     },
     error::classify_error_for,
-    wire::{Protocol, VERSION},
+    wire::Protocol,
 };
 
 #[derive(Clone)]
@@ -48,6 +48,8 @@ struct Config {
     client: reqwest::Client,
     timeouts: crate::transport::AnthropicTimeouts,
     protocol_settings: ProtocolSettings,
+    /// `anthropic-version` header value; `None` sends no header (MiniMax).
+    api_version: Option<AnthropicApiVersion>,
     native_context_scope: NativeContextScope,
     aws_region: Option<String>,
     workspace_id: Option<String>,
@@ -69,6 +71,7 @@ impl InnerModel {
             &self.descriptor.capabilities,
             self.config.protocol,
             &self.config.protocol_settings,
+            self.config.api_version,
             self.config.compatible,
         )
     }
@@ -90,6 +93,7 @@ impl InnerModel {
                 &self.descriptor.capabilities,
                 self.config.protocol,
                 &self.config.protocol_settings,
+                self.config.api_version,
                 self.config.compatible,
             )?;
             if abort.is_aborted() {
@@ -107,9 +111,9 @@ impl InnerModel {
                 &request,
                 &options,
                 &self.descriptor,
-                &self.config.native_context_scope,
                 replay_policy,
                 self.config.protocol,
+                self.config.api_version,
                 self.config.compatible,
             )?;
             let body = encoded.body;
@@ -121,7 +125,7 @@ impl InnerModel {
             if self.config.protocol == Protocol::AnthropicAws {
                 validate_aws_caller_headers(&headers)?;
             }
-            apply_transport_headers(&mut headers, self.config.protocol);
+            apply_transport_headers(&mut headers, self.config.api_version);
             if !encoded.betas.is_empty() && self.config.protocol.is_first_party() {
                 headers.insert(
                     HeaderName::from_static("anthropic-beta"),
@@ -558,7 +562,15 @@ fn validate_capability_ceiling(
 fn validate_anthropic_protocol(
     settings: &AnthropicProtocolSettings,
     features: Capability,
+    api_version: AnthropicApiVersion,
 ) -> Result<(), ModelError> {
+    if api_version == AnthropicApiVersion::V2026_10_21
+        && features.intersects(Capability::TEMPERATURE | Capability::TOP_P)
+    {
+        return Err(ModelError::invalid_request(
+            "Anthropic API version 2026-10-21 rejects temperature and top_p; drop those capabilities or pin API version 2023-06-01",
+        ));
+    }
     let thinking = settings.thinking != AnthropicThinkingSupport::None;
     if thinking && !features.contains(Capability::REASONING) {
         return Err(ModelError::invalid_request(
@@ -645,18 +657,18 @@ macro_rules! impl_language_model {
     };
 }
 
-fn base_headers(configured: &HeaderConfig, protocol: Protocol) -> HeaderMap {
+fn base_headers(configured: &HeaderConfig, api_version: Option<AnthropicApiVersion>) -> HeaderMap {
     let mut headers = configured.static_headers.as_map().clone();
-    apply_transport_headers(&mut headers, protocol);
+    apply_transport_headers(&mut headers, api_version);
     headers
 }
 
-fn apply_transport_headers(headers: &mut HeaderMap, protocol: Protocol) {
+fn apply_transport_headers(headers: &mut HeaderMap, api_version: Option<AnthropicApiVersion>) {
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    if protocol != Protocol::MiniMax {
+    if let Some(version) = api_version {
         headers.insert(
             HeaderName::from_static("anthropic-version"),
-            HeaderValue::from_static(VERSION),
+            HeaderValue::from_static(version.as_str()),
         );
     }
 }
@@ -671,9 +683,15 @@ impl AnthropicModel {
         config.validate()?;
         validate_endpoint(&config.provider.api)?;
         validate_capability_ceiling(Protocol::Anthropic, &config.model.capabilities, false)?;
+        let api_version = config
+            .settings
+            .protocol
+            .api_version
+            .unwrap_or(AnthropicApiVersion::V2026_10_21);
         validate_anthropic_protocol(
             &config.settings.protocol,
             config.model.capabilities.features,
+            api_version,
         )?;
         if config.provider.id.as_str() != crate::wire::ANTHROPIC_PROVIDER_ID {
             return Err(ModelError::invalid_request(
@@ -697,12 +715,13 @@ impl AnthropicModel {
             config.model.id.clone(),
             native_context_resource,
         )?;
-        let base_headers = base_headers(&config.provider.headers, Protocol::Anthropic);
+        let base_headers = base_headers(&config.provider.headers, Some(api_version));
         Ok(Self(InnerModel {
             descriptor,
             config: Arc::new(Config {
                 protocol: Protocol::Anthropic,
                 compatible: false,
+                api_version: Some(api_version),
                 auth: Auth::Anthropic(config.provider.auth),
                 endpoint: config.provider.api,
                 headers: config.provider.headers,
@@ -741,9 +760,15 @@ impl AnthropicCompatibleModel {
             ));
         }
         validate_capability_ceiling(Protocol::Anthropic, &config.model.capabilities, true)?;
+        let api_version = config
+            .settings
+            .protocol
+            .api_version
+            .unwrap_or(AnthropicApiVersion::V2023_06_01);
         validate_anthropic_protocol(
             &config.settings.protocol,
             config.model.capabilities.features,
+            api_version,
         )?;
         let identity = ModelIdentity::new(config.provider.id.clone(), config.model.id.clone())?;
         let descriptor = LanguageModelDescriptor::new(
@@ -762,12 +787,13 @@ impl AnthropicCompatibleModel {
             config.model.id.clone(),
             native_context_resource,
         )?;
-        let base_headers = base_headers(&config.provider.headers, Protocol::Anthropic);
+        let base_headers = base_headers(&config.provider.headers, Some(api_version));
         Ok(Self(InnerModel {
             descriptor,
             config: Arc::new(Config {
                 protocol: Protocol::Anthropic,
                 compatible: true,
+                api_version: Some(api_version),
                 auth: Auth::Compatible(config.provider.auth),
                 endpoint: config.provider.api,
                 headers: config.provider.headers,
@@ -821,12 +847,13 @@ impl MiniMaxModel {
             config.model.id.clone(),
             native_context_resource,
         )?;
-        let base_headers = base_headers(&config.provider.headers, Protocol::MiniMax);
+        let base_headers = base_headers(&config.provider.headers, None);
         Ok(Self(InnerModel {
             descriptor,
             config: Arc::new(Config {
                 protocol: Protocol::MiniMax,
                 compatible: false,
+                api_version: None,
                 auth: Auth::MiniMax(config.provider.auth),
                 endpoint: config.provider.api,
                 headers: config.provider.headers,
@@ -856,9 +883,15 @@ impl AnthropicAwsModel {
         config.validate()?;
         validate_endpoint(&config.provider.api)?;
         validate_capability_ceiling(Protocol::AnthropicAws, &config.model.capabilities, false)?;
+        let api_version = config
+            .settings
+            .protocol
+            .api_version
+            .unwrap_or(AnthropicApiVersion::V2026_10_21);
         validate_anthropic_protocol(
             &config.settings.protocol,
             config.model.capabilities.features,
+            api_version,
         )?;
         if config.provider.id.as_str() != crate::wire::ANTHROPIC_AWS_PROVIDER_ID {
             return Err(ModelError::invalid_request(
@@ -890,12 +923,13 @@ impl AnthropicAwsModel {
             config.model.id.clone(),
             native_context_resource,
         )?;
-        let base_headers = base_headers(&config.provider.headers, Protocol::AnthropicAws);
+        let base_headers = base_headers(&config.provider.headers, Some(api_version));
         Ok(Self(InnerModel {
             descriptor,
             config: Arc::new(Config {
                 protocol: Protocol::AnthropicAws,
                 compatible: false,
+                api_version: Some(api_version),
                 auth: Auth::AnthropicAws(config.provider.auth),
                 endpoint: config.provider.api,
                 headers: config.provider.headers,
