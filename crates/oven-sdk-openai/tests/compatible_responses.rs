@@ -329,3 +329,53 @@ async fn azure_responses_envelope_replays_on_compatible_responses_after_integrit
     assert_eq!(body["input"][1]["encrypted_content"], "opaque");
     assert!(!body.to_string().contains("source-provenance"));
 }
+
+#[tokio::test]
+async fn compatible_responses_compacts_and_sends_the_window_back() {
+    let server = MockServer::start().await;
+    common::mount_compaction(&server).await;
+    common::mount(&server, "/responses", common::responses_document("ok")).await;
+    let config = common::official_responses_native_config_at(&server.uri(), "model", "secret");
+    let model = OpenAiResponsesModel::new_compatible(
+        ModelConfig::new(
+            ProviderConfig::new(
+                ProviderId::new("gateway"),
+                config.provider.api,
+                OpenAiCompatibleAuth::bearer(SecretString::new("test-token")),
+                config.provider.headers,
+            )
+            .unwrap(),
+            config.model,
+            config.settings,
+        ),
+        AdapterId::new("test.compatible.responses"),
+    )
+    .expect("compatible Responses takes V1 compaction");
+    let compaction = oven_sdk::CompactionRequest::new(Request::new(vec![]));
+    assert!(model.supports_compaction(&compaction));
+    let window = model
+        .compact(compaction, AbortSignal::default())
+        .await
+        .expect("compact")
+        .native_context;
+    assert_eq!(window.adapter_id().as_str(), "test.compatible.responses");
+    model
+        .complete(
+            Request::new(vec![]).with_native_context(window),
+            AbortSignal::default(),
+        )
+        .await
+        .expect("a request carrying the window");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].url.path(), "/responses/compact");
+    assert_eq!(requests[0].headers["authorization"], "Bearer test-token");
+    assert_eq!(requests[1].url.path(), "/responses");
+    let body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert!(
+        body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == oven_sdk::provider_support::RESPONSES_COMPACTION_ITEM_TYPE)
+    );
+}

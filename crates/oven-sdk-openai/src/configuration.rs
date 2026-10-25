@@ -221,14 +221,14 @@ impl OpenAiResponsesSettings {
     }
 }
 
-/// Explicit official Responses native-compaction surface.
+/// Explicit Responses native-compaction surface, official or compatible.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenAiResponsesCompaction {
     /// Provider-native compaction and native context are disabled.
     #[default]
     Unsupported,
-    /// Official Responses v1 standalone `/responses/compact`.
+    /// Responses v1 standalone `/responses/compact`.
     V1,
 }
 

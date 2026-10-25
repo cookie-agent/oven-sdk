@@ -3,7 +3,8 @@
 This source tree provides registry-free adapters for official OpenAI Chat
 Completions, official OpenAI Responses, and explicitly configured
 OpenAI-compatible Chat and Responses endpoints. Provider-native compaction is
-available only through an explicitly declared official Responses surface.
+available through an explicitly declared official or compatible Responses
+surface.
 
 ```text
 cargo add oven-sdk-openai@0.4.0
@@ -79,8 +80,9 @@ adapter ID, query parameters, request-ID headers, and SSE strictness.
 `ModelCapabilities.compaction` is also required. Chat and compatible Chat reject
 `Native` at construction. Official Responses requires the capability to agree
 exactly with `OpenAiResponsesSettings.compaction`: `Unsupported` or the explicit
-`OpenAiResponsesCompaction::V1` standalone surface. Compatible Responses requires
-both declarations to be unsupported and rejects native compaction at construction.
+`OpenAiResponsesCompaction::V1` standalone surface. Compatible Responses follows
+the same rule; whether a gateway implements `/responses/compact` is known only
+from its answer.
 
 Authentication and endpoints are explicit. The crate never reads environment
 variables. Official OpenAI authentication uses `OpenAiAuth`; compatible
@@ -180,12 +182,21 @@ See the [core replay policy](../oven-sdk/README.md#native-replay-policy).
 
 ## Provider-native Responses compaction
 
-When an official Responses declaration explicitly sets both
+When an official or compatible Responses declaration explicitly sets both
 `CompactionCapability::Native` and `OpenAiResponsesCompaction::V1`,
 `OpenAiResponsesModel` implements the core
 `validate_compaction`, `supports_compaction`, and `compact` contract with one
 `POST /responses/compact` call. Unsupported declarations fail before I/O.
-Chat, compatible Chat, and compatible Responses never expose native compaction.
+Chat and compatible Chat never expose native compaction.
+
+The compacted window ends in an item of type `compaction` whose state is under
+`encrypted_content`; `oven_sdk::provider_support` exports those names, and
+`error_names_responses_native_context` tells whether a provider's 400 or 422
+names one of them. A gateway without compaction support, or a provider that
+cannot use a window, typically refuses that way. OpenAI's documentation does not
+list an error for an unusable compaction item; the API has been observed to
+answer such an item with HTTP 400 and code `invalid_encrypted_content`, which
+the check matches.
 
 Compaction translates the complete normalized history using the same strict
 Responses replay rules and accepts typed `OpenAiResponsesCompactionOptions` on

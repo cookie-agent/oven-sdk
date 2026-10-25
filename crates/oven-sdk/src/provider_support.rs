@@ -11,8 +11,13 @@ use crate::{AbortSignal, AbortWait, ErrorStage, ModelError};
 
 mod diagnostic_body;
 mod json_event;
+mod responses_native_context;
 pub use diagnostic_body::{sanitize_error_body, sanitize_error_body_with_secrets};
 pub use json_event::{JsonObject, KeyPresent, json_type_tag, parse_json_object};
+pub use responses_native_context::{
+    RESPONSES_COMPACTION_ITEM_TYPE, RESPONSES_ENCRYPTED_CONTENT_FIELD,
+    RESPONSES_NATIVE_CONTEXT_WIRE_NAMES, error_names_responses_native_context,
+};
 
 /// Result of waiting for the next streaming transport item.
 pub enum StreamRead<T> {

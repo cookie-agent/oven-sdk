@@ -96,21 +96,25 @@ impl OpenAiResponsesModel {
     }
 
     /// Constructs a Responses-protocol compatible endpoint with caller-owned identity
-    /// and bearer, header-provider, or no authentication. Native compaction is not supported.
+    /// and bearer, header-provider, or no authentication.
+    ///
+    /// [`OpenAiResponsesCompaction::V1`](crate::OpenAiResponsesCompaction::V1) sends
+    /// standalone compaction to the endpoint's `/responses/compact`, as on the official
+    /// API. Whether a gateway implements it is known only from its answer; a gateway
+    /// that does not usually refuses with an error naming the compaction item
+    /// (see [`oven_sdk::provider_support::error_names_responses_native_context`]).
     pub fn new_compatible(
         config: ModelConfig<OpenAiCompatibleAuth, OpenAiResponsesSettings>,
         adapter_id: AdapterId,
     ) -> Result<Self, ModelError> {
         config.validate()?;
-        if config.settings.compaction
-            != crate::configuration::OpenAiResponsesCompaction::Unsupported
-        {
-            return Err(ModelError::invalid_request(
-                "compatible Responses does not support native compaction",
-            ));
-        }
         validate_responses_declaration(&config.model.capabilities, config.settings.compaction)?;
-        validate_routing_discriminator(false, config.settings.routing_discriminator.as_deref())?;
+        validate_routing_discriminator(
+            config.provider.headers.dynamic_headers.is_some()
+                && config.settings.compaction
+                    == crate::configuration::OpenAiResponsesCompaction::V1,
+            config.settings.routing_discriminator.as_deref(),
+        )?;
         let descriptor = LanguageModelDescriptor::new(
             ModelIdentity::new(config.provider.id.clone(), config.model.id.clone())?,
             adapter_id.clone(),

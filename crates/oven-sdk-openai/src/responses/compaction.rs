@@ -3,6 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use oven_sdk::provider_support::{
+    RESPONSES_COMPACTION_ITEM_TYPE, RESPONSES_ENCRYPTED_CONTENT_FIELD,
+};
 use oven_sdk::{
     AdapterId, ErrorStage, JsonValue, ModelError, NativeContextScope, NativeContextWindow,
     ResponseMetadata, Usage,
@@ -272,8 +275,16 @@ fn validate_user_content(part: &JsonValue) -> Option<()> {
 
 fn validate_compaction_item(item: &JsonValue, ids: &mut BTreeSet<String>) -> Option<()> {
     let object = item.as_object()?;
-    exact_subset(object, &["created_by", "encrypted_content", "id", "type"])?;
-    if object.get("type")?.as_str()? != "compaction" {
+    exact_subset(
+        object,
+        &[
+            "created_by",
+            RESPONSES_ENCRYPTED_CONTENT_FIELD,
+            "id",
+            "type",
+        ],
+    )?;
+    if object.get("type")?.as_str()? != RESPONSES_COMPACTION_ITEM_TYPE {
         return None;
     }
     let id = require_bounded_string(object.get("id"), 1024)?;
@@ -281,7 +292,7 @@ fn validate_compaction_item(item: &JsonValue, ids: &mut BTreeSet<String>) -> Opt
         return None;
     }
     require_bounded_string(
-        object.get("encrypted_content"),
+        object.get(RESPONSES_ENCRYPTED_CONTENT_FIELD),
         NativeContextWindow::MAX_PAYLOAD_BYTES,
     )?;
     if object.get("created_by").is_some_and(|value| {
