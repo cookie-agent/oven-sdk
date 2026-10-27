@@ -488,6 +488,30 @@ where
     }
 }
 
+/// Wire keywords of the native deferred-tool encodings, lowercase.
+///
+/// A `400` or `422` whose error text names one of them rejected deferred
+/// tool loading, not the request as such: adapters classify it as
+/// [`ModelErrorKind::Unsupported`](crate::ModelErrorKind::Unsupported), and a
+/// caller can retry without deferral.
+pub const DEFERRED_TOOLS_WIRE_KEYWORDS: &[&str] = &[
+    "defer_loading",
+    "tool_reference",
+    "tool reference",
+    "additional_tools",
+    "cannot be used with content",
+];
+
+/// Whether a `400` or `422` with the lowercase error text `lower` rejected
+/// deferred tool loading.
+#[must_use]
+pub fn rejects_deferred_tools(status: u16, lower: &str) -> bool {
+    matches!(status, 400 | 422)
+        && DEFERRED_TOOLS_WIRE_KEYWORDS
+            .iter()
+            .any(|keyword| lower.contains(keyword))
+}
+
 /// Parses `Retry-After` seconds or HTTP-date, with optional higher-priority millisecond headers.
 #[must_use]
 pub fn parse_retry_after(headers: &HeaderMap, millisecond_headers: &[&str]) -> Option<Duration> {

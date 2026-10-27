@@ -70,6 +70,8 @@ pub(crate) fn classify_error(
         ModelError::provider("Azure OpenAI request failed").with_retryable(true)
     } else if status == 404 {
         ModelError::new(ModelErrorKind::ModelNotFound, "Azure OpenAI request failed")
+    } else if oven_sdk::provider_support::rejects_deferred_tools(status, &lower) {
+        ModelError::unsupported("Azure OpenAI request failed")
     } else {
         ModelError::invalid_request("Azure OpenAI request failed")
     };

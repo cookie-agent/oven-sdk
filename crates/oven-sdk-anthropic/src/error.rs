@@ -2,7 +2,7 @@
 
 use oven_sdk::{
     ErrorStage, JsonValue, ModelError, ModelErrorKind,
-    provider_support::{parse_retry_after, sanitize_error_body},
+    provider_support::{parse_retry_after, rejects_deferred_tools, sanitize_error_body},
 };
 use reqwest::header::HeaderMap;
 
@@ -98,6 +98,8 @@ pub(crate) fn classify_error_for(
         ModelError::timeout(message)
     } else if status >= 500 {
         ModelError::provider(message).with_retryable(true)
+    } else if rejects_deferred_tools(status, &lower) {
+        ModelError::unsupported(message)
     } else {
         ModelError::invalid_request(message)
     };

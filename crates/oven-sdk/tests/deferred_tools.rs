@@ -174,3 +174,17 @@ fn only_a_request_with_deferred_tools_warns_about_sending_them_up_front() {
             .is_some_and(|warning| warning.contains("google-gemini"))
     );
 }
+
+#[test]
+fn only_a_bad_request_naming_a_deferral_keyword_rejects_deferred_tools() {
+    use oven_sdk::provider_support::rejects_deferred_tools;
+    let text = "tools.1.defer_loading: extra inputs are not permitted";
+    assert!(rejects_deferred_tools(400, text));
+    assert!(rejects_deferred_tools(422, text));
+    assert!(!rejects_deferred_tools(500, text));
+    assert!(!rejects_deferred_tools(400, "messages: field required"));
+    assert!(rejects_deferred_tools(
+        400,
+        "tool reference 'get_weather' not found in available tools"
+    ));
+}

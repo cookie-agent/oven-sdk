@@ -433,3 +433,32 @@ mod kimi {
         );
     }
 }
+
+#[tokio::test]
+async fn a_rejected_additional_tools_item_classifies_as_unsupported() {
+    let server = MockServer::start().await;
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/responses"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": {
+                "message": "Invalid value: 'additional_tools'. Supported values are: 'message'.",
+                "type": "invalid_request_error",
+                "param": "input[3].type",
+                "code": "invalid_value"
+            }
+        })))
+        .mount(&server)
+        .await;
+    let model = model(&server, DeferredToolsCapability::Native);
+    let request = Request::new(loaded_history(ToolCallPart::new(
+        "call_w",
+        "get_weather",
+        serde_json::json!({}),
+    )))
+    .with_tools(vec![tool("tool_search"), tool("get_weather").deferred()]);
+    let error = match model.stream(request, AbortSignal::default()).await {
+        Err(error) => error,
+        Ok(_) => panic!("the request must fail"),
+    };
+    assert_eq!(error.kind(), oven_sdk::ModelErrorKind::Unsupported);
+}

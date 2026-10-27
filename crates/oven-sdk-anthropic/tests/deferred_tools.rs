@@ -204,3 +204,27 @@ async fn loads_are_text_when_no_tools_are_sent() {
         "Loaded tools: get_weather"
     );
 }
+
+#[test]
+fn a_rejected_deferral_field_classifies_as_unsupported() {
+    let body = br#"{"type":"error","error":{"type":"invalid_request_error","message":"tools.1.defer_loading: Extra inputs are not permitted"}}"#;
+    let error = oven_sdk_anthropic::classify_error(
+        400,
+        body,
+        None,
+        oven_sdk::ErrorStage::ResponseBody,
+        body.len() as u64,
+        &reqwest::header::HeaderMap::new(),
+    );
+    assert_eq!(error.kind(), oven_sdk::ModelErrorKind::Unsupported);
+    let other = br#"{"type":"error","error":{"type":"invalid_request_error","message":"messages: field required"}}"#;
+    let error = oven_sdk_anthropic::classify_error(
+        400,
+        other,
+        None,
+        oven_sdk::ErrorStage::ResponseBody,
+        other.len() as u64,
+        &reqwest::header::HeaderMap::new(),
+    );
+    assert_eq!(error.kind(), oven_sdk::ModelErrorKind::InvalidRequest);
+}
