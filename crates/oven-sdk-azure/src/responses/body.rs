@@ -83,6 +83,12 @@ pub(crate) struct FunctionTool<'a> {
     pub(crate) strict: bool,
 }
 
+impl FunctionTool<'_> {
+    pub(crate) fn size_hint(&self) -> usize {
+        self.name.len() + self.description.len() + json_size_hint(self.parameters) + 64
+    }
+}
+
 #[derive(Serialize)]
 #[serde(untagged)]
 pub(crate) enum ToolChoice<'a> {
@@ -120,6 +126,8 @@ pub(crate) enum TextFormat<'a> {
 pub(crate) enum Item<'a> {
     Typed(TypedItem<'a>),
     Native(&'a JsonValue),
+    /// A provider-native item adjusted for this request.
+    NativeOwned(JsonValue),
 }
 
 #[derive(Serialize)]
@@ -135,10 +143,18 @@ pub(crate) enum TypedItem<'a> {
         arguments: Text<'a>,
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<&'a str>,
+        /// The namespace a tool loaded by `additional_tools` lives in.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<&'a str>,
     },
     FunctionCallOutput {
         call_id: &'a str,
         output: Output<'a>,
+    },
+    /// Makes deferred tools callable from this point of the input on.
+    AdditionalTools {
+        role: &'static str,
+        tools: Vec<FunctionTool<'a>>,
     },
 }
 
@@ -187,6 +203,7 @@ impl Item<'_> {
     pub(crate) fn size_hint(&self) -> usize {
         match self {
             Self::Native(value) => json_size_hint(value),
+            Self::NativeOwned(value) => json_size_hint(value),
             Self::Typed(TypedItem::Message { content, .. }) => {
                 48 + content.iter().map(Content::size_hint).sum::<usize>()
             }
@@ -195,11 +212,16 @@ impl Item<'_> {
                 name,
                 arguments,
                 id,
+                namespace,
             }) => {
                 80 + call_id.len()
                     + name.len()
                     + arguments.size_hint()
                     + id.map_or(0, |id| id.len() + 8)
+                    + namespace.map_or(0, |namespace| namespace.len() + 16)
+            }
+            Self::Typed(TypedItem::AdditionalTools { tools, .. }) => {
+                64 + tools.iter().map(FunctionTool::size_hint).sum::<usize>()
             }
             Self::Typed(TypedItem::FunctionCallOutput { call_id, output }) => {
                 64 + call_id.len()

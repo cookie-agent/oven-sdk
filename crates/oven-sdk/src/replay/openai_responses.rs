@@ -152,11 +152,25 @@ fn reasoning_semantics<'a>(item: &'a JsonValue, semantic: &mut Vec<Semantic<'a>>
 }
 
 fn function_semantics<'a>(item: &'a JsonValue, semantic: &mut Vec<Semantic<'a>>) -> Option<()> {
+    // `namespace` is present on a call to a tool loaded by `additional_tools`.
     exact_keys(
         item,
-        &["type", "id", "status", "call_id", "name", "arguments"],
+        &[
+            "type",
+            "id",
+            "status",
+            "call_id",
+            "name",
+            "arguments",
+            "namespace",
+        ],
         &["type", "id", "call_id", "name", "arguments"],
     )?;
+    if let Some(namespace) = item.get("namespace") {
+        namespace
+            .as_str()
+            .filter(|namespace| !namespace.is_empty())?;
+    }
     completed_status(item)?;
     semantic.push(Semantic::ToolCall {
         id: non_empty_string(item, "call_id")?,

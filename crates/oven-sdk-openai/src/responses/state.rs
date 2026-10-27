@@ -350,6 +350,14 @@ impl State {
                 let mut call = ToolCallPart::new(call_id, name, parsed);
                 call.provider_item_id = Some(item_id);
                 call.raw_input = Some(final_arguments);
+                // A call to a tool an additional_tools item loaded must be
+                // replayed in the namespace it came back in.
+                if let Some(namespace) = item.get("namespace").and_then(JsonValue::as_str) {
+                    call.metadata = Some(BTreeMap::from([(
+                        crate::responses::request::NAMESPACE_METADATA_KEY.to_owned(),
+                        JsonValue::String(namespace.to_owned()),
+                    )]));
+                }
                 parts.push(StreamPart::ToolCall { tool_call: call });
                 function.finalized = true;
                 self.client_calls = true;

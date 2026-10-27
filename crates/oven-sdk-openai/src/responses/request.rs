@@ -3,11 +3,23 @@
 use std::borrow::Cow;
 
 use oven_sdk::{
-    AssistantPart, CompactionRequest, ContentValue, ErrorStage, FilePart, FileSource, HistoryTurn,
-    InputPart, JsonValue, LanguageModelDescriptor, ModelCapabilities, ModelError,
-    NativeContextScope, ReplayDecision, ReplayDisposition, ReplayOutcome, ReplayPolicy, Request,
-    ResponseFormat, ToolChoice, ToolContent, ToolResultPart,
+    AssistantPart, CompactionRequest, ContentValue, DeferredTools, DeferredToolsCapability,
+    ErrorStage, FilePart, FileSource, HistoryTurn, InputPart, JsonValue, LanguageModelDescriptor,
+    ModelCapabilities, ModelError, NativeContextScope, ReplayDecision, ReplayDisposition,
+    ReplayOutcome, ReplayPolicy, Request, ResponseFormat, ToolCallPart, ToolChoice, ToolContent,
+    ToolDefinition, ToolResultPart,
 };
+
+/// Metadata key of the namespace a streamed call to a loaded tool came back in.
+pub(crate) const NAMESPACE_METADATA_KEY: &str = "openai.namespace";
+
+/// Whether `request` loads deferred tools natively: the model declares it and
+/// the request sends tools at all.
+fn native_deferral(request: &Request, descriptor: &LanguageModelDescriptor) -> bool {
+    descriptor.capabilities.deferred_tools == DeferredToolsCapability::Native
+        && !request.tools.is_empty()
+        && !matches!(request.tool_choice, ToolChoice::None)
+}
 
 use crate::{
     options::{
@@ -19,8 +31,7 @@ use crate::{
         compaction, replay,
     },
     wire::encode::{
-        FileRef, Text, arguments, breakpoint, encoding_error, join, json_size_hint, push_text,
-        to_body,
+        FileRef, Text, arguments, breakpoint, encoding_error, join, push_text, to_body,
     },
 };
 
@@ -144,14 +155,9 @@ pub(crate) fn encode_request(
         summary: options.reasoning_summary.as_deref(),
         mode: options.reasoning_mode.as_deref(),
     });
-    let (tools, tool_choice) = tools(request);
+    let (tools, tool_choice) = tools(request, native_deferral(request, descriptor));
     size_hint += tools.as_ref().map_or(0, |tools| {
-        tools
-            .iter()
-            .map(|tool| {
-                tool.name.len() + tool.description.len() + json_size_hint(tool.parameters) + 64
-            })
-            .sum()
+        tools.iter().map(body::FunctionTool::size_hint).sum()
     });
     let body = body::Body {
         model: descriptor.identity.model_id.as_str(),
@@ -232,6 +238,15 @@ fn encode_input<'a>(
         .collect::<Vec<_>>();
     let mut replay_outcome = ReplayOutcome::default();
     let mut warnings = Vec::new();
+    let deferred = DeferredTools::of(request);
+    let native_deferral = native_deferral(request, descriptor);
+    if native_deferral {
+        warnings.extend(deferred.warnings().iter().cloned());
+    } else {
+        warnings.extend(deferred.upfront_warning("openai-responses"));
+    }
+    // A call keeps its namespace only while its tool is loaded natively.
+    let loaded = |name: &str| native_deferral && deferred.is_loaded(name);
     for (history_index, turn) in request.history.iter().enumerate() {
         match turn {
             HistoryTurn::System(message) => {
@@ -291,6 +306,21 @@ fn encode_input<'a>(
                 for result in &message.results {
                     input.push(function_output(result)?);
                 }
+                if native_deferral {
+                    let tools = message
+                        .results
+                        .iter()
+                        .flat_map(|result| deferred.newly_loaded(&result.tool_call_id))
+                        .filter_map(|name| request.tools.iter().find(|tool| tool.name == *name))
+                        .map(function_tool)
+                        .collect::<Vec<_>>();
+                    if !tools.is_empty() {
+                        input.push(Item::Typed(TypedItem::AdditionalTools {
+                            role: "developer",
+                            tools,
+                        }));
+                    }
+                }
             }
             HistoryTurn::Assistant(turn) => {
                 let mut replayed = None;
@@ -327,7 +357,7 @@ fn encode_input<'a>(
                     });
                 }
                 if let Some(items) = replayed {
-                    input.extend(items.into_iter().map(Item::Native));
+                    input.extend(items.into_iter().map(|item| native_item(item, &loaded)));
                 } else {
                     if policy != ReplayPolicy::Never {
                         replay_outcome.decisions.push(ReplayDecision {
@@ -335,7 +365,12 @@ fn encode_input<'a>(
                             disposition: ReplayDisposition::ReconstructedNormalized,
                         });
                     }
-                    normalized_assistant(&turn.message.content, &mut input, &mut warnings)?;
+                    normalized_assistant(
+                        &turn.message.content,
+                        &mut input,
+                        &mut warnings,
+                        &loaded,
+                    )?;
                 }
             }
         }
@@ -352,8 +387,60 @@ fn discard_reason(artifact: &oven_sdk::NativeReplayArtifact) -> String {
     }
 }
 
+/// A replayed native item, without the namespace of a call whose tool is not
+/// loaded in this request: an eager tool lives in the default namespace.
+fn native_item<'a>(item: &'a JsonValue, loaded: &dyn Fn(&str) -> bool) -> Item<'a> {
+    let strip = item.get("type").and_then(JsonValue::as_str) == Some("function_call")
+        && item.get("namespace").is_some()
+        && !item
+            .get("name")
+            .and_then(JsonValue::as_str)
+            .is_some_and(loaded);
+    if strip {
+        let mut owned = item.clone();
+        if let Some(object) = owned.as_object_mut() {
+            object.remove("namespace");
+        }
+        Item::NativeOwned(owned)
+    } else {
+        Item::Native(item)
+    }
+}
+
+/// The namespace a call is sent with: the one it came back in, or, for a
+/// call recorded without one, the tool's own name, which is where an
+/// `additional_tools` item puts a function.
+fn call_namespace<'a>(call: &'a ToolCallPart, loaded: &dyn Fn(&str) -> bool) -> Option<&'a str> {
+    if !loaded(&call.name) {
+        return None;
+    }
+    Some(
+        call.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(NAMESPACE_METADATA_KEY))
+            .and_then(JsonValue::as_str)
+            .unwrap_or(&call.name),
+    )
+}
+
+fn function_tool(tool: &ToolDefinition) -> body::FunctionTool<'_> {
+    body::FunctionTool {
+        kind: "function",
+        name: &tool.name,
+        description: &tool.description,
+        parameters: tool.input_schema.as_value(),
+        strict: tool
+            .provider_options
+            .get("openai")
+            .and_then(|value| value.get("strict"))
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
+    }
+}
+
 fn tools(
     request: &Request,
+    native_deferral: bool,
 ) -> (
     Option<Vec<body::FunctionTool<'_>>>,
     Option<body::ToolChoice<'_>>,
@@ -361,21 +448,13 @@ fn tools(
     if request.tools.is_empty() || matches!(request.tool_choice, ToolChoice::None) {
         return (None, None);
     }
+    // Natively deferred tools are declared by the additional_tools item that
+    // loads them, never up front.
     let tools = request
         .tools
         .iter()
-        .map(|tool| body::FunctionTool {
-            kind: "function",
-            name: &tool.name,
-            description: &tool.description,
-            parameters: tool.input_schema.as_value(),
-            strict: tool
-                .provider_options
-                .get("openai")
-                .and_then(|value| value.get("strict"))
-                .and_then(JsonValue::as_bool)
-                .unwrap_or(false),
-        })
+        .filter(|tool| !(native_deferral && tool.is_deferred()))
+        .map(function_tool)
         .collect();
     let choice = match &request.tool_choice {
         ToolChoice::Auto => body::ToolChoice::Mode("auto"),
@@ -639,6 +718,7 @@ fn normalized_assistant<'a>(
     parts: &'a [AssistantPart],
     output: &mut Vec<Item<'a>>,
     warnings: &mut Vec<String>,
+    loaded: &dyn Fn(&str) -> bool,
 ) -> Result<(), ModelError> {
     if parts.iter().any(|part| matches!(part, AssistantPart::ToolCall(_)))
         && parts.iter().any(|part| matches!(part, AssistantPart::Custom(custom) if matches!(custom.kind.as_str(), "openai.responses.reasoning_continuation" | "azure.openai.responses.reasoning_continuation")))
@@ -659,6 +739,7 @@ fn normalized_assistant<'a>(
                     name: &call.name,
                     arguments: arguments(call),
                     id: call.provider_item_id.as_deref(),
+                    namespace: call_namespace(call, loaded),
                 }));
             }
             AssistantPart::ToolResult(result) => {

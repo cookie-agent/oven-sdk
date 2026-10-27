@@ -177,6 +177,14 @@ fn sanitize_function_call(item: &JsonValue) -> Option<JsonValue> {
     if let Some(name) = object.get("name").and_then(JsonValue::as_str) {
         sanitized["name"] = name.into();
     }
+    // A call to a tool loaded by `additional_tools` replays in its namespace.
+    if let Some(namespace) = object
+        .get("namespace")
+        .and_then(JsonValue::as_str)
+        .filter(|namespace| !namespace.is_empty())
+    {
+        sanitized["namespace"] = namespace.into();
+    }
     Some(sanitized)
 }
 

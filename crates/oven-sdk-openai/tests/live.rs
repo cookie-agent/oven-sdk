@@ -219,3 +219,105 @@ async fn live_long_stream() {
     );
 }
 pub mod common;
+
+#[tokio::test]
+#[ignore = "requires OPENAI_API_KEY and network access"]
+async fn live_responses_deferred_tool_round_trip() {
+    use oven_sdk::{
+        AssistantMessage, AssistantPart, CompletedTurn, DeferredToolsCapability, Finish,
+        JsonSchema, ToolCallPart, ToolContent, ToolDefinition, ToolMessage, ToolResultPart,
+    };
+    let mut config = common::official_responses_config_at(
+        "https://api.openai.com/v1",
+        &std::env::var("OPENAI_LIVE_MODEL").unwrap_or_else(|_| "gpt-5.5".into()),
+        &key(),
+    );
+    config.model.capabilities.deferred_tools = DeferredToolsCapability::Native;
+    config.provider.auth.organization = None;
+    config.provider.auth.project = None;
+    let model = OpenAiResponsesModel::new(config).unwrap();
+    let tool = |name: &str, description: &str| {
+        ToolDefinition::new(
+            name,
+            description,
+            JsonSchema::new(serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+                "additionalProperties": false
+            }))
+            .unwrap(),
+        )
+    };
+    let tools = || {
+        vec![
+            tool("tool_search", "Search for more tools by keyword."),
+            tool("get_weather", "Get the current weather for a city.").deferred(),
+            tool("get_stock_price", "Get the stock price for a ticker.").deferred(),
+        ]
+    };
+    let mut history = vec![
+        HistoryTurn::user(UserMessage::new(vec![InputPart::Text(TextPart::new(
+            "What is the weather in Paris? Use the tools.",
+        ))])),
+        HistoryTurn::assistant(CompletedTurn::new(
+            AssistantMessage::new(vec![AssistantPart::ToolCall(ToolCallPart::new(
+                "call_live_search",
+                "tool_search",
+                serde_json::json!({"city": "weather"}),
+            ))]),
+            Finish::new(Default::default(), FinishReason::ToolCalls),
+        )),
+        HistoryTurn::tool(ToolMessage::new(vec![ToolResultPart::new(
+            "call_live_search",
+            ToolContent::LoadTools {
+                names: vec!["get_weather".into()],
+                text: "Loaded tools: get_weather".into(),
+            },
+        )])),
+    ];
+    let turn = model
+        .complete(
+            Request::new(history.clone()).with_tools(tools()),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap()
+        .turn;
+    let call = turn
+        .message
+        .content
+        .iter()
+        .find_map(|part| match part {
+            AssistantPart::ToolCall(call) if call.name == "get_weather" => Some(call.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a get_weather call: {:?}", turn.message.content));
+    history.push(HistoryTurn::assistant(turn));
+    history.push(HistoryTurn::tool(ToolMessage::new(vec![
+        ToolResultPart::new(call.id.clone(), ToolContent::Text("Sunny, 18 C".into())),
+    ])));
+    // Replaying the call needs its namespace, natively and normalized alike.
+    let answer = model
+        .complete(
+            Request::new(history.clone()).with_tools(tools()),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    assert!(!answer.turn.text().is_empty());
+    let mut normalized = history;
+    for turn in &mut normalized {
+        if let HistoryTurn::Assistant(turn) = turn {
+            turn.finish.native_replay = None;
+        }
+    }
+    let answer = model
+        .complete(
+            Request::new(normalized).with_tools(tools()),
+            AbortSignal::default(),
+        )
+        .await
+        .unwrap();
+    assert!(!answer.turn.text().is_empty());
+}
