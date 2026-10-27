@@ -952,6 +952,18 @@ pub enum ToolContent {
         /// Optional reason visible to the model.
         reason: Option<String>,
     },
+    /// Loads deferred tools: the named tools become callable from this
+    /// result on.
+    ///
+    /// Only a result in a [`ToolMessage`] loads tools. Adapters that cannot
+    /// load natively, and every other position, send `text` instead.
+    LoadTools {
+        /// Names of deferred tools declared in [`Request::tools`].
+        names: Vec<String>,
+        /// Text sent where the load is not carried natively, and as the tool
+        /// output beside a native load where the provider needs one.
+        text: String,
+    },
 }
 
 /// A value accepted inside mixed tool output.
@@ -1294,6 +1306,23 @@ impl StreamOptions {
     }
 }
 
+/// When the model sees a declared tool.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolLoading {
+    /// In the model's context from the start of the request.
+    #[default]
+    Eager,
+    /// Hidden until a [`ToolContent::LoadTools`] result loads it.
+    Deferred,
+}
+
+impl ToolLoading {
+    const fn is_eager(&self) -> bool {
+        matches!(self, Self::Eager)
+    }
+}
+
 /// A tool declaration supplied to a model.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -1306,6 +1335,9 @@ pub struct ToolDefinition {
     pub input_schema: JsonSchema,
     /// Provider-specific tool options.
     pub provider_options: ProviderOptions,
+    /// When the model sees the tool.
+    #[serde(default, skip_serializing_if = "ToolLoading::is_eager")]
+    pub loading: ToolLoading,
 }
 
 impl ToolDefinition {
@@ -1321,7 +1353,21 @@ impl ToolDefinition {
             description: description.into(),
             input_schema,
             provider_options: ProviderOptions::new(),
+            loading: ToolLoading::Eager,
         }
+    }
+
+    /// Marks the tool deferred: hidden until a result loads it.
+    #[must_use]
+    pub fn deferred(mut self) -> Self {
+        self.loading = ToolLoading::Deferred;
+        self
+    }
+
+    /// Whether the tool is deferred.
+    #[must_use]
+    pub fn is_deferred(&self) -> bool {
+        self.loading == ToolLoading::Deferred
     }
 }
 
@@ -1507,6 +1553,22 @@ impl Request {
                 ));
             }
             _ => {}
+        }
+        let deferred = DeferredTools::of(self);
+        if deferred.is_active() {
+            if self.tools.iter().all(ToolDefinition::is_deferred) {
+                return Err(ModelError::invalid_request(
+                    "deferred tools require at least one eager tool",
+                ));
+            }
+            if let ToolChoice::Tool(name) = &self.tool_choice
+                && deferred.is_deferred(name)
+                && !deferred.is_loaded(name)
+            {
+                return Err(ModelError::invalid_request(
+                    "named tool choice references a deferred tool that is not loaded",
+                ));
+            }
         }
         if (!self.tools.is_empty()
             || matches!(self.tool_choice, ToolChoice::Required | ToolChoice::Tool(_)))
@@ -1742,6 +1804,102 @@ impl Request {
             }
         }
         Ok(())
+    }
+}
+
+/// The deferred tools of a request and the tools each result loads, computed
+/// once so every adapter encodes them the same way.
+///
+/// A tool is loaded by the first [`ToolContent::LoadTools`] result in a
+/// [`ToolMessage`] that names it. Names of undeclared tools are dropped with a
+/// warning; names of eager tools are dropped silently, since those tools are
+/// visible already.
+#[derive(Clone, Debug, Default)]
+pub struct DeferredTools<'a> {
+    deferred: BTreeSet<&'a str>,
+    loaded: BTreeSet<&'a str>,
+    loads: BTreeMap<&'a str, Vec<&'a str>>,
+    warnings: Vec<String>,
+}
+
+impl<'a> DeferredTools<'a> {
+    /// Computes the plan of `request`.
+    #[must_use]
+    pub fn of(request: &'a Request) -> Self {
+        let mut plan = Self {
+            deferred: request
+                .tools
+                .iter()
+                .filter(|tool| tool.is_deferred())
+                .map(|tool| tool.name.as_str())
+                .collect(),
+            ..Self::default()
+        };
+        for turn in &request.history {
+            let HistoryTurn::Tool(message) = turn else {
+                continue;
+            };
+            for result in &message.results {
+                let ToolContent::LoadTools { names, .. } = &result.content else {
+                    continue;
+                };
+                let mut new = Vec::new();
+                for name in names {
+                    let name = name.as_str();
+                    if plan.deferred.contains(name) {
+                        if plan.loaded.insert(name) {
+                            new.push(name);
+                        }
+                    } else if !request.tools.iter().any(|tool| tool.name == name) {
+                        plan.warnings.push(format!(
+                            "tool result `{}` loads undeclared tool `{name}`; dropped",
+                            result.tool_call_id
+                        ));
+                    }
+                }
+                plan.loads.insert(result.tool_call_id.as_str(), new);
+            }
+        }
+        plan
+    }
+
+    /// Whether the request declares any deferred tool.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        !self.deferred.is_empty()
+    }
+
+    /// Whether `name` is a declared deferred tool.
+    #[must_use]
+    pub fn is_deferred(&self, name: &str) -> bool {
+        self.deferred.contains(name)
+    }
+
+    /// Whether a result in the history loads the deferred tool `name`.
+    #[must_use]
+    pub fn is_loaded(&self, name: &str) -> bool {
+        self.loaded.contains(name)
+    }
+
+    /// The deferred tools the result answering `tool_call_id` loads first,
+    /// in the order it names them. Empty for any other result.
+    #[must_use]
+    pub fn newly_loaded(&self, tool_call_id: &str) -> &[&'a str] {
+        self.loads.get(tool_call_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Warnings for names that load no declared tool.
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// The warning an adapter without native loading adds when the request
+    /// declares deferred tools, which it sends up front.
+    #[must_use]
+    pub fn upfront_warning(&self, adapter: &str) -> Option<String> {
+        self.is_active()
+            .then(|| format!("deferred tools sent up front: {adapter} has no native loading"))
     }
 }
 
@@ -2637,6 +2795,17 @@ pub enum CompactionCapability {
     Unsupported,
 }
 
+/// Deferred tool loading offered by a configured model.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeferredToolsCapability {
+    /// The adapter encodes deferred tools and loads them natively.
+    Native,
+    /// Deferred tools are sent up front and loads are sent as text.
+    #[default]
+    Unsupported,
+}
+
 /// Native replay support offered by a configured model.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -2676,6 +2845,8 @@ pub struct ModelCapabilities {
     pub cancellation: CancellationCapability,
     /// Provider-native context compaction support.
     pub compaction: CompactionCapability,
+    /// Deferred tool loading support.
+    pub deferred_tools: DeferredToolsCapability,
     /// Replay semantics.
     pub replay: ReplayDeclaration,
 }
@@ -2693,6 +2864,8 @@ impl<'de> Deserialize<'de> for ModelCapabilities {
             media: MediaCapabilities,
             cancellation: CancellationCapability,
             compaction: CompactionCapability,
+            #[serde(default)]
+            deferred_tools: DeferredToolsCapability,
             replay: ReplayDeclaration,
         }
         let wire = WireCapabilities::deserialize(deserializer)?;
@@ -2703,6 +2876,7 @@ impl<'de> Deserialize<'de> for ModelCapabilities {
             media: wire.media,
             cancellation: wire.cancellation,
             compaction: wire.compaction,
+            deferred_tools: wire.deferred_tools,
             replay: wire.replay,
         };
         capabilities.validate().map_err(serde::de::Error::custom)?;
@@ -2721,6 +2895,7 @@ impl ModelCapabilities {
             media: MediaCapabilities::default(),
             cancellation: CancellationCapability::Unsupported,
             compaction: CompactionCapability::Unsupported,
+            deferred_tools: DeferredToolsCapability::Unsupported,
             replay: ReplayDeclaration {
                 policy: ReplayPolicy::Never,
                 capability: ReplayCapability::Unsupported,
@@ -2750,6 +2925,13 @@ impl ModelCapabilities {
         {
             return Err(ModelError::invalid_request(
                 "tool input deltas require tool calling",
+            ));
+        }
+        if self.deferred_tools == DeferredToolsCapability::Native
+            && !self.features.contains(Capability::TOOL_CALLING)
+        {
+            return Err(ModelError::invalid_request(
+                "deferred tool loading requires tool calling",
             ));
         }
         if self.replay.reasoning && !self.features.contains(Capability::REASONING) {

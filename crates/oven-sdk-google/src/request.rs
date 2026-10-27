@@ -217,6 +217,7 @@ pub(crate) fn encode_request(
         .expect("validated model resource");
     let mut replay = ReplayOutcome::default();
     let mut warnings = Vec::new();
+    warnings.extend(oven_sdk::DeferredTools::of(request).upfront_warning("google-gemini"));
 
     // Validate native payloads first. Only the shared cross-adapter codec yields owned parts;
     // they are stored here so every body part can borrow for the whole encoding.
@@ -714,6 +715,7 @@ fn function_response<'a>(
 fn tool_content(content: &ToolContent) -> Result<ToolOutput<'_>, ModelError> {
     match content {
         ToolContent::Text(value) => Ok(ToolOutput::Str(value)),
+        ToolContent::LoadTools { text: value, .. } => Ok(ToolOutput::Str(value)),
         ToolContent::Json(value) => Ok(ToolOutput::Json(value)),
         ToolContent::Denied { reason } => Ok(ToolOutput::Str(
             reason.as_deref().unwrap_or("Tool call execution denied."),

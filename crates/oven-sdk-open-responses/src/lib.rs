@@ -656,6 +656,7 @@ fn encode_request(
     let mut input = Vec::new();
     let mut replay = ReplayOutcome::default();
     let mut warnings = Vec::new();
+    warnings.extend(oven_sdk::DeferredTools::of(request).upfront_warning("open-responses"));
     for (history_index, turn) in request.history.iter().enumerate() {
         match turn {
             HistoryTurn::System(message) => {
@@ -871,6 +872,9 @@ fn function_output(result: &ToolResultPart) -> Result<body::Item<'_>, ModelError
     validate_tool_result(result)?;
     let output = match &result.content {
         ToolContent::Text(value) => body::Output::Text(body::Text::Borrowed(value)),
+        ToolContent::LoadTools { text: value, .. } => {
+            body::Output::Text(body::Text::Borrowed(value))
+        }
         ToolContent::Json(value) => body::Output::Text(body::Text::Json(value)),
         ToolContent::Mixed(values) => body::Output::Parts(
             values
@@ -3243,6 +3247,11 @@ fn validate_capabilities(
     if capabilities.compaction != CompactionCapability::Unsupported {
         return Err(ModelError::invalid_request(
             "standardized Open Responses and Hugging Face transports do not inherit OpenAI native compaction",
+        ));
+    }
+    if capabilities.deferred_tools != oven_sdk::DeferredToolsCapability::Unsupported {
+        return Err(ModelError::invalid_request(
+            "standardized Open Responses and Hugging Face transports do not implement deferred tool loading",
         ));
     }
     let text = oven_sdk::Modality::text();

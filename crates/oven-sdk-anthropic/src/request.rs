@@ -1429,6 +1429,7 @@ fn tool_result_block(
 ) -> Result<Block<'_>, ModelError> {
     let content = match &result.content {
         ToolContent::Text(v) => ToolResultContent::Text(TextValue::Str(v)),
+        ToolContent::LoadTools { text: v, .. } => ToolResultContent::Text(TextValue::Str(v)),
         ToolContent::Json(v) => ToolResultContent::Text(TextValue::Json(v)),
         ToolContent::Mixed(v)
             if protocol.is_first_party()

@@ -472,6 +472,11 @@ pub(crate) fn validate_chat_declaration(
             "Chat adapters do not support provider-native compaction",
         ));
     }
+    if capabilities.deferred_tools != oven_sdk::DeferredToolsCapability::Unsupported {
+        return Err(ModelError::invalid_request(
+            "Chat adapters do not support deferred tool loading",
+        ));
+    }
     if stream_usage != capabilities.features.contains(Capability::USAGE) {
         return Err(ModelError::invalid_request(
             "Chat stream-usage settings and usage capability must agree",

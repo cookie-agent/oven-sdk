@@ -515,6 +515,11 @@ fn validate_adapter_declaration(capabilities: &ModelCapabilities) -> Result<(), 
             "Bedrock Converse does not support provider-native compaction",
         ));
     }
+    if capabilities.deferred_tools != oven_sdk::DeferredToolsCapability::Unsupported {
+        return Err(ModelError::invalid_request(
+            "Bedrock Converse does not support deferred tool loading",
+        ));
+    }
     let supported_features = Capability::TOOL_CALLING
         | Capability::PARALLEL_TOOLS
         | Capability::TOOL_INPUT_DELTAS
@@ -751,6 +756,7 @@ mod tests {
             media: Default::default(),
             cancellation: CancellationCapability::LocalOnly,
             compaction: CompactionCapability::Unsupported,
+            deferred_tools: oven_sdk::DeferredToolsCapability::Unsupported,
             replay: ReplayDeclaration {
                 policy: ReplayPolicy::IfValid,
                 capability: ReplayCapability::Optional,

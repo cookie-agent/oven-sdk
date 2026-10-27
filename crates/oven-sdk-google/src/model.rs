@@ -504,6 +504,11 @@ fn validate_settings(
     config: &ModelConfig<GoogleApiKeyAuth, GoogleGenerateContentSettings>,
 ) -> Result<(), ModelError> {
     let features = config.model.capabilities.features;
+    if config.model.capabilities.deferred_tools != oven_sdk::DeferredToolsCapability::Unsupported {
+        return Err(ModelError::invalid_request(
+            "Gemini does not support deferred tool loading",
+        ));
+    }
     if config.settings.thinking != GoogleThinkingSettings::Unsupported
         && !features.contains(oven_sdk::Capability::REASONING)
     {

@@ -76,6 +76,7 @@ pub(crate) fn encode_request(
     let mut replay_outcome = ReplayOutcome::default();
     let mut messages = Vec::new();
     let mut warnings = Vec::new();
+    warnings.extend(oven_sdk::DeferredTools::of(request).upfront_warning("azure-openai-chat"));
     let mut size_hint = 0_usize;
     for (history_index, turn) in request.history.iter().enumerate() {
         match turn {
@@ -520,6 +521,7 @@ fn assistant_message(parts: &[AssistantPart], reasoning_field: AzureReasoningFie
 fn tool_result_message(result: &ToolResultPart) -> Result<Message<'_>, ModelError> {
     let content = match &result.content {
         ToolContent::Text(value) => Text::Borrowed(value),
+        ToolContent::LoadTools { text: value, .. } => Text::Borrowed(value),
         ToolContent::Json(value) => Text::Json(value),
         ToolContent::Mixed(values)
             if values

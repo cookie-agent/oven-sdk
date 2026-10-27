@@ -262,6 +262,11 @@ impl GoogleVertexModel {
                 "Vertex does not support provider-native context compaction",
             ));
         }
+        if config.model.capabilities.deferred_tools == oven_sdk::DeferredToolsCapability::Native {
+            return Err(ModelError::unsupported(
+                "Vertex does not support deferred tool loading",
+            ));
+        }
         let expected_scope = google_vertex_native_context_scope(
             config.provider.id.clone(),
             config.model.id.clone(),

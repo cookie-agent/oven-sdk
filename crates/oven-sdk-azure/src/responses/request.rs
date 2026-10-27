@@ -509,6 +509,7 @@ fn tool_content_has_prompt_cache_breakpoint(content: &ToolContent) -> Result<boo
 fn function_output(result: &ToolResultPart) -> Result<Item<'_>, ModelError> {
     let output = match &result.content {
         ToolContent::Text(value) => Output::Text(Text::Borrowed(value)),
+        ToolContent::LoadTools { text: value, .. } => Output::Text(Text::Borrowed(value)),
         ToolContent::Json(value) => Output::Text(Text::Json(value)),
         ToolContent::Mixed(values)
             if values

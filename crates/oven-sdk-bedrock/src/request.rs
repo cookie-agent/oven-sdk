@@ -210,6 +210,7 @@ pub(crate) fn encode_request(
     let replay_policy = descriptor.capabilities.replay.policy;
     let mut replay = ReplayOutcome::default();
     let mut warnings = Vec::new();
+    warnings.extend(oven_sdk::DeferredTools::of(request).upfront_warning("aws-bedrock-converse"));
     let mut system = Vec::new();
     let mut messages = Vec::<Message<'_>>::new();
     let mut document_counter = 0_u64;
@@ -1161,6 +1162,7 @@ fn tool_result<'a>(
 ) -> Result<Block<'a>, ModelError> {
     let content = match &result.content {
         ToolContent::Text(value) => vec![Block::Text(value)],
+        ToolContent::LoadTools { text: value, .. } => vec![Block::Text(value)],
         ToolContent::Json(value) => vec![Block::Json(value)],
         ToolContent::Denied { reason } => vec![Block::Text(
             reason.as_deref().unwrap_or("Tool call execution denied."),

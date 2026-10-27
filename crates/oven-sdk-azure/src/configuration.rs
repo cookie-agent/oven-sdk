@@ -501,6 +501,13 @@ fn validate_capabilities(
             "Azure models declare local-only cancellation",
         ));
     }
+    if endpoint == Endpoint::Chat
+        && capabilities.deferred_tools != oven_sdk::DeferredToolsCapability::Unsupported
+    {
+        return Err(ModelError::invalid_request(
+            "Azure Chat does not support deferred tool loading",
+        ));
+    }
     let text = oven_sdk::Modality::text();
     if !capabilities.modalities.input.contains(&text)
         || capabilities.modalities.output.len() != 1

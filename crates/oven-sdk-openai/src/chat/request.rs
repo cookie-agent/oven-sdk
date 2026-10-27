@@ -626,6 +626,7 @@ fn assistant_message(
 fn tool_result_message(result: &ToolResultPart) -> Result<Message<'_>, ModelError> {
     let content = match &result.content {
         ToolContent::Text(value) => Text::Borrowed(value),
+        ToolContent::LoadTools { text: value, .. } => Text::Borrowed(value),
         ToolContent::Json(value) => Text::Json(value),
         ToolContent::Mixed(values)
             if values

@@ -28,6 +28,7 @@ fn capabilities(features: Capability) -> ModelCapabilities {
         },
         cancellation: CancellationCapability::LocalOnly,
         compaction: CompactionCapability::Unsupported,
+        deferred_tools: oven_sdk::DeferredToolsCapability::Unsupported,
         replay: ReplayDeclaration {
             policy: ReplayPolicy::IfValid,
             capability: ReplayCapability::Optional,

@@ -231,6 +231,7 @@ pub(crate) fn encode_request(
         .contains(Capability::PROVIDER_TOOLS);
     let mut replay = ReplayOutcome::default();
     let mut warnings = Vec::new();
+    warnings.extend(oven_sdk::DeferredTools::of(request).upfront_warning("google-vertex"));
 
     // Validate native payloads first. Only the shared cross-adapter codec yields owned parts;
     // they are stored here so every body part can borrow for the whole encoding.
@@ -594,6 +595,7 @@ fn function_response<'a>(
         })?;
     let output = match &result.content {
         ToolContent::Text(value) => ToolOutput::Str(value),
+        ToolContent::LoadTools { text: value, .. } => ToolOutput::Str(value),
         ToolContent::Json(value) => ToolOutput::Json(value),
         ToolContent::Denied { reason } => {
             ToolOutput::Str(reason.as_deref().unwrap_or("Tool call execution denied."))

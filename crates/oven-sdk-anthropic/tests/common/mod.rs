@@ -93,6 +93,7 @@ pub fn anthropic_capabilities(policy: ReplayPolicy) -> ModelCapabilities {
         media,
         cancellation: CancellationCapability::LocalOnly,
         compaction: CompactionCapability::Unsupported,
+        deferred_tools: oven_sdk::DeferredToolsCapability::Unsupported,
         replay: replay(policy, true),
     }
 }
@@ -167,6 +168,7 @@ pub fn minimax_capabilities(policy: ReplayPolicy, media_enabled: bool) -> ModelC
         media,
         cancellation: CancellationCapability::LocalOnly,
         compaction: CompactionCapability::Unsupported,
+        deferred_tools: oven_sdk::DeferredToolsCapability::Unsupported,
         replay: replay(policy, true),
     }
 }

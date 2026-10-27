@@ -572,6 +572,7 @@ fn encode_request(
     let mut messages = Vec::with_capacity(request.history.len());
     let mut replay = ReplayOutcome::default();
     let mut warnings = Vec::new();
+    warnings.extend(oven_sdk::DeferredTools::of(request).upfront_warning("cohere"));
     for (history_index, turn) in request.history.iter().enumerate() {
         match turn {
             HistoryTurn::System(message) => {
@@ -798,6 +799,9 @@ fn image_content<'a>(
 fn tool_result(result: &ToolResultPart) -> Result<body::Message<'_>, ModelError> {
     let content = match &result.content {
         ToolContent::Text(value) => body::ToolResultContent::Text(body::TextValue::Str(value)),
+        ToolContent::LoadTools { text: value, .. } => {
+            body::ToolResultContent::Text(body::TextValue::Str(value))
+        }
         ToolContent::Json(value) => body::ToolResultContent::Text(body::TextValue::Json(value)),
         ToolContent::Mixed(values) => body::ToolResultContent::Parts(
             values
@@ -1690,6 +1694,11 @@ fn validate_capabilities(capabilities: &ModelCapabilities) -> Result<(), ModelEr
             "Cohere does not implement provider-native context compaction",
         ));
     }
+    if capabilities.deferred_tools != oven_sdk::DeferredToolsCapability::Unsupported {
+        return Err(ModelError::invalid_request(
+            "Cohere does not implement deferred tool loading",
+        ));
+    }
     let text = oven_sdk::Modality::text();
     if !capabilities.modalities.input.contains(&text)
         || capabilities.modalities.output != [text.clone()].into_iter().collect()
@@ -2227,6 +2236,7 @@ mod tests {
             media,
             cancellation: CancellationCapability::LocalOnly,
             compaction: CompactionCapability::Unsupported,
+            deferred_tools: oven_sdk::DeferredToolsCapability::Unsupported,
             replay: ReplayDeclaration {
                 policy: ReplayPolicy::IfValid,
                 capability: ReplayCapability::Optional,
@@ -2284,6 +2294,7 @@ mod tests {
     fn reference_tool_result(result: &ToolResultPart) -> Result<JsonValue, ModelError> {
         let content = match &result.content {
             ToolContent::Text(value) => JsonValue::String(value.clone()),
+            ToolContent::LoadTools { text: value, .. } => JsonValue::String(value.clone()),
             ToolContent::Json(value) => JsonValue::String(value.to_string()),
             ToolContent::Mixed(values) => JsonValue::Array(
                 values
