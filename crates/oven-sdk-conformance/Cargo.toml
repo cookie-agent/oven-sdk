@@ -13,5 +13,5 @@ name = "oven_sdk_conformance"
 
 [dependencies]
 futures-core.workspace = true
-oven-sdk = { path = "../oven-sdk", version = "=0.7.0" }
+oven-sdk = { path = "../oven-sdk", version = "=0.8.0" }
 serde_json.workspace = true
