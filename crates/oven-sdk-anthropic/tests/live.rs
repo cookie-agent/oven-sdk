@@ -167,3 +167,70 @@ async fn live_anthropic_aws_messages() {
         .unwrap();
     assert!(!result.turn.text().is_empty());
 }
+
+#[tokio::test]
+#[ignore = "requires ANTHROPIC_API_KEY and external network access"]
+async fn live_deferred_tool_is_called_after_a_load() {
+    use oven_sdk::{
+        AssistantMessage, AssistantPart, CompletedTurn, DeferredToolsCapability, Finish,
+        FinishReason, JsonSchema, ReplayPolicy, ToolCallPart, ToolContent, ToolDefinition,
+        ToolMessage, ToolResultPart,
+    };
+    let mut builder = Anthropic::builder()
+        .api_key(std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY must be set"));
+    if let Ok(base_url) = std::env::var("ANTHROPIC_BASE_URL") {
+        builder = builder.base_url(base_url);
+    }
+    let mut capabilities = common::anthropic_capabilities(ReplayPolicy::IfValid);
+    capabilities.deferred_tools = DeferredToolsCapability::Native;
+    let model = builder.capabilities(capabilities).build().unwrap().model(
+        std::env::var("ANTHROPIC_LIVE_MODEL")
+            .unwrap_or_else(|_| "claude-haiku-4-5-20251001".into()),
+    );
+    let tool = |name: &str, description: &str| {
+        ToolDefinition::new(
+            name,
+            description,
+            JsonSchema::new(serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+            }))
+            .unwrap(),
+        )
+    };
+    let mut history = request("What is the weather in Paris? Use the tools.").history;
+    history.push(HistoryTurn::assistant(CompletedTurn::new(
+        AssistantMessage::new(vec![AssistantPart::ToolCall(ToolCallPart::new(
+            "toolu_live_search",
+            "tool_search",
+            serde_json::json!({"city": "weather"}),
+        ))]),
+        Finish::new(Default::default(), FinishReason::ToolCalls),
+    )));
+    history.push(HistoryTurn::tool(ToolMessage::new(vec![
+        ToolResultPart::new(
+            "toolu_live_search",
+            ToolContent::LoadTools {
+                names: vec!["get_weather".into()],
+                text: "Loaded tools: get_weather".into(),
+            },
+        ),
+    ])));
+    let request = Request::new(history).with_tools(vec![
+        tool("tool_search", "Search for more tools by keyword."),
+        tool("get_weather", "Get the current weather for a city.").deferred(),
+        tool("get_stock_price", "Get the stock price for a ticker.").deferred(),
+    ]);
+    let complete = model
+        .complete(request, AbortSignal::default())
+        .await
+        .unwrap();
+    assert!(
+        complete.turn.message.content.iter().any(
+            |part| matches!(part, oven_sdk::AssistantPart::ToolCall(call) if call.name == "get_weather")
+        ),
+        "{:?}",
+        complete.turn.message.content
+    );
+}

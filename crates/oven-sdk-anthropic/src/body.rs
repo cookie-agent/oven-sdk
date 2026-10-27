@@ -86,6 +86,8 @@ pub(crate) struct Tool<'a> {
     pub(crate) input_schema: &'a JsonValue,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub(crate) strict: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) defer_loading: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cache_control: Option<CacheControl>,
 }
@@ -232,6 +234,8 @@ pub(crate) enum TypedBlock<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    /// Loads a deferred tool; only valid as the whole content of a tool result.
+    ToolReference { tool_name: &'a str },
 }
 
 impl TypedBlock<'_> {
@@ -243,17 +247,21 @@ impl TypedBlock<'_> {
             Self::Video { .. } => "video",
             Self::ToolUse { .. } => "tool_use",
             Self::ToolResult { .. } => "tool_result",
+            Self::ToolReference { .. } => "tool_reference",
         }
     }
 
     fn set_cache(&mut self, cache: CacheControl) {
-        let (Self::Text { cache_control, .. }
-        | Self::Image { cache_control, .. }
-        | Self::Document { cache_control, .. }
-        | Self::Video { cache_control, .. }
-        | Self::ToolUse { cache_control, .. }
-        | Self::ToolResult { cache_control, .. }) = self;
-        *cache_control = Some(cache);
+        match self {
+            Self::Text { cache_control, .. }
+            | Self::Image { cache_control, .. }
+            | Self::Document { cache_control, .. }
+            | Self::Video { cache_control, .. }
+            | Self::ToolUse { cache_control, .. }
+            | Self::ToolResult { cache_control, .. } => *cache_control = Some(cache),
+            // A reference never carries a marker; the result holding it does.
+            Self::ToolReference { .. } => {}
+        }
     }
 
     fn size_hint(&self) -> usize {
@@ -284,6 +292,7 @@ impl TypedBlock<'_> {
                         ToolResultContent::Blocks(blocks) => blocks_hint(blocks),
                     }
             }
+            Self::ToolReference { tool_name } => tool_name.len(),
         }
     }
 }

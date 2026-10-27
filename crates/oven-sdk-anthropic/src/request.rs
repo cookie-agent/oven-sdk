@@ -4,10 +4,10 @@ use std::{borrow::Cow, collections::BTreeSet};
 
 use bytes::Bytes;
 use oven_sdk::{
-    AssistantPart, Capability, ContentValue, ErrorStage, FileSource, HistoryTurn, InputPart,
-    JsonValue, LanguageModelDescriptor, ModelCapabilities, ModelError, ReplayDecision,
-    ReplayDisposition, ReplayOutcome, ReplayPolicy, Request, ResponseFormat, ToolChoice,
-    ToolContent, ToolResultPart,
+    AssistantPart, Capability, ContentValue, DeferredTools, DeferredToolsCapability, ErrorStage,
+    FileSource, HistoryTurn, InputPart, JsonValue, LanguageModelDescriptor, ModelCapabilities,
+    ModelError, ReplayDecision, ReplayDisposition, ReplayOutcome, ReplayPolicy, Request,
+    ResponseFormat, ToolChoice, ToolContent, ToolDefinition, ToolResultPart,
 };
 
 use crate::{
@@ -925,6 +925,17 @@ pub(crate) fn encode_request(
     let mut replay = ReplayOutcome::default();
     let mut messages: Vec<Message<'_>> = Vec::with_capacity(request.history.len());
     let mut warnings = cache_plan.warnings.clone();
+    let emit_tools = !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None);
+    let deferred = DeferredTools::of(request);
+    // A tool_reference must name a tool the request declares, so loads are
+    // native only while the tools are sent.
+    let native_deferral =
+        emit_tools && descriptor.capabilities.deferred_tools == DeferredToolsCapability::Native;
+    if native_deferral {
+        warnings.extend(deferred.warnings().iter().cloned());
+    } else {
+        warnings.extend(deferred.upfront_warning(protocol.display_name()));
+    }
     let mut system = Vec::new();
     let mut previous_was_tool = false;
     for (index, turn) in request.history.iter().enumerate() {
@@ -975,6 +986,11 @@ pub(crate) fn encode_request(
                             result,
                             wire_cache(cache_plan.history[index].marker_for(part_index)),
                             protocol,
+                            if native_deferral {
+                                deferred.newly_loaded(&result.tool_call_id)
+                            } else {
+                                &[]
+                            },
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1124,17 +1140,24 @@ pub(crate) fn encode_request(
         }
         _ => requested_max,
     };
-    let tools = if !request.tools.is_empty() && !matches!(request.tool_choice, ToolChoice::None) {
+    let tools = if emit_tools {
+        let markers = if native_deferral {
+            markers_off_deferred_tools(&request.tools, &cache_plan.tools)
+        } else {
+            cache_plan.tools.clone()
+        };
         request
             .tools
             .iter()
+            .zip(markers)
             .enumerate()
-            .map(|(index, tool)| Tool {
+            .map(|(index, (tool, marker))| Tool {
                 name: &tool.name,
                 description: &tool.description,
                 input_schema: tool.input_schema.as_value(),
                 strict: parsed.strict_tools[index],
-                cache_control: wire_cache(cache_plan.tools[index].clone()),
+                defer_loading: native_deferral && tool.is_deferred(),
+                cache_control: wire_cache(marker),
             })
             .collect()
     } else {
@@ -1422,11 +1445,63 @@ fn minimax_media_options(
         })
         .transpose()
 }
-fn tool_result_block(
-    result: &ToolResultPart,
+/// The tool cache markers with any marker on a deferred tool moved to the
+/// last eager tool before it, or else the first eager tool after it.
+///
+/// A deferred tool cannot carry `cache_control`, and deferred tools are left
+/// out of the cached prefix, so the moved marker caches the same range. A
+/// marker landing on an already marked tool merges into it.
+fn markers_off_deferred_tools(
+    tools: &[ToolDefinition],
+    markers: &[Option<AnthropicCacheControl>],
+) -> Vec<Option<AnthropicCacheControl>> {
+    let mut moved = markers.to_vec();
+    for (index, tool) in tools.iter().enumerate() {
+        if !tool.is_deferred() {
+            continue;
+        }
+        let Some(marker) = moved[index].take() else {
+            continue;
+        };
+        let target = tools[..index]
+            .iter()
+            .rposition(|tool| !tool.is_deferred())
+            .or_else(|| {
+                tools[index + 1..]
+                    .iter()
+                    .position(|tool| !tool.is_deferred())
+                    .map(|offset| index + 1 + offset)
+            });
+        if let Some(target) = target
+            && moved[target].is_none()
+        {
+            moved[target] = Some(marker);
+        }
+    }
+    moved
+}
+
+fn tool_result_block<'a>(
+    result: &'a ToolResultPart,
     cache: Option<CacheControl>,
     protocol: Protocol,
-) -> Result<Block<'_>, ModelError> {
+    loads: &[&'a str],
+) -> Result<Block<'a>, ModelError> {
+    // A result that loads tools holds only their references: the API rejects
+    // text beside a tool_reference.
+    if !loads.is_empty() && matches!(result.content, ToolContent::LoadTools { .. }) {
+        return Ok(Block::Typed(TypedBlock::ToolResult {
+            tool_use_id: &result.tool_call_id,
+            content: ToolResultContent::Blocks(
+                loads
+                    .iter()
+                    .map(|tool_name| Block::Typed(TypedBlock::ToolReference { tool_name }))
+                    .collect(),
+            ),
+            is_error: result.is_error,
+            cache_control: cache,
+        }));
+    }
     let content = match &result.content {
         ToolContent::Text(v) => ToolResultContent::Text(TextValue::Str(v)),
         ToolContent::LoadTools { text: v, .. } => ToolResultContent::Text(TextValue::Str(v)),
