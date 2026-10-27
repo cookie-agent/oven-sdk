@@ -238,6 +238,18 @@ impl Default for OpenAiResponsesSettings {
     }
 }
 
+/// How an OpenAI-compatible Chat endpoint loads deferred tools.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibleChatDeferredTools {
+    /// The endpoint has no deferred tool loading.
+    #[default]
+    Unsupported,
+    /// Kimi's dynamic tool loading: a `system` message carrying only `tools`,
+    /// appended where the tools load.
+    SystemMessage,
+}
+
 /// Structural settings for one OpenAI-compatible Chat endpoint.
 #[derive(Clone, Debug)]
 pub struct OpenAiCompatibleChatSettings {
@@ -259,6 +271,9 @@ pub struct OpenAiCompatibleChatSettings {
     pub request_id_headers: Vec<String>,
     /// Whether successful responses must use an SSE content type.
     pub strict_sse_content_type: bool,
+    /// How the endpoint loads deferred tools; a model declaring native
+    /// deferred tools requires a dialect.
+    pub deferred_tools: CompatibleChatDeferredTools,
     /// Stable non-secret routing identity required when dynamic headers or
     /// dynamic authentication can select a different backend or account.
     pub routing_discriminator: Option<String>,
@@ -288,6 +303,7 @@ impl OpenAiCompatibleChatSettings {
             query: Vec::new(),
             request_id_headers: vec!["x-request-id".into()],
             strict_sse_content_type: false,
+            deferred_tools: CompatibleChatDeferredTools::Unsupported,
             routing_discriminator: None,
             client: None,
             timeouts: OpenAiTimeouts::default(),
@@ -464,6 +480,7 @@ pub(crate) fn validate_chat_declaration(
     reasoning_field: ReasoningField,
     stream_usage: bool,
     compatible: bool,
+    deferred_tools: CompatibleChatDeferredTools,
 ) -> Result<(), ModelError> {
     validate_features(capabilities)?;
     validate_cancellation(capabilities)?;
@@ -472,9 +489,11 @@ pub(crate) fn validate_chat_declaration(
             "Chat adapters do not support provider-native compaction",
         ));
     }
-    if capabilities.deferred_tools != oven_sdk::DeferredToolsCapability::Unsupported {
+    if capabilities.deferred_tools == oven_sdk::DeferredToolsCapability::Native
+        && deferred_tools == CompatibleChatDeferredTools::Unsupported
+    {
         return Err(ModelError::invalid_request(
-            "Chat adapters do not support deferred tool loading",
+            "native deferred tools on Chat need a compatible endpoint with a deferred-tools dialect",
         ));
     }
     if stream_usage != capabilities.features.contains(Capability::USAGE) {

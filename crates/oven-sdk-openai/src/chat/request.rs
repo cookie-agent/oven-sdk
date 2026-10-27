@@ -3,10 +3,10 @@
 use std::borrow::Cow;
 
 use oven_sdk::{
-    AssistantPart, ContentValue, ErrorStage, FilePart, FileSource, HistoryTurn, InputPart,
-    JsonValue, LanguageModelDescriptor, ModelCapabilities, ModelError, NativeContextScope,
-    ReplayDecision, ReplayDisposition, ReplayOutcome, ReplayPolicy, Request, ResponseFormat,
-    ToolChoice, ToolContent, ToolResultPart,
+    AssistantPart, ContentValue, DeferredTools, DeferredToolsCapability, ErrorStage, FilePart,
+    FileSource, HistoryTurn, InputPart, JsonValue, LanguageModelDescriptor, ModelCapabilities,
+    ModelError, NativeContextScope, ReplayDecision, ReplayDisposition, ReplayOutcome, ReplayPolicy,
+    Request, ResponseFormat, ToolChoice, ToolContent, ToolDefinition, ToolResultPart,
 };
 
 use crate::{
@@ -14,7 +14,10 @@ use crate::{
         body::{self, Content, Message, Part, TypedMessage},
         replay,
     },
-    configuration::{MaxTokensField, ReasoningField, StructuredOutputSupport, SystemMessageRole},
+    configuration::{
+        CompatibleChatDeferredTools, MaxTokensField, ReasoningField, StructuredOutputSupport,
+        SystemMessageRole,
+    },
     options::{
         CompatibleChatOptions, OpenAiChatOptions, OpenAiPromptCacheTtl, PromptCacheSurface,
         chat_options, compatible_options, prompt_cache_breakpoint, prompt_cache_breakpoint_ttl,
@@ -28,6 +31,7 @@ use crate::{
 
 pub(crate) struct ChatWireProfile {
     pub(crate) compatible: bool,
+    pub(crate) deferred_tools: CompatibleChatDeferredTools,
     pub(crate) system_role: SystemMessageRole,
     pub(crate) max_tokens_field: MaxTokensField,
     pub(crate) stream_usage: bool,
@@ -143,6 +147,17 @@ pub(crate) fn encode_request(
     let mut messages = Vec::new();
     let mut warnings = Vec::new();
     let mut size_hint = 0_usize;
+    let deferred = DeferredTools::of(request);
+    let native_deferral = native_deferral(request, descriptor, profile);
+    if native_deferral {
+        warnings.extend(deferred.warnings().iter().cloned());
+    } else {
+        warnings.extend(deferred.upfront_warning(if profile.compatible {
+            "openai-compatible-chat"
+        } else {
+            "openai-chat"
+        }));
+    }
     for (history_index, turn) in request.history.iter().enumerate() {
         match turn {
             HistoryTurn::System(message) => {
@@ -195,6 +210,18 @@ pub(crate) fn encode_request(
             HistoryTurn::Tool(message) => {
                 for result in &message.results {
                     messages.push(tool_result_message(result)?);
+                }
+                if native_deferral {
+                    let tools = message
+                        .results
+                        .iter()
+                        .flat_map(|result| deferred.newly_loaded(&result.tool_call_id))
+                        .filter_map(|name| request.tools.iter().find(|tool| tool.name == *name))
+                        .map(function_tool)
+                        .collect::<Vec<_>>();
+                    if !tools.is_empty() {
+                        messages.push(Message::Typed(TypedMessage::SystemTools { tools }));
+                    }
                 }
             }
             HistoryTurn::Assistant(turn) => {
@@ -266,7 +293,7 @@ pub(crate) fn encode_request(
             MaxTokensField::Omit => warnings.push("Chat profile omitted max output tokens".into()),
         }
     }
-    let (tools, tool_choice) = tools(request);
+    let (tools, tool_choice) = tools(request, native_deferral);
     size_hint += body::tools_size_hint(tools.as_ref());
     let response_format = match &request.response_format {
         ResponseFormat::Text => None,
@@ -372,27 +399,47 @@ fn replayed_size_hint(parts: &[AssistantPart]) -> usize {
 
 type Tools<'a> = (Option<Vec<body::Tool<'a>>>, Option<body::ToolChoice<'a>>);
 
-fn tools(request: &Request) -> Tools<'_> {
+/// Whether `request` loads deferred tools natively: the model declares it,
+/// the endpoint has a dialect, and the request sends tools at all.
+fn native_deferral(
+    request: &Request,
+    descriptor: &LanguageModelDescriptor,
+    profile: &ChatWireProfile,
+) -> bool {
+    descriptor.capabilities.deferred_tools == DeferredToolsCapability::Native
+        && profile.deferred_tools == CompatibleChatDeferredTools::SystemMessage
+        && !request.tools.is_empty()
+        && !matches!(request.tool_choice, ToolChoice::None)
+}
+
+fn function_tool(tool: &ToolDefinition) -> body::Tool<'_> {
+    body::Tool {
+        kind: "function",
+        function: body::Function {
+            name: &tool.name,
+            description: &tool.description,
+            parameters: tool.input_schema.as_value(),
+            strict: tool
+                .provider_options
+                .get("openai")
+                .and_then(|value| value.get("strict"))
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(false),
+        },
+    }
+}
+
+fn tools(request: &Request, native_deferral: bool) -> Tools<'_> {
     if request.tools.is_empty() || matches!(request.tool_choice, ToolChoice::None) {
         return (None, None);
     }
+    // Natively deferred tools are declared by the system message that loads
+    // them, never up front.
     let tools = request
         .tools
         .iter()
-        .map(|tool| body::Tool {
-            kind: "function",
-            function: body::Function {
-                name: &tool.name,
-                description: &tool.description,
-                parameters: tool.input_schema.as_value(),
-                strict: tool
-                    .provider_options
-                    .get("openai")
-                    .and_then(|value| value.get("strict"))
-                    .and_then(JsonValue::as_bool)
-                    .unwrap_or(false),
-            },
-        })
+        .filter(|tool| !(native_deferral && tool.is_deferred()))
+        .map(function_tool)
         .collect();
     let choice = match &request.tool_choice {
         ToolChoice::Auto => body::ToolChoice::Mode("auto"),

@@ -66,6 +66,15 @@ pub(crate) struct Tool<'a> {
     pub(crate) function: Function<'a>,
 }
 
+impl Tool<'_> {
+    pub(crate) fn size_hint(&self) -> usize {
+        self.function.name.len()
+            + self.function.description.len()
+            + json_size_hint(self.function.parameters)
+            + 64
+    }
+}
+
 #[derive(Serialize)]
 pub(crate) struct Function<'a> {
     pub(crate) name: &'a str,
@@ -139,6 +148,12 @@ pub(crate) enum TypedMessage<'a> {
     Tool {
         tool_call_id: &'a str,
         content: Text<'a>,
+    },
+    /// Kimi's dynamic tool loading: a system message carrying only `tools`,
+    /// which become callable from this point on. A `content` key is a 400.
+    #[serde(rename = "system")]
+    SystemTools {
+        tools: Vec<Tool<'a>>,
     },
 }
 
@@ -237,6 +252,9 @@ impl Message<'_> {
                 tool_call_id,
                 content,
             }) => 48 + tool_call_id.len() + content.size_hint(),
+            Self::Typed(TypedMessage::SystemTools { tools }) => {
+                32 + tools.iter().map(Tool::size_hint).sum::<usize>()
+            }
         }
     }
 }

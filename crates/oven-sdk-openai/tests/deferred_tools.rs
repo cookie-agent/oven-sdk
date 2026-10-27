@@ -295,3 +295,141 @@ async fn a_streamed_namespace_is_recorded_and_replayed_natively() {
         "a folded tool's call drops its namespace"
     );
 }
+
+mod kimi {
+    use super::*;
+    use oven_sdk_openai::{CompatibleChatDeferredTools, OpenAiCompatibleChatModel};
+
+    fn model(
+        server: &MockServer,
+        deferred_tools: DeferredToolsCapability,
+        dialect: CompatibleChatDeferredTools,
+    ) -> Result<OpenAiCompatibleChatModel, Box<oven_sdk::ModelError>> {
+        let mut config = common::compatible_config(server, "kimi-k3");
+        config.model.capabilities.deferred_tools = deferred_tools;
+        config.settings.deferred_tools = dialect;
+        OpenAiCompatibleChatModel::new(config).map_err(Box::new)
+    }
+
+    async fn send(
+        model: &OpenAiCompatibleChatModel,
+        server: &MockServer,
+        request: Request,
+    ) -> (serde_json::Value, Vec<String>) {
+        let mut stream = model
+            .stream(request, AbortSignal::default())
+            .await
+            .expect("stream")
+            .stream;
+        let warnings = match stream.next().await {
+            Some(Ok(StreamPart::StreamStart { warnings })) => warnings,
+            other => panic!("expected stream_start, got {other:?}"),
+        };
+        while stream.next().await.is_some() {}
+        let received = server.received_requests().await.expect("requests");
+        (
+            serde_json::from_slice(&received.last().expect("request").body).expect("body"),
+            warnings,
+        )
+    }
+
+    #[tokio::test]
+    async fn loads_append_a_system_message_carrying_only_tools() {
+        let server = MockServer::start().await;
+        common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+        let model = model(
+            &server,
+            DeferredToolsCapability::Native,
+            CompatibleChatDeferredTools::SystemMessage,
+        )
+        .expect("model");
+        let request = Request::new(loaded_history(ToolCallPart::new(
+            "call_w",
+            "get_weather",
+            serde_json::json!({}),
+        )))
+        .with_tools(vec![
+            tool("tool_search"),
+            tool("get_weather").deferred(),
+            tool("get_time").deferred(),
+        ]);
+        let (body, _) = send(&model, &server, request).await;
+        let names: Vec<_> = body["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(names, ["tool_search"]);
+        let messages = body["messages"].as_array().expect("messages");
+        let load = messages
+            .iter()
+            .position(|message| message["role"] == "tool" && message["tool_call_id"] == "call_s")
+            .expect("load result");
+        assert_eq!(messages[load]["content"], "Loaded tools: get_weather");
+        let tools_message = &messages[load + 1];
+        assert_eq!(tools_message["role"], "system");
+        assert!(
+            tools_message.get("content").is_none(),
+            "Kimi rejects content beside tools"
+        );
+        assert_eq!(tools_message["tools"][0]["function"]["name"], "get_weather");
+        assert_eq!(tools_message["tools"].as_array().expect("tools").len(), 1);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.get("tools").is_some())
+                .count(),
+            1,
+            "only the load adds a tools message"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_deferral_needs_a_dialect() {
+        let server = MockServer::start().await;
+        assert!(
+            model(
+                &server,
+                DeferredToolsCapability::Native,
+                CompatibleChatDeferredTools::Unsupported,
+            )
+            .is_err()
+        );
+        let mut official = common::official_chat_config(&server, "gpt-4o-mini");
+        official.model.capabilities.deferred_tools = DeferredToolsCapability::Native;
+        assert!(oven_sdk_openai::OpenAiChatModel::new(official).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_dialect_without_native_declaration_sends_tools_up_front() {
+        let server = MockServer::start().await;
+        common::mount(&server, "/chat/completions", common::chat_document("ok")).await;
+        let model = model(
+            &server,
+            DeferredToolsCapability::Unsupported,
+            CompatibleChatDeferredTools::SystemMessage,
+        )
+        .expect("model");
+        let request = Request::new(loaded_history(ToolCallPart::new(
+            "call_w",
+            "get_weather",
+            serde_json::json!({}),
+        )))
+        .with_tools(vec![tool("tool_search"), tool("get_weather").deferred()]);
+        let (body, warnings) = send(&model, &server, request).await;
+        assert_eq!(body["tools"].as_array().expect("tools").len(), 2);
+        assert!(
+            body["messages"]
+                .as_array()
+                .expect("messages")
+                .iter()
+                .all(|message| message.get("tools").is_none())
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("sent up front"))
+        );
+    }
+}

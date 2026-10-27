@@ -16,11 +16,11 @@ use crate::{
         state::{ChatChunk, State},
     },
     configuration::{
-        MaxTokensField, OpenAiAuth, OpenAiChatSettings, OpenAiCompatibleAuth,
-        OpenAiCompatibleChatSettings, OpenAiNoAuth, ReasoningField, StructuredOutputSupport,
-        SystemMessageRole, build_client, canonical_endpoint, compatible_base_headers,
-        compatible_headers, header_scope_component, no_auth_base_headers, official_base_headers,
-        official_headers, replay_resource_id, validate_chat_declaration,
+        CompatibleChatDeferredTools, MaxTokensField, OpenAiAuth, OpenAiChatSettings,
+        OpenAiCompatibleAuth, OpenAiCompatibleChatSettings, OpenAiNoAuth, ReasoningField,
+        StructuredOutputSupport, SystemMessageRole, build_client, canonical_endpoint,
+        compatible_base_headers, compatible_headers, header_scope_component, no_auth_base_headers,
+        official_base_headers, official_headers, replay_resource_id, validate_chat_declaration,
         validate_routing_discriminator,
     },
     error::classify_error,
@@ -105,6 +105,7 @@ impl OpenAiChatModel {
             config.settings.reasoning_field,
             config.settings.stream_usage,
             false,
+            CompatibleChatDeferredTools::Unsupported,
         )?;
         validate_routing_discriminator(false, config.settings.routing_discriminator.as_deref())?;
         let adapter_id = AdapterId::new(OPENAI_CHAT_ADAPTER_ID);
@@ -115,6 +116,7 @@ impl OpenAiChatModel {
         )?;
         let profile = OwnedProfile {
             compatible: false,
+            deferred_tools: CompatibleChatDeferredTools::Unsupported,
             system_role: config.settings.system_message_role,
             max_tokens_field: config.settings.max_tokens_field,
             stream_usage: config.settings.stream_usage,
@@ -184,6 +186,7 @@ impl OpenAiCompatibleChatModel {
             config.settings.reasoning_field,
             config.settings.stream_usage,
             true,
+            config.settings.deferred_tools,
         )?;
         validate_routing_discriminator(false, config.settings.routing_discriminator.as_deref())?;
         let adapter_id = config.settings.adapter_id.clone();
@@ -194,6 +197,7 @@ impl OpenAiCompatibleChatModel {
         )?;
         let profile = OwnedProfile {
             compatible: true,
+            deferred_tools: config.settings.deferred_tools,
             system_role: config.settings.system_message_role,
             max_tokens_field: config.settings.max_tokens_field,
             stream_usage: config.settings.stream_usage,
@@ -245,6 +249,7 @@ impl OpenAiCompatibleChatModel {
 #[derive(Clone)]
 struct OwnedProfile {
     compatible: bool,
+    deferred_tools: CompatibleChatDeferredTools,
     system_role: SystemMessageRole,
     max_tokens_field: MaxTokensField,
     stream_usage: bool,
@@ -256,6 +261,7 @@ impl OwnedProfile {
     fn wire(&self) -> request::ChatWireProfile {
         request::ChatWireProfile {
             compatible: self.compatible,
+            deferred_tools: self.deferred_tools,
             system_role: self.system_role,
             max_tokens_field: self.max_tokens_field,
             stream_usage: self.stream_usage,
