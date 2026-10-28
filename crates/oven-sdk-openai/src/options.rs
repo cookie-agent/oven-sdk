@@ -53,6 +53,11 @@ pub struct OpenAiResponsesOptions {
     pub prompt_cache_retention: Option<OpenAiPromptCacheRetention>,
     /// GPT-5.6+ prompt-cache mode and TTL controls.
     pub prompt_cache_options: Option<OpenAiPromptCacheOptions>,
+    /// Rendered input tokens past which the server compacts in the stream;
+    /// sent only by models with
+    /// [`OpenAiResponsesCompaction::InStream`](crate::OpenAiResponsesCompaction::InStream).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_threshold: Option<u64>,
 }
 
 /// OpenAI prompt-cache retention policy.

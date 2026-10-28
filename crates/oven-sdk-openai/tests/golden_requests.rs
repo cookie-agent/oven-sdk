@@ -254,6 +254,7 @@ fn responses_options() -> OpenAiResponsesOptions {
             ttl: Some(OpenAiPromptCacheTtl::TwelveHours),
             prewarm: None,
         }),
+        compact_threshold: None,
     }
 }
 

@@ -73,6 +73,7 @@ impl OpenAiResponsesModel {
                     "compaction_unsupported"
                 }
                 crate::configuration::OpenAiResponsesCompaction::V1 => "responses_compact_v1",
+                crate::configuration::OpenAiResponsesCompaction::InStream => "responses_in_stream",
             },
         ])?;
         let scope = NativeContextScope::new(
@@ -92,6 +93,7 @@ impl OpenAiResponsesModel {
                 base_headers,
                 client,
                 wire_profile: config.settings.wire_profile,
+                compaction: config.settings.compaction,
                 timeouts: config.settings.timeouts,
             }),
         })
@@ -162,6 +164,7 @@ impl OpenAiResponsesModel {
                 base_headers,
                 client,
                 wire_profile: config.settings.wire_profile,
+                compaction: config.settings.compaction,
                 timeouts: config.settings.timeouts,
             }),
         })
@@ -184,6 +187,7 @@ struct Runtime {
     base_headers: HeaderMap,
     client: reqwest::Client,
     wire_profile: OpenAiResponsesWireProfile,
+    compaction: crate::configuration::OpenAiResponsesCompaction,
     timeouts: OpenAiTimeouts,
 }
 
@@ -424,6 +428,7 @@ impl LanguageModel for OpenAiResponsesModel {
                 &scope,
                 policy,
                 self.runtime.wire_profile,
+                self.runtime.compaction,
             )?;
             let (response, mut head) = self
                 .runtime

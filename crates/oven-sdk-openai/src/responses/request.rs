@@ -22,7 +22,7 @@ fn native_deferral(request: &Request, descriptor: &LanguageModelDescriptor) -> b
 }
 
 use crate::{
-    configuration::OpenAiResponsesWireProfile,
+    configuration::{OpenAiResponsesCompaction, OpenAiResponsesWireProfile},
     options::{
         OpenAiResponsesCompactionOptions, OpenAiResponsesOptions, PromptCacheSurface,
         prompt_cache_breakpoint, validate_prompt_cache_controls, validate_prompt_cache_key,
@@ -138,8 +138,22 @@ pub(crate) fn encode_request(
     scope: &NativeContextScope,
     policy: ReplayPolicy,
     profile: OpenAiResponsesWireProfile,
+    compaction: OpenAiResponsesCompaction,
 ) -> Result<Encoded, ModelError> {
     let (input, replay_outcome, mut warnings) = encode_input(request, descriptor, scope, policy)?;
+    let context_management = match (options.compact_threshold, compaction) {
+        (Some(threshold), OpenAiResponsesCompaction::InStream) => Some([body::ContextManagement {
+            kind: "compaction",
+            compact_threshold: threshold,
+        }]),
+        (Some(_), _) => {
+            warnings.push(
+                "`compact_threshold` dropped: the model does not compact in the stream".into(),
+            );
+            None
+        }
+        (None, _) => None,
+    };
     let mut size_hint = input.iter().map(Item::size_hint).sum::<usize>();
     let mut include = options
         .include
@@ -181,6 +195,7 @@ pub(crate) fn encode_request(
         tools,
         tool_choice,
         text: text_config(request, options.verbosity.as_deref()),
+        context_management,
     };
     if profile == OpenAiResponsesWireProfile::ChatGptTokenSharing {
         // The plan manages output length; every request carries a limit, so

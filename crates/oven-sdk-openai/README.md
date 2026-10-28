@@ -102,6 +102,17 @@ that refuses the operation rather than the token
 A token source requires a `routing_discriminator`, the account identity that
 replay is bound to instead of the token.
 
+`OpenAiResponsesCompaction::InStream` is OpenAI's server-side compaction
+inside ordinary `/responses` requests. A request whose
+`OpenAiResponsesOptions.compact_threshold` is set sends
+`context_management: [{"type": "compaction", "compact_threshold": N}]`, and
+the server compacts once the rendered input crosses `N`, streaming
+`compaction` items beside the answer and ending with an empty terminal
+`output`, which the adapter accepts. The items are kept in the turn's
+native replay and replayed to the same model only; another model replays the
+turn without them. There is no standalone compact call, so the model declares
+compaction unsupported.
+
 `OpenAiResponsesSettings.wire_profile = ChatGptTokenSharing` targets OpenAI's
 Sign in with ChatGPT token sharing on `api.openai.com/v1`. It drops the fields
 that route refuses: `max_output_tokens` silently, and `temperature`, `top_p`,

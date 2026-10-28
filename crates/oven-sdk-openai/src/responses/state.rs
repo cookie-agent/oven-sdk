@@ -391,11 +391,23 @@ impl State {
             .map(std::mem::take)
             .unwrap_or_default();
         let output_len = output.len() as u64;
-        if self
-            .items
-            .keys()
-            .chain(self.functions.keys())
-            .any(|index| *index >= output_len)
+        // A response the server compacted in the stream ends with an empty
+        // `output`: the items its stream finalized are the response.
+        let compacted = output.is_empty()
+            && self
+                .items
+                .values()
+                .any(|item| item.get("type").and_then(JsonValue::as_str) == Some("compaction"))
+            && self
+                .items
+                .keys()
+                .all(|index| self.finalized.contains(index));
+        if !compacted
+            && self
+                .items
+                .keys()
+                .chain(self.functions.keys())
+                .any(|index| *index >= output_len)
         {
             return Err(invalid_finalize(
                 "Responses terminal output omitted a streamed item",

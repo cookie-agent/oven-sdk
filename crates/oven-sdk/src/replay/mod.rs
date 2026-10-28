@@ -125,9 +125,17 @@ pub fn eligible_responses_items<'a>(
     warnings: &mut Vec<String>,
 ) -> Result<Vec<&'a JsonValue>, ModelError> {
     let same_model = artifact.source_wire_model_id() == Some(target);
-    let before = items.len();
-    let items = items
+    // Compaction state is the model's own, like encrypted reasoning; another
+    // model continues from the turns it summarized instead.
+    let kept = items
         .iter()
+        .filter(|item| {
+            same_model || item.get("type").and_then(JsonValue::as_str) != Some("compaction")
+        })
+        .collect::<Vec<_>>();
+    let before = kept.len();
+    let items = kept
+        .into_iter()
         .filter(|item| {
             item.get("type").and_then(JsonValue::as_str) != Some("reasoning")
                 || reasoning_supported

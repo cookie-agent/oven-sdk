@@ -46,6 +46,16 @@ pub(crate) struct Body<'a> {
     pub(crate) tool_choice: Option<ToolChoice<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) text: Option<TextConfig<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) context_management: Option<[ContextManagement; 1]>,
+}
+
+/// One `context_management` entry: server-side compaction past a threshold.
+#[derive(Serialize)]
+pub(crate) struct ContextManagement {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) compact_threshold: u64,
 }
 
 /// `POST /responses/compact` body.

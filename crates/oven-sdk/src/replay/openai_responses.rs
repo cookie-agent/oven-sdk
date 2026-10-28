@@ -59,6 +59,13 @@ fn semantic_items(items: &[JsonValue]) -> Option<Vec<Semantic<'_>>> {
             "message" => message_semantics(item, &mut semantic)?,
             "reasoning" => reasoning_semantics(item, &mut semantic)?,
             "function_call" => function_semantics(item, &mut semantic)?,
+            // Server-side compaction state: opaque, with no normalized part.
+            "compaction" => exact_keys(
+                item,
+                &["type", "id", "encrypted_content", "created_by"],
+                &["type", "id", "encrypted_content"],
+            )
+            .and_then(|()| non_empty_string(item, "encrypted_content").map(drop))?,
             _ => return None,
         }
     }

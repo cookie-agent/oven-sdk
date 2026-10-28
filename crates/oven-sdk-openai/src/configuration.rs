@@ -267,6 +267,13 @@ pub enum OpenAiResponsesCompaction {
     Unsupported,
     /// Responses v1 standalone `/responses/compact`.
     V1,
+    /// Server-side compaction inside ordinary `/responses` requests: a
+    /// request whose `OpenAiResponsesOptions::compact_threshold` is set sends
+    /// `context_management`, and the server compacts once the rendered input
+    /// crosses it. The `compaction` items it streams are replayed with their
+    /// turn for the same model. There is no standalone compact call, so the
+    /// model declares compaction unsupported.
+    InStream,
 }
 
 /// Request fields a Responses endpoint accepts.
@@ -597,8 +604,16 @@ pub(crate) fn validate_responses_declaration(
         ));
     }
     match (compaction, capabilities.compaction) {
-        (OpenAiResponsesCompaction::Unsupported, oven_sdk::CompactionCapability::Unsupported)
+        (
+            OpenAiResponsesCompaction::Unsupported | OpenAiResponsesCompaction::InStream,
+            oven_sdk::CompactionCapability::Unsupported,
+        )
         | (OpenAiResponsesCompaction::V1, oven_sdk::CompactionCapability::Native) => {}
+        (OpenAiResponsesCompaction::InStream, oven_sdk::CompactionCapability::Native) => {
+            return Err(ModelError::invalid_request(
+                "in-stream compaction has no standalone compact call; declare compaction unsupported",
+            ));
+        }
         (OpenAiResponsesCompaction::Unsupported, oven_sdk::CompactionCapability::Native) => {
             return Err(ModelError::invalid_request(
                 "native compaction requires explicit Responses V1 compaction settings",
