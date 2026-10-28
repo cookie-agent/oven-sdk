@@ -92,6 +92,24 @@ header provider. Dynamic header/auth providers require a non-secret
 It is not an identity gate for standard supported replay blocks. Protected transport/auth headers
 cannot be overridden through ordinary provider headers.
 
+Compatible Responses also accepts `OpenAiCompatibleAuth::token_source`: a
+caller-owned `OpenAiTokenSource` for a Bearer token that expires, such as an
+OAuth access token. The adapter awaits it before each request (bounded by
+`OpenAiTimeouts.credentials`). On a `401` authentication refusal it reports
+the sent token through `rejected` and retries once with a fresh one; a `401`
+that refuses the operation rather than the token
+(`rejected_by_hardened_oauth_boundary`) is `Unsupported` and is not retried.
+A token source requires a `routing_discriminator`, the account identity that
+replay is bound to instead of the token.
+
+`OpenAiResponsesSettings.wire_profile = ChatGptTokenSharing` targets OpenAI's
+Sign in with ChatGPT token sharing on `api.openai.com/v1`. It drops the fields
+that route refuses: `max_output_tokens` silently, and `temperature`, `top_p`,
+`user`, `service_tier`, `truncation`, `prompt_cache_retention`, and
+`prompt_cache_options` with a stream warning each. The route's
+`subscription_sharing_*` error codes classify as quota, overload, permission,
+unsupported, or invalid-request errors regardless of their HTTP status.
+
 ## Mapping from models.dev
 
 Applications may use models.dev or another catalog as configuration input, but

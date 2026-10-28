@@ -22,6 +22,7 @@ fn native_deferral(request: &Request, descriptor: &LanguageModelDescriptor) -> b
 }
 
 use crate::{
+    configuration::OpenAiResponsesWireProfile,
     options::{
         OpenAiResponsesCompactionOptions, OpenAiResponsesOptions, PromptCacheSurface,
         prompt_cache_breakpoint, validate_prompt_cache_controls, validate_prompt_cache_key,
@@ -136,8 +137,9 @@ pub(crate) fn encode_request(
     descriptor: &LanguageModelDescriptor,
     scope: &NativeContextScope,
     policy: ReplayPolicy,
+    profile: OpenAiResponsesWireProfile,
 ) -> Result<Encoded, ModelError> {
-    let (input, replay_outcome, warnings) = encode_input(request, descriptor, scope, policy)?;
+    let (input, replay_outcome, mut warnings) = encode_input(request, descriptor, scope, policy)?;
     let mut size_hint = input.iter().map(Item::size_hint).sum::<usize>();
     let mut include = options
         .include
@@ -159,7 +161,7 @@ pub(crate) fn encode_request(
     size_hint += tools.as_ref().map_or(0, |tools| {
         tools.iter().map(body::FunctionTool::size_hint).sum()
     });
-    let body = body::Body {
+    let mut body = body::Body {
         model: descriptor.identity.model_id.as_str(),
         input,
         stream: true,
@@ -180,6 +182,38 @@ pub(crate) fn encode_request(
         tool_choice,
         text: text_config(request, options.verbosity.as_deref()),
     };
+    if profile == OpenAiResponsesWireProfile::ChatGptTokenSharing {
+        // The plan manages output length; every request carries a limit, so
+        // dropping it is not worth a warning.
+        body.max_output_tokens = None;
+        let mut dropped = Vec::new();
+        if body.temperature.take().is_some() {
+            dropped.push("temperature");
+        }
+        if body.top_p.take().is_some() {
+            dropped.push("top_p");
+        }
+        if body.user.take().is_some() {
+            dropped.push("user");
+        }
+        if body.service_tier.take().is_some() {
+            dropped.push("service_tier");
+        }
+        if body.truncation.take().is_some() {
+            dropped.push("truncation");
+        }
+        if body.prompt_cache_retention.take().is_some() {
+            dropped.push("prompt_cache_retention");
+        }
+        if body.prompt_cache_options.take().is_some() {
+            dropped.push("prompt_cache_options");
+        }
+        warnings.extend(
+            dropped.into_iter().map(|field| {
+                format!("`{field}` dropped: ChatGPT token sharing does not accept it")
+            }),
+        );
+    }
     Ok(Encoded {
         body: to_body(
             &body,
@@ -197,17 +231,22 @@ pub(crate) fn encode_compaction_request(
     descriptor: &LanguageModelDescriptor,
     scope: &NativeContextScope,
     policy: ReplayPolicy,
+    profile: OpenAiResponsesWireProfile,
 ) -> Result<Encoded, ModelError> {
     let (input, replay, warnings) = encode_input(&request.request, descriptor, scope, policy)?;
     let size_hint = input.iter().map(Item::size_hint).sum::<usize>();
+    let sharing = profile == OpenAiResponsesWireProfile::ChatGptTokenSharing;
     let body = body::CompactionBody {
         model: descriptor.identity.model_id.as_str(),
         input,
         instructions: options.instructions.as_deref(),
         prompt_cache_key: options.prompt_cache_key.as_deref(),
-        prompt_cache_options: options.prompt_cache_options.as_ref(),
-        prompt_cache_retention: options.prompt_cache_retention.as_deref(),
-        service_tier: options.service_tier.as_deref(),
+        prompt_cache_options: options.prompt_cache_options.as_ref().filter(|_| !sharing),
+        prompt_cache_retention: options
+            .prompt_cache_retention
+            .as_deref()
+            .filter(|_| !sharing),
+        service_tier: options.service_tier.as_deref().filter(|_| !sharing),
     };
     Ok(Encoded {
         body: to_body(&body, size_hint, || {

@@ -38,6 +38,7 @@ fn short_timeouts() -> OpenAiTimeouts {
         connect: Duration::from_secs(1),
         headers: Duration::from_secs(1),
         stream_idle: Duration::from_millis(50),
+        credentials: Duration::from_secs(1),
     }
 }
 

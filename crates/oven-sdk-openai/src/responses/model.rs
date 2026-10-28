@@ -11,8 +11,8 @@ use oven_sdk::{
 
 use crate::{
     configuration::{
-        OpenAiAuth, OpenAiCompatibleAuth, OpenAiResponsesSettings, build_client,
-        canonical_endpoint, compatible_base_headers, compatible_headers,
+        OpenAiAuth, OpenAiCompatibleAuth, OpenAiResponsesSettings, OpenAiResponsesWireProfile,
+        build_client, canonical_endpoint, compatible_base_headers, compatible_headers,
         header_map_scope_component, header_scope_component, official_base_headers,
         official_headers, replay_resource_id, validate_responses_declaration,
         validate_routing_discriminator,
@@ -28,8 +28,9 @@ use crate::{
         responses::{COMPACT_PATH, PATH},
     },
 };
+use oven_sdk::SecretString;
 use oven_sdk::provider_support::parse_json_object;
-use reqwest::header::{CONTENT_TYPE, HeaderMap};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 
 /// A configured official OpenAI Responses model.
 #[derive(Clone)]
@@ -90,6 +91,7 @@ impl OpenAiResponsesModel {
                 headers: config.provider.headers,
                 base_headers,
                 client,
+                wire_profile: config.settings.wire_profile,
                 timeouts: config.settings.timeouts,
             }),
         })
@@ -115,6 +117,18 @@ impl OpenAiResponsesModel {
                     == crate::configuration::OpenAiResponsesCompaction::V1,
             config.settings.routing_discriminator.as_deref(),
         )?;
+        if config.provider.auth.token_source.is_some() {
+            if config.provider.auth.bearer.is_some()
+                || config.provider.auth.header_provider.is_some()
+            {
+                return Err(ModelError::invalid_request(
+                    "a refreshing token source cannot be combined with Bearer or header-provider authentication",
+                ));
+            }
+            // The token may switch accounts between requests, so replay must be
+            // bound to a stable account identity rather than to the token.
+            validate_routing_discriminator(true, config.settings.routing_discriminator.as_deref())?;
+        }
         let descriptor = LanguageModelDescriptor::new(
             ModelIdentity::new(config.provider.id.clone(), config.model.id.clone())?,
             adapter_id.clone(),
@@ -147,6 +161,7 @@ impl OpenAiResponsesModel {
                 headers: config.provider.headers,
                 base_headers,
                 client,
+                wire_profile: config.settings.wire_profile,
                 timeouts: config.settings.timeouts,
             }),
         })
@@ -168,8 +183,29 @@ struct Runtime {
     headers: oven_sdk::HeaderConfig,
     base_headers: HeaderMap,
     client: reqwest::Client,
+    wire_profile: OpenAiResponsesWireProfile,
     timeouts: OpenAiTimeouts,
 }
+
+/// Messages for the failures of one kind of POST, kept per kind so request
+/// and compaction errors stay distinguishable.
+struct PostMessages {
+    headers_timeout: &'static str,
+    transport: &'static str,
+    aborted: &'static str,
+}
+
+const RESPONSES_POST: PostMessages = PostMessages {
+    headers_timeout: "response headers timed out",
+    transport: "OpenAI Responses request failed",
+    aborted: "request was aborted before response headers",
+};
+
+const COMPACTION_POST: PostMessages = PostMessages {
+    headers_timeout: "compaction response headers timed out",
+    transport: "OpenAI Responses compaction request failed",
+    aborted: "native compaction was aborted before response headers",
+};
 
 #[derive(Clone)]
 enum Authentication {
@@ -183,10 +219,15 @@ impl Runtime {
             return Ok(self.scope.clone());
         }
         // Resolve routing/auth callbacks once, then bind replay to the exact headers sent.
+        // A refreshing token changes hourly; its account is in the routing discriminator.
+        let mut scoped = headers.clone();
+        if self.token_source().is_some() {
+            scoped.remove(AUTHORIZATION);
+        }
         let resource_id = replay_resource_id(&[
             "compatible-responses-effective-headers-v1",
             self.scope.resource_id.as_str(),
-            &header_map_scope_component(headers),
+            &header_map_scope_component(&scoped),
         ])?;
         NativeContextScope::new(
             self.scope.provider_id.clone(),
@@ -203,6 +244,111 @@ impl Runtime {
             Authentication::Compatible(auth) => {
                 compatible_headers(auth, &self.base_headers, &self.headers, context)
             }
+        }
+    }
+
+    fn token_source(&self) -> Option<&Arc<dyn crate::OpenAiTokenSource>> {
+        match &self.auth {
+            Authentication::Compatible(auth) => auth.token_source.as_ref(),
+            Authentication::Official(_) => None,
+        }
+    }
+
+    /// Request headers with the token source's Bearer, which is returned too
+    /// so a refusal can be reported against it.
+    async fn resolve_headers(
+        &self,
+        context: &oven_sdk::HeaderContext,
+        abort: &AbortSignal,
+    ) -> Result<(HeaderMap, Option<SecretString>), ModelError> {
+        let mut headers = self.request_headers(context)?;
+        let Some(source) = self.token_source() else {
+            return Ok((headers, None));
+        };
+        if oven_sdk::contains_auth_owned_header(&headers) {
+            return Ok((headers, None));
+        }
+        let token = tokio::select! {
+            result = tokio::time::timeout(self.timeouts.credentials, source.token()) => result
+                .map_err(|_| ModelError::timeout("OpenAI token source timed out").with_stage(ErrorStage::Connect))??,
+            _ = abort.aborted() => return Err(ModelError::abort("request was aborted during token resolution").with_stage(ErrorStage::Connect)),
+        };
+        if token.is_empty() {
+            return Err(ModelError::new(
+                oven_sdk::ModelErrorKind::Auth,
+                "OpenAI token source returned an empty token",
+            )
+            .with_stage(ErrorStage::Connect));
+        }
+        let mut value = HeaderValue::from_str(&format!("Bearer {}", token.expose_secret()))
+            .map_err(|_| {
+                ModelError::new(
+                    oven_sdk::ModelErrorKind::Auth,
+                    "OpenAI token source returned an invalid token",
+                )
+                .with_stage(ErrorStage::Connect)
+            })?;
+        value.set_sensitive(true);
+        headers.insert(AUTHORIZATION, value);
+        Ok((headers, Some(token)))
+    }
+
+    /// POSTs `body` to `path` and returns the successful response with its
+    /// response head. A `401` authentication refusal of a token-source token
+    /// is reported to the source and retried once with a fresh token.
+    async fn post(
+        &self,
+        path: &str,
+        body: bytes::Bytes,
+        resolved: (HeaderMap, Option<SecretString>),
+        context: &oven_sdk::HeaderContext,
+        abort: &AbortSignal,
+        messages: &PostMessages,
+    ) -> Result<(reqwest::Response, oven_sdk::ResponseHead), ModelError> {
+        let (mut headers, mut token) = resolved;
+        let mut retried = false;
+        loop {
+            let send = self
+                .client
+                .post(format!("{}/{path}", self.api.trim_end_matches('/')))
+                .header(CONTENT_TYPE, "application/json")
+                .headers(headers.clone())
+                .body(body.clone())
+                .send();
+            let response = tokio::select! {
+                value = tokio::time::timeout(self.timeouts.headers, send) => value
+                    .map_err(|_| ModelError::timeout(messages.headers_timeout).with_stage(ErrorStage::ResponseHeaders))?
+                    .map_err(|_| ModelError::transport(messages.transport).with_stage(ErrorStage::Connect))?,
+                _ = abort.aborted() => return Err(ModelError::abort(messages.aborted).with_stage(ErrorStage::Connect)),
+            };
+            let head = crate::transport::response_head(&response, &["x-request-id".into()]);
+            if response.status().is_success() {
+                return Ok((response, head));
+            }
+            let status = response.status().as_u16();
+            let error_headers = response.headers().clone();
+            let (error_body, bytes) =
+                crate::transport::read_error_body(response, abort, self.timeouts.stream_idle)
+                    .await?;
+            let error = classify_error(
+                status,
+                &error_body,
+                head.request_id.clone(),
+                ErrorStage::ResponseBody,
+                bytes,
+                &error_headers,
+            );
+            if !retried
+                && status == 401
+                && error.kind == oven_sdk::ModelErrorKind::Auth
+                && let (Some(source), Some(sent)) = (self.token_source(), token.as_ref())
+            {
+                source.rejected(sent);
+                retried = true;
+                (headers, token) = self.resolve_headers(context, abort).await?;
+                continue;
+            }
+            return Err(error);
         }
     }
 }
@@ -266,46 +412,30 @@ impl LanguageModel for OpenAiResponsesModel {
             }
             let descriptor = self.runtime.descriptor.clone();
             let policy = descriptor.capabilities.replay.policy;
-            let headers = self
+            let (headers, token) = self
                 .runtime
-                .request_headers(&request_value.header_context)?;
+                .resolve_headers(&request_value.header_context, &abort)
+                .await?;
             let scope = self.runtime.request_replay_scope(&headers)?;
-            let encoded =
-                request::encode_request(&request_value, &options, &descriptor, &scope, policy)?;
-            let send = self
+            let encoded = request::encode_request(
+                &request_value,
+                &options,
+                &descriptor,
+                &scope,
+                policy,
+                self.runtime.wire_profile,
+            )?;
+            let (response, mut head) = self
                 .runtime
-                .client
-                .post(format!("{}/{PATH}", self.runtime.api.trim_end_matches('/')))
-                .header(CONTENT_TYPE, "application/json")
-                .headers(headers)
-                .body(encoded.body)
-                .send();
-            let response = tokio::select! {
-                value = tokio::time::timeout(self.runtime.timeouts.headers, send) => value
-                    .map_err(|_| ModelError::timeout("response headers timed out").with_stage(ErrorStage::ResponseHeaders))?
-                    .map_err(|_| ModelError::transport("OpenAI Responses request failed").with_stage(ErrorStage::Connect))?,
-                _ = abort.aborted() => return Err(ModelError::abort("request was aborted before response headers").with_stage(ErrorStage::Connect)),
-            };
-            let mut head = crate::transport::response_head(&response, &["x-request-id".into()]);
-            if !response.status().is_success() {
-                let status = response.status().as_u16();
-                let error_headers = response.headers().clone();
-                let request_id = head.request_id.clone();
-                let (body, bytes) = crate::transport::read_error_body(
-                    response,
+                .post(
+                    PATH,
+                    bytes::Bytes::from(encoded.body),
+                    (headers, token),
+                    &request_value.header_context,
                     &abort,
-                    self.runtime.timeouts.stream_idle,
+                    &RESPONSES_POST,
                 )
                 .await?;
-                return Err(classify_error(
-                    status,
-                    &body,
-                    request_id,
-                    ErrorStage::ResponseBody,
-                    bytes,
-                    &error_headers,
-                ));
-            }
             let response_headers = response.headers().clone();
             if !response
                 .headers()
@@ -398,6 +528,7 @@ impl LanguageModel for OpenAiResponsesModel {
                 &descriptor,
                 &self.runtime.scope,
                 descriptor.capabilities.replay.policy,
+                self.runtime.wire_profile,
             )?;
             if !encoded.warnings.is_empty() {
                 return Err(ModelError::native_context(
@@ -407,46 +538,21 @@ impl LanguageModel for OpenAiResponsesModel {
             }
             let body = encoded.body;
             compaction::validate_request_size(body.len())?;
-            let headers = self
+            let (headers, token) = self
                 .runtime
-                .request_headers(&compaction_request.request.header_context)?;
-            let send = self
+                .resolve_headers(&compaction_request.request.header_context, &abort)
+                .await?;
+            let (response, mut head) = self
                 .runtime
-                .client
-                .post(format!(
-                    "{}/{COMPACT_PATH}",
-                    self.runtime.api.trim_end_matches('/')
-                ))
-                .header(CONTENT_TYPE, "application/json")
-                .headers(headers)
-                .body(body)
-                .send();
-            let response = tokio::select! {
-                value = tokio::time::timeout(self.runtime.timeouts.headers, send) => value
-                    .map_err(|_| ModelError::timeout("compaction response headers timed out").with_stage(ErrorStage::ResponseHeaders))?
-                    .map_err(|_| ModelError::transport("OpenAI Responses compaction request failed").with_stage(ErrorStage::Connect))?,
-                _ = abort.aborted() => return Err(ModelError::abort("native compaction was aborted before response headers").with_stage(ErrorStage::Connect)),
-            };
-            let mut head = crate::transport::response_head(&response, &["x-request-id".into()]);
-            if !response.status().is_success() {
-                let status = response.status().as_u16();
-                let error_headers = response.headers().clone();
-                let request_id = head.request_id.clone();
-                let (body, bytes) = crate::transport::read_error_body(
-                    response,
+                .post(
+                    COMPACT_PATH,
+                    bytes::Bytes::from(body),
+                    (headers, token),
+                    &compaction_request.request.header_context,
                     &abort,
-                    self.runtime.timeouts.stream_idle,
+                    &COMPACTION_POST,
                 )
                 .await?;
-                return Err(classify_error(
-                    status,
-                    &body,
-                    request_id,
-                    ErrorStage::ResponseBody,
-                    bytes,
-                    &error_headers,
-                ));
-            }
             if !response
                 .headers()
                 .get(CONTENT_TYPE)

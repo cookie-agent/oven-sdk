@@ -28,9 +28,12 @@ pub(crate) fn classify_error(
         .pointer("/error/type")
         .and_then(JsonValue::as_str)
         .unwrap_or("");
+    // ChatGPT token sharing answers some refusals before the stream with a
+    // bare `{"detail": "..."}`.
     let provider_message = value
         .pointer("/error/message")
         .or_else(|| value.get("message"))
+        .or_else(|| value.get("detail"))
         .and_then(JsonValue::as_str)
         .unwrap_or("OpenAI request failed");
     let lower = format!(
@@ -40,6 +43,8 @@ pub(crate) fn classify_error(
     .to_lowercase();
     let mut error = if has_model_code(&value) {
         ModelError::new(ModelErrorKind::ModelNotFound, "OpenAI request failed")
+    } else if let Some(error) = token_sharing_error(&lower) {
+        error
     } else if status == 401 || lower.contains("auth") || lower.contains("api key") {
         ModelError::new(ModelErrorKind::Auth, "OpenAI request failed")
     } else if status == 403 || lower.contains("permission") {
@@ -80,6 +85,31 @@ pub(crate) fn classify_error(
         error = error.with_retry_after(delay);
     }
     error
+}
+
+/// The refusals of ChatGPT token sharing whose HTTP status misleads: a `401`
+/// for an operation the credential may not use, a `429` for an exhausted
+/// plan, and `503`s for usage the plan cannot report now.
+fn token_sharing_error(lower: &str) -> Option<ModelError> {
+    let error = if lower.contains("rejected_by_hardened_oauth_boundary")
+        || lower.contains("hardened_oauth_rule_missing")
+        || lower.contains("subscription_sharing_route_not_supported")
+    {
+        ModelError::unsupported("OpenAI request failed")
+    } else if lower.contains("subscription_sharing_usage_limit_exceeded") {
+        ModelError::new(ModelErrorKind::Quota, "OpenAI request failed")
+    } else if lower.contains("subscription_sharing_usage_unavailable")
+        || lower.contains("subscription_sharing_user_unavailable")
+    {
+        ModelError::new(ModelErrorKind::Overload, "OpenAI request failed").with_retryable(true)
+    } else if lower.contains("subscription_sharing_user_not_eligible") {
+        ModelError::new(ModelErrorKind::PermissionDenied, "OpenAI request failed")
+    } else if lower.contains("subscription_sharing_unsupported_capability") {
+        ModelError::invalid_request("OpenAI request failed")
+    } else {
+        return None;
+    };
+    Some(error)
 }
 
 fn context_error(lower: &str) -> bool {
@@ -207,5 +237,73 @@ mod tests {
                 .retry_after
                 .is_some_and(|delay| delay <= Duration::from_secs(5))
         );
+    }
+
+    #[test]
+    fn token_sharing_refusals_are_typed_by_code_not_status() {
+        let classify = |status, body: &[u8]| {
+            classify_error(
+                status,
+                body,
+                None,
+                ErrorStage::ResponseBody,
+                0,
+                &HeaderMap::new(),
+            )
+        };
+        let hardened = classify(
+            401,
+            br#"{"error":{"message":"This ChatPass credential is not authorized for the requested operation.","type":"rejected_by_hardened_oauth_boundary","code":"hardened_oauth_rule_missing"},"status":401}"#,
+        );
+        assert_eq!(hardened.kind, ModelErrorKind::Unsupported);
+        let exhausted = classify(
+            429,
+            br#"{"error":{"message":"limit","code":"subscription_sharing_usage_limit_exceeded"}}"#,
+        );
+        assert_eq!(exhausted.kind, ModelErrorKind::Quota);
+        assert!(!exhausted.retryable);
+        let unavailable = classify(
+            503,
+            br#"{"error":{"message":"later","code":"subscription_sharing_usage_unavailable"}}"#,
+        );
+        assert_eq!(unavailable.kind, ModelErrorKind::Overload);
+        assert!(unavailable.retryable);
+        let ineligible = classify(
+            403,
+            br#"{"error":{"message":"no","code":"subscription_sharing_user_not_eligible"}}"#,
+        );
+        assert_eq!(ineligible.kind, ModelErrorKind::PermissionDenied);
+        let route = classify(
+            403,
+            br#"{"error":{"message":"no","code":"subscription_sharing_route_not_supported"}}"#,
+        );
+        assert_eq!(route.kind, ModelErrorKind::Unsupported);
+        let invalid_user = classify(
+            401,
+            br#"{"error":{"message":"no","code":"subscription_sharing_invalid_user"}}"#,
+        );
+        assert_eq!(invalid_user.kind, ModelErrorKind::Auth);
+    }
+
+    #[test]
+    fn detail_bodies_classify_by_their_text() {
+        let error = classify_error(
+            400,
+            br#"{"detail":"Unsupported parameter: temperature"}"#,
+            None,
+            ErrorStage::ResponseBody,
+            0,
+            &HeaderMap::new(),
+        );
+        assert_eq!(error.kind, ModelErrorKind::InvalidRequest);
+        let unauthorized = classify_error(
+            401,
+            br#"{"detail":"Unauthorized"}"#,
+            None,
+            ErrorStage::ResponseBody,
+            0,
+            &HeaderMap::new(),
+        );
+        assert_eq!(unauthorized.kind, ModelErrorKind::Auth);
     }
 }

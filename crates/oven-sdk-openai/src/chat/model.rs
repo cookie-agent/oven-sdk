@@ -171,6 +171,11 @@ impl OpenAiCompatibleChatModel {
     ) -> Result<Self, ModelError> {
         config.validate()?;
         config.settings.adapter_id.validate()?;
+        if config.provider.auth.token_source.is_some() {
+            return Err(ModelError::invalid_request(
+                "a refreshing token source is supported by compatible Responses models only",
+            ));
+        }
         if matches!(
             config.settings.adapter_id.as_str(),
             OPENAI_CHAT_ADAPTER_ID | OPENAI_RESPONSES_ADAPTER_ID

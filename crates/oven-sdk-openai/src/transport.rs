@@ -17,6 +17,9 @@ pub struct OpenAiTimeouts {
     pub headers: Duration,
     /// Maximum inactivity while reading stream bytes.
     pub stream_idle: Duration,
+    /// Maximum wait for an [`OpenAiTokenSource`](crate::OpenAiTokenSource)
+    /// token.
+    pub credentials: Duration,
 }
 
 impl Default for OpenAiTimeouts {
@@ -25,6 +28,7 @@ impl Default for OpenAiTimeouts {
             connect: Duration::from_secs(60),
             headers: Duration::from_secs(300),
             stream_idle: Duration::from_secs(300),
+            credentials: Duration::from_secs(30),
         }
     }
 }

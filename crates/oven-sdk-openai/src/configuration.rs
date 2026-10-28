@@ -3,8 +3,8 @@
 use std::{fmt, sync::Arc};
 
 use oven_sdk::{
-    AdapterId, Capability, DynHeaderProvider, HeaderConfig, MediaSourceSupport, Modality,
-    ModelCapabilities, ModelError, ResourceId, SecretString,
+    AdapterId, BoxFuture, Capability, DynHeaderProvider, HeaderConfig, MediaSourceSupport,
+    Modality, ModelCapabilities, ModelError, ResourceId, SecretString,
 };
 use reqwest::{
     Client,
@@ -51,13 +51,34 @@ pub struct OpenAiNoAuth {
     pub project: Option<String>,
 }
 
-/// Explicit authentication for one OpenAI-compatible Chat endpoint.
+/// A caller-managed Bearer token that can expire and be refreshed, such as an
+/// OAuth access token.
+///
+/// The adapter awaits [`token`](Self::token) before each request, so the
+/// caller can refresh there. When the endpoint answers `401` with an
+/// authentication error, the adapter calls [`rejected`](Self::rejected) with
+/// the token it sent and retries the request once with a fresh token.
+pub trait OpenAiTokenSource: Send + Sync {
+    /// Resolves the Bearer token for one request.
+    fn token(&self) -> BoxFuture<'_, Result<SecretString, ModelError>>;
+
+    /// Reports that the endpoint refused `token`; the next
+    /// [`token`](Self::token) call should not return it again.
+    fn rejected(&self, token: &SecretString);
+}
+
+/// Explicit authentication for one OpenAI-compatible Chat or Responses
+/// endpoint.
 #[derive(Clone, Default)]
 pub struct OpenAiCompatibleAuth {
     /// Optional Bearer token.
     pub bearer: Option<SecretString>,
     /// Optional caller-managed authentication header provider.
     pub header_provider: Option<DynHeaderProvider>,
+    /// Optional caller-managed refreshing Bearer token, supported by
+    /// compatible Responses models only. It cannot be combined with `bearer`
+    /// or `header_provider`, and it requires a `routing_discriminator`.
+    pub token_source: Option<Arc<dyn OpenAiTokenSource>>,
 }
 
 impl OpenAiCompatibleAuth {
@@ -72,7 +93,7 @@ impl OpenAiCompatibleAuth {
     pub fn bearer(token: SecretString) -> Self {
         Self {
             bearer: Some(token),
-            header_provider: None,
+            ..Self::default()
         }
     }
 
@@ -80,8 +101,17 @@ impl OpenAiCompatibleAuth {
     #[must_use]
     pub fn headers(provider: Arc<dyn oven_sdk::HeaderProvider>) -> Self {
         Self {
-            bearer: None,
             header_provider: Some(provider),
+            ..Self::default()
+        }
+    }
+
+    /// Creates a caller-managed refreshing Bearer token.
+    #[must_use]
+    pub fn token_source(source: Arc<dyn OpenAiTokenSource>) -> Self {
+        Self {
+            token_source: Some(source),
+            ..Self::default()
         }
     }
 }
@@ -94,6 +124,10 @@ impl fmt::Debug for OpenAiCompatibleAuth {
             .field(
                 "header_provider",
                 &self.header_provider.as_ref().map(|_| "<provider>"),
+            )
+            .field(
+                "token_source",
+                &self.token_source.as_ref().map(|_| "<source>"),
             )
             .finish()
     }
@@ -202,6 +236,8 @@ pub struct OpenAiResponsesSettings {
     pub routing_discriminator: Option<String>,
     /// Explicit standalone Responses compaction surface.
     pub compaction: OpenAiResponsesCompaction,
+    /// Request fields the endpoint accepts.
+    pub wire_profile: OpenAiResponsesWireProfile,
     /// Optional injected HTTP client.
     pub client: Option<Client>,
     /// Transport phase timeouts.
@@ -215,6 +251,7 @@ impl OpenAiResponsesSettings {
         Self {
             routing_discriminator: None,
             compaction: OpenAiResponsesCompaction::Unsupported,
+            wire_profile: OpenAiResponsesWireProfile::Standard,
             client: None,
             timeouts: OpenAiTimeouts::default(),
         }
@@ -230,6 +267,22 @@ pub enum OpenAiResponsesCompaction {
     Unsupported,
     /// Responses v1 standalone `/responses/compact`.
     V1,
+}
+
+/// Request fields a Responses endpoint accepts.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiResponsesWireProfile {
+    /// Every field the official Responses API accepts.
+    #[default]
+    Standard,
+    /// OpenAI's Sign in with ChatGPT token sharing: requests on a ChatGPT
+    /// plan through `api.openai.com/v1`, which refuse `max_output_tokens`,
+    /// sampling, `truncation`, `user`, `service_tier`, and prompt-cache
+    /// retention. `max_output_tokens` is dropped silently, since the plan
+    /// manages output length; every other dropped field is reported as a
+    /// stream warning.
+    ChatGptTokenSharing,
 }
 
 impl Default for OpenAiResponsesSettings {
