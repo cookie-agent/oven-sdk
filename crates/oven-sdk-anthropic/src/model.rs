@@ -55,6 +55,22 @@ struct Config {
     workspace_id: Option<String>,
 }
 
+impl Config {
+    /// Whether a request that omits thinking controls thinks adaptively.
+    fn thinking_default_adaptive(&self) -> bool {
+        matches!(
+            &self.protocol_settings,
+            ProtocolSettings::Anthropic(settings)
+                if settings.thinking_default_active
+                    && matches!(
+                        settings.thinking,
+                        crate::config::AnthropicThinkingSupport::Adaptive
+                            | crate::config::AnthropicThinkingSupport::Both
+                    )
+        )
+    }
+}
+
 #[derive(Clone)]
 struct InnerModel {
     config: Arc<Config>,
@@ -82,11 +98,12 @@ impl InnerModel {
         abort: AbortSignal,
     ) -> BoxFuture<'a, Result<oven_sdk::StreamResponse, ModelError>> {
         Box::pin(async move {
-            let options = crate::request::parse_options(
+            let mut options = crate::request::parse_options(
                 &request,
                 self.config.protocol,
                 self.config.compatible,
             )?;
+            options.thinking_default_adaptive = self.config.thinking_default_adaptive();
             crate::request::validate_request(
                 &request,
                 &options,

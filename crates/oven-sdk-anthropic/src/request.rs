@@ -6,15 +6,15 @@ use bytes::Bytes;
 use oven_sdk::{
     AssistantPart, Capability, ContentValue, DeferredTools, DeferredToolsCapability, ErrorStage,
     FileSource, HistoryTurn, InputPart, JsonValue, LanguageModelDescriptor, ModelCapabilities,
-    ModelError, ReplayDecision, ReplayDisposition, ReplayOutcome, ReplayPolicy, Request,
-    ResponseFormat, ToolChoice, ToolContent, ToolDefinition, ToolResultPart,
+    ModelError, ReasoningBinding, ReplayDecision, ReplayDisposition, ReplayOutcome, ReplayPolicy,
+    Request, ResponseFormat, ToolChoice, ToolContent, ToolDefinition, ToolResultPart,
 };
 
 use crate::{
     body::{
-        Block, CacheControl, Message, MessagesBody, Metadata, NativeBlock, OutputConfig,
-        OutputFormat, Source, TextValue, Thinking, Tool, ToolChoice as WireToolChoice, ToolInput,
-        ToolResultContent, TypedBlock,
+        Block, BlockBinding, CacheControl, Message, MessagesBody, Metadata, NativeBlock,
+        OutputConfig, OutputFormat, Source, TextValue, Thinking, Tool,
+        ToolChoice as WireToolChoice, ToolInput, ToolResultContent, TypedBlock,
     },
     config::{
         AnthropicApiVersion, AnthropicProtocolSettings, AnthropicThinkingSupport,
@@ -805,6 +805,10 @@ pub(crate) struct ParsedOptions {
     cache_plan: CachePlan,
     strict_tools: Vec<bool>,
     minimax_media: Vec<Vec<Option<MiniMaxMediaOptions>>>,
+    /// Whether the model thinks adaptively when the request omits thinking
+    /// controls, from its protocol settings; set by the model before
+    /// encoding.
+    pub(crate) thinking_default_adaptive: bool,
 }
 
 pub(crate) fn parse_options(
@@ -869,6 +873,7 @@ pub(crate) fn parse_options(
         cache_plan,
         strict_tools,
         minimax_media,
+        thinking_default_adaptive: false,
     })
 }
 
@@ -907,6 +912,10 @@ fn aws_options(request: &Request) -> Result<AnthropicAwsRequestOptions, ModelErr
         .transpose()
         .map(|value| value.unwrap_or_default())
 }
+
+/// The beta that `thinking.block_binding` requires, and that adds
+/// `input_transformations` to every response.
+pub(crate) const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 
 pub(crate) fn encode_request(
     request: &Request,
@@ -1185,6 +1194,7 @@ pub(crate) fn encode_request(
                 mode: "disabled",
                 budget_tokens: None,
                 display: None,
+                block_binding: None,
             },
             AnthropicThinking::Enabled {
                 budget_tokens,
@@ -1193,14 +1203,44 @@ pub(crate) fn encode_request(
                 mode: "enabled",
                 budget_tokens: Some(*budget_tokens),
                 display: display.as_deref(),
+                block_binding: None,
             },
             AnthropicThinking::Adaptive { display } => Thinking {
                 mode: "adaptive",
                 budget_tokens: None,
                 display: display.as_deref(),
+                block_binding: None,
             },
         });
     }
+    // A model that binds replayed reasoning to its prefix is asked to drop a
+    // block whose prefix changed rather than refuse the request. Anthropic
+    // accepts the control with adaptive thinking only, so a model that thinks
+    // adaptively by default is sent its default explicitly to carry it.
+    if protocol.is_first_party()
+        && descriptor.capabilities.replay.reasoning_binding == ReasoningBinding::Prefix
+    {
+        let drop_block = BlockBinding {
+            prefix_mismatch_behavior: "drop_block",
+        };
+        match &mut thinking {
+            Some(thinking) if thinking.mode == "adaptive" => {
+                thinking.block_binding = Some(drop_block);
+            }
+            None if parsed.thinking_default_adaptive => {
+                thinking = Some(Thinking {
+                    mode: "adaptive",
+                    budget_tokens: None,
+                    display: None,
+                    block_binding: Some(drop_block),
+                });
+            }
+            _ => {}
+        }
+    }
+    let binds_reasoning = thinking
+        .as_ref()
+        .is_some_and(|thinking| thinking.block_binding.is_some());
     let mut service_tier = None;
     let mut metadata = None;
     if protocol == Protocol::MiniMax {
@@ -1212,6 +1252,7 @@ pub(crate) fn encode_request(
                 },
                 budget_tokens: None,
                 display: None,
+                block_binding: None,
             });
         }
         service_tier = minimax_opts.service_tier.as_deref();
@@ -1274,6 +1315,7 @@ pub(crate) fn encode_request(
                     && beta.as_str() != "structured-outputs-2025-11-13"
             })
             .cloned()
+            .chain(binds_reasoning.then(|| THINKING_BINDING_BETA.to_owned()))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()

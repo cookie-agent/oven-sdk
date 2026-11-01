@@ -327,6 +327,7 @@ fn capabilities(reasoning_replay: bool) -> ModelCapabilities {
                 ReplayCapability::Optional
             },
             reasoning: reasoning_replay,
+            reasoning_binding: Default::default(),
         },
     }
 }

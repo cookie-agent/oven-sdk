@@ -2532,6 +2532,7 @@ mod tests {
             policy: ReplayPolicy::IfValid,
             capability: ReplayCapability::Optional,
             reasoning: false,
+            reasoning_binding: Default::default(),
         };
         capabilities
     }
@@ -2542,6 +2543,7 @@ mod tests {
             policy,
             capability: ReplayCapability::Required,
             reasoning: false,
+            reasoning_binding: Default::default(),
         };
         capabilities
     }
@@ -3093,6 +3095,7 @@ mod tests {
             policy: oven_sdk::ReplayPolicy::IfValid,
             capability: oven_sdk::ReplayCapability::Optional,
             reasoning: false,
+            reasoning_binding: Default::default(),
         };
         let model = MockLanguageModel::builder()
             .capabilities(replay_capabilities)

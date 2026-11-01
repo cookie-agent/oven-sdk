@@ -42,6 +42,13 @@ pub fn classify_error(
             ModelErrorKind::ModelNotFound,
             "Bedrock model resource was not found",
         )
+    } else if status == 400 && lower.contains("bound to a different conversation") {
+        // Claude refuses a replayed thinking block whose request prefix
+        // changed (`ReasoningBinding::Prefix`).
+        ModelError::new(
+            ModelErrorKind::ReasoningPrefixMismatch,
+            "Bedrock rejected the request",
+        )
     } else if lower.contains("context") && (lower.contains("window") || lower.contains("token")) {
         ModelError::new(
             ModelErrorKind::ContextLength,
@@ -157,6 +164,28 @@ mod tests {
                 &HeaderMap::new(),
             )
         });
+    }
+
+    #[test]
+    fn a_refused_stale_thinking_block_is_a_reasoning_prefix_mismatch() {
+        let classify = |message: &str| {
+            classify_error(
+                400,
+                serde_json::json!({"__type": "ValidationException", "message": message})
+                    .to_string()
+                    .as_bytes(),
+                None,
+                ErrorStage::ResponseBody,
+                0,
+                &HeaderMap::new(),
+            )
+        };
+        let error = classify(
+            "messages.3.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. The `tools` list differs from the one this block was created with.",
+        );
+        assert_eq!(error.kind, ModelErrorKind::ReasoningPrefixMismatch);
+        let error = classify("messages.3.content.0: Invalid `signature` in `thinking` block");
+        assert_eq!(error.kind, ModelErrorKind::InvalidRequest);
     }
 
     #[test]

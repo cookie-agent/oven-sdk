@@ -761,6 +761,7 @@ mod tests {
                 policy: ReplayPolicy::IfValid,
                 capability: ReplayCapability::Optional,
                 reasoning: false,
+                reasoning_binding: Default::default(),
             },
         };
         let declaration =

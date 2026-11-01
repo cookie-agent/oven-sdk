@@ -757,6 +757,9 @@ pub struct Finish {
     pub provider_metadata: ProviderMetadata,
     /// Provider-native replay state, when captured.
     pub native_replay: Option<NativeReplayArtifact>,
+    /// What the provider did to replayed reasoning before the model read it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_transformations: Vec<ReasoningTransformation>,
 }
 
 impl Finish {
@@ -769,8 +772,34 @@ impl Finish {
             response_metadata: ResponseMetadata::new(),
             provider_metadata: ProviderMetadata::new(),
             native_replay: None,
+            reasoning_transformations: Vec::new(),
         }
     }
+}
+
+/// One replayed reasoning block the provider reported changing before the
+/// model read it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReasoningTransformation {
+    /// What happened to the block.
+    pub kind: ReasoningTransformationKind,
+    /// Where the block was in the request, in the provider's notation (for
+    /// Anthropic `messages.{i}.content.{j}`).
+    pub path: String,
+    /// The provider's reason, such as `prefix_binding_mismatch`.
+    pub reason: String,
+}
+
+/// What a provider did to a replayed reasoning block.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningTransformationKind {
+    /// The block was removed before the model read it, with every later
+    /// reasoning block.
+    Dropped,
+    /// The block failed the provider's check, which this request does not
+    /// enforce, and reached the model unchanged.
+    MismatchAllowed,
 }
 
 /// A typed text part.
@@ -2023,6 +2052,11 @@ pub enum ModelErrorKind {
     ContentFilter,
     /// Native replay handling.
     Replay,
+    /// A replayed reasoning block was refused because the request before it
+    /// changed since the block was made ([`ReasoningBinding::Prefix`]).
+    /// Resending without that reasoning succeeds; resending the same body
+    /// fails the same way.
+    ReasoningPrefixMismatch,
     /// Provider-native compacted context handling.
     NativeContext,
     /// Provider-defined failure.
@@ -2052,6 +2086,7 @@ impl ModelErrorKind {
             Self::InvalidToolInput => "invalid_tool_input",
             Self::ContentFilter => "content_filter",
             Self::Replay => "replay",
+            Self::ReasoningPrefixMismatch => "reasoning_prefix_mismatch",
             Self::NativeContext => "native_context",
             Self::Provider => "provider",
             Self::Abort => "abort",
@@ -2819,6 +2854,22 @@ pub enum ReplayCapability {
     Unsupported,
 }
 
+/// Whether a provider binds replayed reasoning to the request prefix it was
+/// made in.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningBinding {
+    /// Replayed reasoning is accepted whatever came before it.
+    #[default]
+    None,
+    /// A replayed reasoning block is accepted only while the system prompt,
+    /// the tools, and every earlier message are unchanged since the block was
+    /// made. Anthropic refuses a changed prefix with a 400
+    /// ([`ModelErrorKind::ReasoningPrefixMismatch`]), or drops the block when
+    /// asked to, and reports it in [`Finish::reasoning_transformations`].
+    Prefix,
+}
+
 /// Explicit native replay declaration.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReplayDeclaration {
@@ -2828,6 +2879,9 @@ pub struct ReplayDeclaration {
     pub capability: ReplayCapability,
     /// Whether replay carries provider-authoritative reasoning state.
     pub reasoning: bool,
+    /// Whether replayed reasoning is bound to the request prefix it was made in.
+    #[serde(default)]
+    pub reasoning_binding: ReasoningBinding,
 }
 
 /// Complete explicit capabilities of one configured model.
@@ -2900,6 +2954,7 @@ impl ModelCapabilities {
                 policy: ReplayPolicy::Never,
                 capability: ReplayCapability::Unsupported,
                 reasoning: false,
+                reasoning_binding: ReasoningBinding::None,
             },
         }
     }

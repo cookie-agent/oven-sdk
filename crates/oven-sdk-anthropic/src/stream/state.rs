@@ -72,6 +72,7 @@ pub(crate) struct State {
     protocol: Protocol,
     adapter_id: AdapterId,
     native_context_scope: NativeContextScope,
+    reasoning_transformations: Vec<oven_sdk::ReasoningTransformation>,
 }
 impl State {
     pub(crate) fn new(
@@ -97,6 +98,7 @@ impl State {
             protocol,
             adapter_id,
             native_context_scope,
+            reasoning_transformations: Vec::new(),
         }
     }
     pub(crate) fn response_metadata(&self) -> &std::collections::BTreeMap<String, JsonValue> {
@@ -191,6 +193,9 @@ impl State {
                     return Err(invalid_event("duplicate message_start", bytes));
                 }
                 self.started = true;
+                if let Some(entries) = value.pointer("/message/input_transformations") {
+                    self.reasoning_transformations = reasoning_transformations(entries);
+                }
                 self.usage = usage(
                     value.pointer("/message/usage").unwrap_or(&JsonValue::Null),
                     bytes,
@@ -520,6 +525,14 @@ impl State {
                     .pointer("/delta/stop_sequence")
                     .and_then(JsonValue::as_str)
                     .map(str::to_owned);
+                // After a server-side fallback the final delta carries the
+                // serving model's transformations again.
+                if let Some(entries) = value
+                    .get("input_transformations")
+                    .or_else(|| value.pointer("/delta/input_transformations"))
+                {
+                    self.reasoning_transformations = reasoning_transformations(entries);
+                }
                 Ok(())
             }
             "message_stop" => {
@@ -538,6 +551,8 @@ impl State {
                     map_stop(self.stop.as_deref()),
                 );
                 finish.response_metadata = std::mem::take(&mut self.response_metadata);
+                finish.reasoning_transformations =
+                    std::mem::take(&mut self.reasoning_transformations);
                 if self.policy != ReplayPolicy::Never {
                     let content = std::mem::take(&mut self.native)
                         .into_values()
@@ -797,6 +812,42 @@ fn map_stop(reason: Option<&str>) -> FinishReason {
         None => FinishReason::Unknown,
         Some(other) => FinishReason::Other(other.into()),
     }
+}
+
+/// The most `input_transformations` entries kept from one response.
+const MAX_REASONING_TRANSFORMATIONS: usize = 1024;
+
+/// Reads `input_transformations`. Entries of a type this adapter does not
+/// know, or with a path or reason that is not a short string, are skipped:
+/// the API adds types and reasons over time.
+fn reasoning_transformations(entries: &JsonValue) -> Vec<oven_sdk::ReasoningTransformation> {
+    let short = |entry: &JsonValue, key: &str| {
+        entry
+            .get(key)
+            .and_then(JsonValue::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= 256)
+            .map(str::to_owned)
+    };
+    entries
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let kind = match entry.get("type").and_then(JsonValue::as_str)? {
+                "thinking_dropped" => oven_sdk::ReasoningTransformationKind::Dropped,
+                "thinking_mismatch_allowed" => {
+                    oven_sdk::ReasoningTransformationKind::MismatchAllowed
+                }
+                _ => return None,
+            };
+            Some(oven_sdk::ReasoningTransformation {
+                kind,
+                path: short(entry, "path")?,
+                reason: short(entry, "reason")?,
+            })
+        })
+        .take(MAX_REASONING_TRANSFORMATIONS)
+        .collect()
 }
 
 #[cfg(test)]

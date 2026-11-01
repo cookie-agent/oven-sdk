@@ -23,6 +23,7 @@ fn capabilities(features: Capability) -> ModelCapabilities {
             policy: ReplayPolicy::Never,
             capability: ReplayCapability::Unsupported,
             reasoning: false,
+            reasoning_binding: Default::default(),
         },
     }
 }
@@ -228,6 +229,7 @@ fn capability_declarations_reject_dependency_mismatches() {
         policy: ReplayPolicy::Never,
         capability: ReplayCapability::Required,
         reasoning: true,
+        reasoning_binding: Default::default(),
     };
     assert!(declared.validate().is_err());
 }
@@ -260,6 +262,7 @@ fn replay_policy_capability_matrix_is_complete() {
                 policy,
                 capability,
                 reasoning: false,
+                reasoning_binding: Default::default(),
             };
             let expected_valid = matches!(
                 (policy, capability),

@@ -33,6 +33,7 @@ fn capabilities(features: Capability) -> ModelCapabilities {
             policy: ReplayPolicy::IfValid,
             capability: ReplayCapability::Optional,
             reasoning: false,
+            reasoning_binding: Default::default(),
         },
     }
 }

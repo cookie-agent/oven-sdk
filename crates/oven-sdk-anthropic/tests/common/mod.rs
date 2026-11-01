@@ -186,6 +186,7 @@ fn replay(policy: ReplayPolicy, reasoning: bool) -> ReplayDeclaration {
             policy,
             capability: ReplayCapability::Unsupported,
             reasoning: false,
+            reasoning_binding: Default::default(),
         }
     } else {
         ReplayDeclaration {
@@ -196,6 +197,7 @@ fn replay(policy: ReplayPolicy, reasoning: bool) -> ReplayDeclaration {
                 ReplayCapability::Optional
             },
             reasoning,
+            reasoning_binding: Default::default(),
         }
     }
 }

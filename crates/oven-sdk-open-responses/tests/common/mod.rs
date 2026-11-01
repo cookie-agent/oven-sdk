@@ -58,6 +58,7 @@ pub fn capabilities(include_pdf: bool) -> ModelCapabilities {
             policy: ReplayPolicy::IfValid,
             capability: ReplayCapability::Optional,
             reasoning: false,
+            reasoning_binding: Default::default(),
         },
     }
 }

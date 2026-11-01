@@ -43,6 +43,7 @@ pub fn capabilities() -> ModelCapabilities {
             policy: ReplayPolicy::IfValid,
             capability: ReplayCapability::Optional,
             reasoning: true,
+            reasoning_binding: Default::default(),
         },
     }
 }

@@ -232,6 +232,7 @@ async fn encrypted_reasoning_requires_equal_known_wire_id_and_preserves_standard
                 policy: oven_sdk::ReplayPolicy::Never,
                 capability: oven_sdk::ReplayCapability::Unsupported,
                 reasoning: false,
+                reasoning_binding: Default::default(),
             };
         }
         let target = OpenAiResponsesModel::new_compatible(

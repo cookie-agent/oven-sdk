@@ -2241,6 +2241,7 @@ mod tests {
                 policy: ReplayPolicy::IfValid,
                 capability: ReplayCapability::Optional,
                 reasoning: true,
+                reasoning_binding: Default::default(),
             },
         }
     }

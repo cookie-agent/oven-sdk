@@ -62,6 +62,8 @@ pub(crate) fn classify_error_for(
         || (protocol == Protocol::MiniMax && matches!(code, "1004" | "2049"))
     {
         ModelError::new(ModelErrorKind::Auth, message)
+    } else if status == 400 && lower.contains(REASONING_PREFIX_MISMATCH) {
+        ModelError::new(ModelErrorKind::ReasoningPrefixMismatch, message)
     } else if status == 403 || lower.contains("permission") {
         ModelError::new(ModelErrorKind::PermissionDenied, message)
     } else if has_model_code(&value)
@@ -121,6 +123,12 @@ pub(crate) fn classify_error_for(
     }
     error
 }
+
+/// The sentence of Anthropic's refusal of a replayed thinking block whose
+/// request prefix changed: `Invalid `signature` in `thinking` block. The block
+/// is bound to a different conversation.` A signature that failed to verify on
+/// its own stops before it, and stays an invalid request.
+pub(crate) const REASONING_PREFIX_MISMATCH: &str = "bound to a different conversation";
 
 fn safe_identifier(value: &str) -> Option<String> {
     (!value.is_empty()

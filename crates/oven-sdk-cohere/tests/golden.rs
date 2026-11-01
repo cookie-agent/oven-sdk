@@ -574,6 +574,7 @@ async fn golden_replay_policy_never_reconstructs_normalized_history() {
         policy: ReplayPolicy::Never,
         capability: ReplayCapability::Unsupported,
         reasoning: false,
+        reasoning_binding: Default::default(),
     };
     let model = common::model_with(&server, MODEL, capabilities, CohereSettings::default());
     let (artifact, fingerprint) = replay(json!({

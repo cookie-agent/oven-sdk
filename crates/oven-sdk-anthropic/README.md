@@ -235,6 +235,34 @@ when the caller declares native replay support. Signature values, including an
 empty string, are preserved. Because the native artifact schema always includes
 `signature`, an absent signature delta is represented as `"signature": ""`.
 
+### Reasoning bound to its prefix
+
+Recent Claude models accept a replayed thinking block only while the `system`
+prompt, the `tools`, and every message before it are unchanged since the
+block was made. A caller declares this with
+`ReplayDeclaration::reasoning_binding = ReasoningBinding::Prefix`; the default
+is `None`, which suits Anthropic-compatible endpoints.
+
+- **The refusal** (HTTP 400 whose message says the block *is bound to a
+  different conversation*) is classified as
+  `ModelErrorKind::ReasoningPrefixMismatch`, on every Messages protocol and on
+  Bedrock. A signature that failed to verify on its own stays
+  `InvalidRequest`. The adapter does not retry; resending without the earlier
+  reasoning succeeds.
+- **`drop_block`:** on direct Anthropic and Claude Platform on AWS, a
+  `Prefix` model with adaptive thinking is sent
+  `thinking.block_binding.prefix_mismatch_behavior: "drop_block"` and the
+  `thinking-binding-controls-2026-08-01` beta, so the API drops a stale block
+  and every later one instead of refusing. Anthropic accepts the control only
+  with adaptive thinking, so it is never sent with extended or disabled
+  thinking. A model whose protocol settings think adaptively by default is
+  sent `{"type": "adaptive"}` explicitly to carry it.
+- **`input_transformations`** from `message_start`, or from the final
+  `message_delta` after a server-side fallback, are reported on
+  `Finish::reasoning_transformations`: `Dropped` for `thinking_dropped` and
+  `MismatchAllowed` for `thinking_mismatch_allowed`, each with its path and
+  reason. Entries of other types are skipped.
+
 ## Provider-native compaction
 
 Direct and compatible Anthropic Messages, MiniMax Messages compatibility, and

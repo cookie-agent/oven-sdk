@@ -108,6 +108,15 @@ pub(crate) struct Thinking<'a> {
     pub(crate) budget_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) display: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) block_binding: Option<BlockBinding>,
+}
+
+/// `thinking.block_binding`, under the `thinking-binding-controls-2026-08-01`
+/// beta.
+#[derive(Serialize)]
+pub(crate) struct BlockBinding {
+    pub(crate) prefix_mismatch_behavior: &'static str,
 }
 
 #[derive(Serialize)]

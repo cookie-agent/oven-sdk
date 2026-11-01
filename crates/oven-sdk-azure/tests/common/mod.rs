@@ -249,6 +249,7 @@ pub fn gpt4o() -> ModelSetup {
         policy: ReplayPolicy::IfValid,
         capability: ReplayCapability::Optional,
         reasoning: false,
+        reasoning_binding: Default::default(),
     };
     setup.completions.stream_usage = true;
     setup.completions.structured_output = AzureStructuredOutputSupport::JsonSchema;
@@ -279,6 +280,7 @@ pub fn gpt5() -> ModelSetup {
         policy: ReplayPolicy::Always,
         capability: ReplayCapability::Required,
         reasoning: true,
+        reasoning_binding: Default::default(),
     };
     setup.completions.system_role = AzureSystemMessageRole::Developer;
     setup.completions.max_tokens_field = AzureMaxTokensField::MaxCompletionTokens;
@@ -294,6 +296,7 @@ pub fn gpt5_chat() -> ModelSetup {
         policy: ReplayPolicy::IfValid,
         capability: ReplayCapability::Optional,
         reasoning: false,
+        reasoning_binding: Default::default(),
     };
     setup
 }

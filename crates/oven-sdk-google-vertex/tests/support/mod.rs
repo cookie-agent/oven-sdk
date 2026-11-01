@@ -187,6 +187,7 @@ pub fn full_capabilities(partial_args: bool) -> ModelCapabilities {
             policy: ReplayPolicy::IfValid,
             capability: ReplayCapability::Required,
             reasoning: true,
+            reasoning_binding: Default::default(),
         },
     }
 }

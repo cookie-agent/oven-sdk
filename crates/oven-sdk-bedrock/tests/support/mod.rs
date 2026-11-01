@@ -82,16 +82,19 @@ fn declaration(
             policy: ReplayPolicy::IfValid,
             capability: ReplayCapability::Required,
             reasoning: true,
+            reasoning_binding: Default::default(),
         },
         FixtureKind::UnsignedReasoning => ReplayDeclaration {
             policy: ReplayPolicy::IfValid,
             capability: ReplayCapability::Optional,
             reasoning: true,
+            reasoning_binding: Default::default(),
         },
         FixtureKind::Text | FixtureKind::MediaTools => ReplayDeclaration {
             policy: ReplayPolicy::IfValid,
             capability: ReplayCapability::Optional,
             reasoning: false,
+            reasoning_binding: Default::default(),
         },
     };
     let mut capabilities = ModelCapabilities {

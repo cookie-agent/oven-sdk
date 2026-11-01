@@ -19,6 +19,7 @@ fn capabilities(deferred_tools: DeferredToolsCapability) -> ModelCapabilities {
             policy: ReplayPolicy::Never,
             capability: ReplayCapability::Unsupported,
             reasoning: false,
+            reasoning_binding: Default::default(),
         },
     }
 }
