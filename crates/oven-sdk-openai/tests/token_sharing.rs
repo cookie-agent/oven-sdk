@@ -173,6 +173,29 @@ async fn a_401_for_a_refused_operation_is_not_a_token_problem() {
 }
 
 #[tokio::test]
+async fn a_refusal_reports_the_request_id_token_sharing_sends() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .insert_header("x-oai-request-id", "req_oai")
+                .set_body_raw(
+                    r#"{"error":{"code":"subscription_sharing_user_not_eligible","message":"The ChatGPT user is not eligible for subscription sharing.","param":null,"type":"invalid_request_error"}}"#,
+                    "application/json",
+                ),
+        )
+        .mount(&server)
+        .await;
+    let error = model(&server, Rotating::new(vec!["token"]))
+        .complete(Request::new(vec![]), AbortSignal::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ModelErrorKind::PermissionDenied);
+    assert_eq!(error.diagnostics.request_id.as_deref(), Some("req_oai"));
+}
+
+#[tokio::test]
 async fn replay_is_bound_to_the_account_not_to_the_token() {
     let server = MockServer::start().await;
     for bearer in ["one", "two"] {

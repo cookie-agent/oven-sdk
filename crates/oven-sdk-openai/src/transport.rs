@@ -94,8 +94,10 @@ pub(crate) fn response_head(
 }
 
 pub(crate) fn request_id(headers: &HeaderMap, configured: &[String]) -> Option<String> {
-    std::iter::once("x-request-id")
-        .chain(std::iter::once("request-id"))
+    // ChatGPT token sharing answers with `x-oai-request-id` and no
+    // `x-request-id`.
+    ["x-request-id", "request-id", "x-oai-request-id"]
+        .into_iter()
         .chain(configured.iter().map(String::as_str))
         .find_map(|name| headers.get(name)?.to_str().ok().map(str::to_owned))
 }
