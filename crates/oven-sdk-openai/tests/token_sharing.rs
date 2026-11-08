@@ -195,6 +195,47 @@ async fn a_refusal_reports_the_request_id_token_sharing_sends() {
     assert_eq!(error.diagnostics.request_id.as_deref(), Some("req_oai"));
 }
 
+/// Token sharing streams SSE without a Content-Type header (observed
+/// 2026-11-08 against `api.openai.com`).
+#[tokio::test]
+async fn a_stream_without_a_content_type_is_read_as_sse() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(common::responses_document("ok").into_bytes()),
+        )
+        .mount(&server)
+        .await;
+    let turn = model(&server, Rotating::new(vec!["token"]))
+        .complete(Request::new(vec![]), AbortSignal::default())
+        .await
+        .unwrap()
+        .turn;
+    assert!(matches!(
+        turn.message.content.as_slice(),
+        [oven_sdk::AssistantPart::Text(text)] if text.text == "ok"
+    ));
+}
+
+#[tokio::test]
+async fn a_success_declaring_another_content_type_is_refused() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(common::responses_document("ok"), "text/html"),
+        )
+        .mount(&server)
+        .await;
+    let error = model(&server, Rotating::new(vec!["token"]))
+        .complete(Request::new(vec![]), AbortSignal::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ModelErrorKind::InvalidResponse);
+}
+
 #[tokio::test]
 async fn replay_is_bound_to_the_account_not_to_the_token() {
     let server = MockServer::start().await;

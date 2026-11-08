@@ -442,11 +442,16 @@ impl LanguageModel for OpenAiResponsesModel {
                 )
                 .await?;
             let response_headers = response.headers().clone();
-            if !response
+            // ChatGPT token sharing streams SSE with no Content-Type at all
+            // (observed 2026-11-08), so only a declared other type is refused.
+            if response
                 .headers()
                 .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| value.starts_with("text/event-stream"))
+                .is_some_and(|value| {
+                    !value
+                        .to_str()
+                        .is_ok_and(|value| value.starts_with("text/event-stream"))
+                })
             {
                 return Err(ModelError::invalid_response(
                     "OpenAI Responses response is not an SSE content type",
